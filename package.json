@@ -1,0 +1,32 @@
+{
+  "name": "shopify-mcp",
+  "version": "1.0.0",
+  "description": "A Node.js utility for connecting Shopify with MCP (Model Context Protocol) to handle requests, responses, and server integration.",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "node server.js",
+    "build": "echo \"There is nothing to build\""
+  },
+  "keywords": [
+    "shopify",
+    "mcp",
+    "integration",
+    "api",
+    "server",
+    "chatbot"
+  ],
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.4",
+    "axios": "^1.11.0",
+    "compromise": "^14.15.0",
+    "cors": "^2.8.6",
+    "date-fns": "^4.1.0",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "https": "^1.0.0",
+    "nodemailer": "^7.0.5",
+    "zod": "^3.25.76"
+  }
+}
