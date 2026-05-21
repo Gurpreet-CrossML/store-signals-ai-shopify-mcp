@@ -2444,7 +2444,8 @@ server.tool(
       const formattedProducts = formatProducts(
         results.map((node) => ({ node })),
         session_id,
-        store_code
+        store_code,
+        true
       );
 
       return {
