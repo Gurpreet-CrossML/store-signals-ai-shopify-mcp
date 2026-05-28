@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
-const { StreamableHTTPServerTransport } = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
+const {
+  StreamableHTTPServerTransport,
+} = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const { z } = require("zod");
 const axios = require("axios");
 const dotenv = require("dotenv");
@@ -8,8 +10,6 @@ const express = require("express");
 const https = require("https");
 const nodemailer = require("nodemailer");
 const cors = require("cors");
-const nlp = require("compromise");
-
 
 // Load environment variables from .env file
 dotenv.config();
@@ -25,14 +25,16 @@ const ZENDESK_API_URL = process.env.ZENDESK_API_URL;
 const ZENDESK_USERNAME = process.env.ZENDESK_USERNAME;
 const ZENDESK_PASSWORD = process.env.ZENDESK_PASSWORD;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL 
+const OPENAI_MODEL = process.env.OPENAI_MODEL;
 // Validate environment variables
 if (!SHOPIFY_BASE_URL) {
   console.error("ERROR: SHOPIFY_BASE_URL environment variable is required");
   process.exit(1);
 }
 if (!SHOPIFY_STOREFRONT_API_TOKEN) {
-  console.error("ERROR: SHOPIFY_STOREFRONT_API_TOKEN environment variable is required");
+  console.error(
+    "ERROR: SHOPIFY_STOREFRONT_API_TOKEN environment variable is required",
+  );
   process.exit(1);
 }
 if (!SHOPIFY_ACCESS_TOKEN) {
@@ -97,17 +99,24 @@ const server = new McpServer({
 });
 
 // Call Shopify APIs
-async function callShopifyApi(method = "GET", endpoint="", data = null, isAdmin=false) {
+async function callShopifyApi(
+  method = "GET",
+  endpoint = "",
+  data = null,
+  isAdmin = false,
+) {
   try {
-    let url = isAdmin ? `${SHOPIFY_BASE_URL}/admin/api/2025-10/graphql.json` : `${SHOPIFY_BASE_URL}/api/2025-01/graphql.json`;
-    if (endpoint){
+    let url = isAdmin
+      ? `${SHOPIFY_BASE_URL}/admin/api/2025-10/graphql.json`
+      : `${SHOPIFY_BASE_URL}/api/2025-01/graphql.json`;
+    if (endpoint) {
       url = `${SHOPIFY_BASE_URL}${endpoint}`;
     }
     console.log(`Calling Shopify API: ${method} ${url}`);
     const headers = {
       "Content-Type": "application/json",
       "X-Shopify-Storefront-Access-Token": SHOPIFY_STOREFRONT_API_TOKEN,
-      "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+      "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
     };
 
     const config = {
@@ -125,7 +134,10 @@ async function callShopifyApi(method = "GET", endpoint="", data = null, isAdmin=
     const response = await axios(config);
     return response.data;
   } catch (error) {
-    console.error("Shopify API Error:", error?.response?.data || error.message || error?.errors);
+    console.error(
+      "Shopify API Error:",
+      error?.response?.data || error.message || error?.errors,
+    );
     throw error;
   }
 }
@@ -142,7 +154,7 @@ const getVariantDiscount = (variant) => {
       original_price: compare,
       discounted_price: price,
       discount_percentage: Math.round(discount),
-      savings: compare - price
+      savings: compare - price,
     };
   }
 
@@ -159,9 +171,13 @@ const getCurrencySymbol = (code) => {
 };
 
 // Format product data
-const formatProducts = (products, session_id, store_code, full_details=false) => {
+const formatProducts = (
+  products,
+  session_id,
+  store_code,
+  full_details = false,
+) => {
   return products.map(({ node }) => {
-
     const productId = node.id.split("/").pop();
     const productName = node.title;
     const productCategory = node?.category?.name;
@@ -192,7 +208,8 @@ const formatProducts = (products, session_id, store_code, full_details=false) =>
     return {
       ...baseProduct,
       image: node.images?.edges?.[0]?.node?.url || null,
-      product_url: node.onlineStoreUrl || `${SHOPIFY_BASE_URL}/products/${node?.handle}`,
+      product_url:
+        node.onlineStoreUrl || `${SHOPIFY_BASE_URL}/products/${node?.handle}`,
       variants: node.variants?.edges?.map(({ node: v }) => {
         const discount = getVariantDiscount(v);
 
@@ -202,7 +219,7 @@ const formatProducts = (products, session_id, store_code, full_details=false) =>
 
           price: {
             amount: `${getCurrencySymbol(v.priceV2?.currencyCode)}${v.priceV2?.amount || 0}`,
-            currency: v.priceV2?.currencyCode || null
+            currency: v.priceV2?.currencyCode || null,
           },
 
           compare_at_price: v.compareAtPriceV2?.amount
@@ -212,15 +229,16 @@ const formatProducts = (products, session_id, store_code, full_details=false) =>
           discount: discount,
 
           available_for_sale: v.availableForSale,
-          options: v.selectedOptions
+          options: v.selectedOptions,
         };
-      })
+      }),
     };
   });
 };
 
 const getCancelStatus = (o) => {
-  if (o.cancelled_at) return { allowed: false, reason: "Order already cancelled" };
+  if (o.cancelled_at)
+    return { allowed: false, reason: "Order already cancelled" };
 
   if (["fulfilled", "shipped"].includes(o.fulfillment_status)) {
     return { allowed: false, reason: "Order already shipped" };
@@ -286,19 +304,18 @@ const formatOrder = (o) => {
       line_item_id: item.id,
       product_id: item.product_id,
       variant_id: item.variant_id,
-      line_item_id: item.id,
       name: item.name,
       quantity: item.quantity,
       price: `${getCurrencySymbol(o.presentment_currency)}${item.price || 0}`,
-    }))
+    })),
   };
 
   return formattedOrder;
 };
 
 // Helper function to call the backend api
-const callBackendAPI = async (method, endpoint, data={}) =>{
-  try{
+const callBackendAPI = async (method, endpoint, data = {}) => {
+  try {
     const url = `${BACKEND_API_URL}${endpoint}`;
     console.log("Backend api calling:", url);
 
@@ -311,8 +328,7 @@ const callBackendAPI = async (method, endpoint, data={}) =>{
 
     const response = await axios(config);
     return response?.data?.data;
-  }
-  catch(err){
+  } catch (err) {
     console.error("Error calling backend API, error:", err?.response?.data);
     return null;
   }
@@ -321,8 +337,8 @@ const callBackendAPI = async (method, endpoint, data={}) =>{
 // Fetch products metadata
 const productsMetadata = async () => {
   try {
-    const graphqlQuery = {query:
-      `query {
+    const graphqlQuery = {
+      query: `query {
         productTags(first: 250) {
           edges {
             node
@@ -352,10 +368,10 @@ const productsMetadata = async () => {
             }
           }
         }
-      }`
+      }`,
     };
 
-    const result = await callShopifyApi("POST", "", graphqlQuery)
+    const result = await callShopifyApi("POST", "", graphqlQuery);
 
     if (result.errors) {
       return {
@@ -373,17 +389,15 @@ const productsMetadata = async () => {
       result?.data?.productTypes?.edges?.map((item) => item?.node) || [];
 
     const collections =
-      result?.data?.collections?.edges?.map(
-        (item) => item?.node?.title
-      ) || [];
+      result?.data?.collections?.edges?.map((item) => item?.node?.title) || [];
 
     const categories = [
       ...new Set(
         (
           result?.data?.products?.edges?.map(
-            (item) => item?.node?.category?.name
+            (item) => item?.node?.category?.name,
           ) || []
-        ).filter(Boolean)
+        ).filter(Boolean),
       ),
     ];
 
@@ -449,7 +463,7 @@ Return format: ["query1", "query2", "query3"]`;
           Authorization: `Bearer ${OPENAI_API_KEY}`,
         },
         timeout: 10000,
-      }
+      },
     );
 
     const content = response?.data?.choices?.[0]?.message?.content?.trim();
@@ -462,7 +476,6 @@ Return format: ["query1", "query2", "query3"]`;
       .filter((q) => typeof q === "string" && q.trim().length > 0)
       .map((q) => q.trim().toLowerCase())
       .slice(0, 4);
-
   } catch (error) {
     console.error("extractSearchTerms Error:", error);
     return [];
@@ -482,19 +495,21 @@ const getAppliesTo = (discount) => {
     case "DiscountProducts":
       return {
         type: "products",
-        products: items.products?.edges?.map(e => ({
-          // id: e.node.id.split("/").pop(),
-          title: e.node.title
-        })) || []
+        products:
+          items.products?.edges?.map((e) => ({
+            // id: e.node.id.split("/").pop(),
+            title: e.node.title,
+          })) || [],
       };
 
     case "DiscountCollections":
       return {
         type: "collections",
-        collections: items.collections?.edges?.map(e => ({
-          // id: e.node.id.split("/").pop(),
-          title: e.node.title
-        })) || []
+        collections:
+          items.collections?.edges?.map((e) => ({
+            // id: e.node.id.split("/").pop(),
+            title: e.node.title,
+          })) || [],
       };
 
     default:
@@ -508,20 +523,21 @@ const getDiscountValue = (discount) => {
   if (!value) return null;
 
   switch (value.__typename) {
-    case "DiscountPercentage":
+    case "DiscountPercentage": {
       const percentage = value.percentage * 100;
       return {
         type: "percentage",
         value: percentage,
-        label: `${percentage}% OFF`
+        label: `${percentage}% OFF`,
       };
+    }
 
     case "DiscountAmount":
       return {
         type: "fixed",
         value: parseFloat(value.amount?.amount || 0),
         currency: value.amount?.currencyCode,
-        label: `₹${value.amount?.amount} OFF`
+        label: `₹${value.amount?.amount} OFF`,
       };
 
     default:
@@ -535,11 +551,13 @@ const formatDiscounts = (discounts) => {
 
   const now = Date.now();
 
-  const validDiscounts = discounts.filter(d => {
+  const validDiscounts = discounts.filter((d) => {
     const discount = d?.node?.discount;
     if (!discount) return false;
 
-    const startsAt = discount.startsAt ? new Date(discount.startsAt).getTime() : null;
+    const startsAt = discount.startsAt
+      ? new Date(discount.startsAt).getTime()
+      : null;
     const endsAt = discount.endsAt ? new Date(discount.endsAt).getTime() : null;
 
     if (startsAt && startsAt > now) return false;
@@ -548,18 +566,16 @@ const formatDiscounts = (discounts) => {
     return true;
   });
 
-  return validDiscounts.map(d => {
+  return validDiscounts.map((d) => {
     const discount = d.node.discount;
-    const id = d.node.id.split("/").pop();
     const type = discount.__typename;
 
-    const code =
-      discount.codes?.edges?.[0]?.node?.code || null;
+    const code = discount.codes?.edges?.[0]?.node?.code || null;
 
     const appliesTo = getAppliesTo(discount);
 
     let normalizedType = "unknown";
-    let description = "";
+    let description;
 
     switch (type) {
       case "DiscountCodeBasic":
@@ -590,7 +606,7 @@ const formatDiscounts = (discounts) => {
 
     // Improve description based on applicability
     if (appliesTo.type === "collections" && appliesTo.collections.length) {
-      description += ` (Valid on ${appliesTo.collections.map(c => c.title).join(", ")})`;
+      description += ` (Valid on ${appliesTo.collections.map((c) => c.title).join(", ")})`;
     }
 
     if (appliesTo.type === "products" && appliesTo.products.length) {
@@ -606,14 +622,14 @@ const formatDiscounts = (discounts) => {
       description,
       isAutomatic: type !== "DiscountCodeBasic",
       appliesTo,
-      discountValue
+      discountValue,
     };
   });
 };
 
 // Fetch related products using product id
 const fetchRelatedProducts = async (product_id) => {
-  try{
+  try {
     if (!product_id) return [];
 
     const graphqlQuery = {
@@ -623,19 +639,14 @@ const fetchRelatedProducts = async (product_id) => {
         }
       }`,
       variables: {
-        productId: `gid://shopify/Product/${product_id}`
-      }
+        productId: `gid://shopify/Product/${product_id}`,
+      },
     };
 
     // Call Shopify API
-    const searchResponse = await callShopifyApi(
-      "POST",
-      "",
-      graphqlQuery
-    );
+    const searchResponse = await callShopifyApi("POST", "", graphqlQuery);
 
-    const recommendations =
-      searchResponse?.data?.productRecommendations || [];
+    const recommendations = searchResponse?.data?.productRecommendations || [];
 
     if (!recommendations.length) {
       return [];
@@ -643,16 +654,63 @@ const fetchRelatedProducts = async (product_id) => {
 
     // Extract clean product IDs
     const productIds = recommendations.map((product) =>
-      product.id.replace("gid://shopify/Product/", "")
+      product.id.replace("gid://shopify/Product/", ""),
     );
 
     return productIds.slice(0, 4);
-  }
-  catch(error){
+  } catch (error) {
     console.log("Related product search getting error, Error:", error);
     return [];
   }
-}
+};
+
+// Sorting options
+const SortOption = Object.freeze({
+  RELEVANCE: "relevance",
+  PRICE_ASC: "price_asc",
+  PRICE_DESC: "price_desc",
+  NEWEST: "newest",
+  BEST_SELLING: "best_selling",
+});
+
+// Mapping of sorting options to Shopify sort keys and order
+const SHOPIFY_SORT_MAPPING = {
+  [SortOption.RELEVANCE]: {
+    sortKey: "RELEVANCE",
+    reverse: false,
+  },
+
+  [SortOption.PRICE_ASC]: {
+    sortKey: "PRICE",
+    reverse: false,
+  },
+
+  [SortOption.PRICE_DESC]: {
+    sortKey: "PRICE",
+    reverse: true,
+  },
+
+  [SortOption.NEWEST]: {
+    sortKey: "CREATED_AT",
+    reverse: true,
+  },
+
+  [SortOption.BEST_SELLING]: {
+    sortKey: "BEST_SELLING",
+    reverse: false,
+  },
+};
+
+// Helper to get Shopify sort arguments based on user-friendly sort key
+const getProductSortArgs = (sortKey) => {
+  if (!sortKey)
+    return `, sortKey: ${SHOPIFY_SORT_MAPPING.relevance.sortKey}, reverse: ${SHOPIFY_SORT_MAPPING.relevance.reverse}`;
+
+  const normalizedKey = String(sortKey).toLowerCase();
+  const mapping = SHOPIFY_SORT_MAPPING[normalizedKey];
+  if (!mapping) return "";
+  return `, sortKey: ${mapping.sortKey}, reverse: ${mapping.reverse}`;
+};
 
 // Tool 1: Search products
 server.tool(
@@ -669,30 +727,35 @@ server.tool(
   `,
   {
     query: z
-    .string()
-    .describe("Search query (product name, description, etc.)"),
-    session_id: z
       .string()
-      .describe("Session ID"),
-    store_code: z
-      .string()
-      .describe("Store name/code"),
+      .describe("Search query (product name, description, etc.)"),
+    session_id: z.string().describe("Session ID"),
+    store_code: z.string().describe("Store name/code"),
     is_single: z
-    .boolean()
-    .optional()
-    .describe("Whether to return a single product or multiple products"),
+      .boolean()
+      .optional()
+      .describe("Whether to return a single product or multiple products"),
     full_details: z
       .boolean()
       .optional()
-      .describe("Whether to return full product details including variants, images, and URLs. Defaults to false."),
+      .describe(
+        "Whether to return full product details including variants, images, and URLs. Defaults to false.",
+      ),
   },
-  async ({ query, session_id, store_code, is_single = false, full_details = false }) => {
+  async ({
+    query,
+    session_id,
+    store_code,
+    is_single = false,
+    full_details = false,
+  }) => {
     try {
       if (!query?.includes("gid://shopify/Product/")) {
         is_single = false;
       }
 
-      const productFields = full_details ? `
+      const productFields = full_details
+        ? `
         id 
         title
         handle 
@@ -744,7 +807,7 @@ server.tool(
             }
           }
         }`
-  : `
+        : `
         id 
         title
         category {
@@ -760,8 +823,8 @@ server.tool(
         availableForSale`;
 
       const graphqlQuery = {
-        query: is_single?
-        `query getProductById($search: ID!) {
+        query: is_single
+          ? `query getProductById($search: ID!) {
               product(id: $search) {
                 ${productFields}
               }
@@ -776,15 +839,15 @@ server.tool(
               }
             }
             `,
-        variables: { 
-          search: query
-         }
+        variables: {
+          search: query,
+        },
       };
 
       // Call Shopify API to search products
       const searchResponse = await callShopifyApi("POST", "", graphqlQuery);
 
-      if (!searchResponse?.data?.products?.edges && !is_single){
+      if (!searchResponse?.data?.products?.edges && !is_single) {
         return {
           content: [
             {
@@ -796,7 +859,7 @@ server.tool(
         };
       }
 
-      if (is_single && !searchResponse?.data?.product){
+      if (is_single && !searchResponse?.data?.product) {
         return {
           content: [
             {
@@ -809,10 +872,12 @@ server.tool(
       }
 
       const formattedProducts = formatProducts(
-        !is_single ? searchResponse.data.products.edges : [{ node: searchResponse.data.product }],
+        !is_single
+          ? searchResponse.data.products.edges
+          : [{ node: searchResponse.data.product }],
         session_id,
         store_code,
-        full_details
+        full_details,
       );
 
       // BUILD FINAL RESPONSE
@@ -820,12 +885,14 @@ server.tool(
         products: formattedProducts,
       };
 
-      if (result?.products?.length === 0){
+      if (result?.products?.length === 0) {
         // Retry with keywords
         const keywords = await extractSearchTerms(query);
-        console.log(`No products found for this query "${query}", retrying with keywords - [${keywords}]...`);
+        console.log(
+          `No products found for this query "${query}", retrying with keywords - [${keywords}]...`,
+        );
 
-        for (q of keywords){
+        for (let q of keywords) {
           const gQuery = {
             query: `query getProducts($search: String!) {
               products(first: 5, query: $search) {
@@ -838,53 +905,48 @@ server.tool(
             }
             `,
             variables: {
-              search: q
-            }
+              search: q,
+            },
           };
 
           const searchResponse = await callShopifyApi("POST", "", gQuery);
 
-          if (searchResponse?.data?.products?.edges){
+          if (searchResponse?.data?.products?.edges) {
             const formattedProducts = formatProducts(
               searchResponse.data.products.edges,
               session_id,
               store_code,
-              full_details
+              full_details,
             );
 
             result.products = formattedProducts;
             break;
           }
         }
-      };
+      }
 
       // Fetch related products
-      if (result?.products && result?.products?.length > 0){
+      if (result?.products && result?.products?.length > 0) {
         // Existing product IDs
-        const existingProductIds = result.products.map((p) =>
-          String(p.id)
-        );
+        const existingProductIds = result.products.map((p) => String(p.id));
 
-        for (p of result?.products){
+        for (let p of result.products) {
           console.log("Fetching related products for ID:", p.id);
 
           const relatedProducts = await fetchRelatedProducts(p.id);
 
-          console.log(
-            `Related products for ${p.id}:`,
-            relatedProducts
-          );
+          console.log(`Related products for ${p.id}:`, relatedProducts);
 
-          if (relatedProducts && relatedProducts?.length > 0){
+          if (relatedProducts && relatedProducts?.length > 0) {
             // Remove:
             // 1. duplicate IDs
             // 2. IDs already present in products
             const cleanedRelatedProducts = [
               ...new Set(
                 relatedProducts.filter(
-                  (id) => !existingProductIds.includes(String(id))
-                )
-              )
+                  (id) => !existingProductIds.includes(String(id)),
+                ),
+              ),
             ];
 
             if (cleanedRelatedProducts.length > 0) {
@@ -914,7 +976,7 @@ server.tool(
         isError: true,
       };
     }
-  }
+  },
 );
 
 // UTILITY FUNCTIONS (Moved outside the tool for reusability)
@@ -996,11 +1058,21 @@ const getRelevanceScore = (product, dims) => {
   const title = (product.title || "").toLowerCase();
 
   // Good for small spaces
-  if (title.includes("table") || title.includes("side") || title.includes("stool")) score += 3;
+  if (
+    title.includes("table") ||
+    title.includes("side") ||
+    title.includes("stool")
+  )
+    score += 3;
   if (title.includes("wall") || title.includes("shelf")) score += 4;
 
   // Bad for small spaces
-  if (title.includes("sofa") || title.includes("bed") || title.includes("wardrobe")) score -= 5;
+  if (
+    title.includes("sofa") ||
+    title.includes("bed") ||
+    title.includes("wardrobe")
+  )
+    score -= 5;
   if (title.includes("sideboard")) score -= 3;
 
   // Dimension-based scoring
@@ -1020,17 +1092,19 @@ const getRelevanceScore = (product, dims) => {
  * @returns {Object|null} - { widthCm, lengthCm, isValid } or null if invalid
  */
 const parseSpaceInput = (space) => {
-  if (!space || typeof space !== 'object') {
-    console.warn('Invalid space object:', space);
+  if (!space || typeof space !== "object") {
+    console.warn("Invalid space object:", space);
     return null;
   }
 
-  const width = typeof space.width === 'number' ? space.width : parseFloat(space.width);
-  const length = typeof space.length === 'number' ? space.length : parseFloat(space.length);
+  const width =
+    typeof space.width === "number" ? space.width : parseFloat(space.width);
+  const length =
+    typeof space.length === "number" ? space.length : parseFloat(space.length);
   const unit = space.unit?.toLowerCase();
 
   if (isNaN(width) || isNaN(length) || !unit) {
-    console.warn('Invalid dimensions in space:', space);
+    console.warn("Invalid dimensions in space:", space);
     return null;
   }
 
@@ -1041,7 +1115,7 @@ const parseSpaceInput = (space) => {
     widthCm,
     lengthCm,
     isValid: true,
-    original: { width, length, unit }
+    original: { width, length, unit },
   };
 };
 
@@ -1063,29 +1137,33 @@ server.tool(
         onlineStoreUrl: z.string().optional(),
         priceRange: z.any().optional(),
         variants: z.any().optional(),
-        images: z.any().optional()
-      })
+        images: z.any().optional(),
+      }),
     ),
     space: z.object({
       width: z.number(),
       length: z.number(),
-      unit: z.string().describe("cm | m | ft | inch")
+      unit: z.string().describe("cm | m | ft | inch"),
     }),
-    session_id: z.string()
   },
-  
-  async ({ products, space, session_id }) => {
+
+  async ({ products, space }) => {
     try {
       // Parse and validate space input
       const parsedSpace = parseSpaceInput(space);
-      
+
       if (!parsedSpace) {
-        console.warn('filter_products_by_space called with invalid space:', space);
+        console.warn(
+          "filter_products_by_space called with invalid space:",
+          space,
+        );
         return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({ products: products.slice(0, 5) }, null, 2),
-          }],
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ products: products.slice(0, 5) }, null, 2),
+            },
+          ],
         };
       }
 
@@ -1111,8 +1189,10 @@ server.tool(
 
           // Check if product fits within tolerance (~30%)
           const toleranceFits =
-            (dims.length <= spaceLengthCm * 1.3 && dims.width <= spaceWidthCm * 1.3) ||
-            (dims.width <= spaceLengthCm * 1.3 && dims.length <= spaceWidthCm * 1.3);
+            (dims.length <= spaceLengthCm * 1.3 &&
+              dims.width <= spaceWidthCm * 1.3) ||
+            (dims.width <= spaceLengthCm * 1.3 &&
+              dims.length <= spaceWidthCm * 1.3);
 
           if (fits) fitType = "fit";
           else if (toleranceFits) fitType = "near";
@@ -1124,7 +1204,7 @@ server.tool(
         scoredProducts.push({
           product,
           score,
-          fitType
+          fitType,
         });
       }
 
@@ -1139,7 +1219,7 @@ server.tool(
 
           return b.score - a.score;
         })
-        .map(p => p.product);
+        .map((p) => p.product);
 
       // Return top 5 products (or fallback to top 3 if none passed filters)
       let finalProducts = sortedProducts.slice(0, 5);
@@ -1156,7 +1236,6 @@ server.tool(
           },
         ],
       };
-
     } catch (error) {
       return {
         content: [
@@ -1168,7 +1247,7 @@ server.tool(
         isError: true,
       };
     }
-  }
+  },
 );
 
 // Tool 2: Get order details
@@ -1184,23 +1263,26 @@ server.tool(
   @param {string} customer_id - Customer ID
   `,
   {
-    email: z
-      .string()
-      .describe("Order email (e.g. 'test@example.com')"),
-    order_id: z
-      .string()
-      .describe("Order ID (e.g. '1026')"),
+    email: z.string().describe("Order email (e.g. 'test@example.com')"),
+    order_id: z.string().describe("Order ID (e.g. '1026')"),
     session_id: z.string().describe("Session identifier"),
     customer_id: z.string().describe("Customer ID"),
   },
-  async ({ email, order_id, session_id, customer_id="" }) => {
-    if (!customer_id){
-      const verificationStatus = await callBackendAPI("POST", "/chat/email/verify-status/", {"thread_id": session_id, "email": email});
+  async ({ email, order_id, session_id, customer_id = "" }) => {
+    if (!customer_id) {
+      const verificationStatus = await callBackendAPI(
+        "POST",
+        "/chat/email/verify-status/",
+        { thread_id: session_id, email: email },
+      );
 
-      if (!verificationStatus && !verificationStatus?.is_verified){
+      if (!verificationStatus && !verificationStatus?.is_verified) {
         return {
           content: [
-            { type: "text", text: "Please verify your email before accessing order details." },
+            {
+              type: "text",
+              text: "Please verify your email before accessing order details.",
+            },
           ],
           isError: true,
         };
@@ -1214,7 +1296,7 @@ server.tool(
       );
 
       // No orders
-      if (!response || !Array.isArray(response.orders)){
+      if (!response || !Array.isArray(response.orders)) {
         return {
           content: [
             {
@@ -1228,7 +1310,7 @@ server.tool(
 
       const orders = response?.orders;
 
-      const currentOrder = orders.find(o => o?.order_number == order_id);
+      const currentOrder = orders.find((o) => o?.order_number == order_id);
 
       if (!currentOrder) {
         return {
@@ -1263,7 +1345,7 @@ server.tool(
         isError: true,
       };
     }
-  }
+  },
 );
 
 // Tool 3: Cart Details
@@ -1284,18 +1366,13 @@ server.tool(
       .string()
       .startsWith("gid://shopify/Cart/")
       .describe("Shopify Storefront Cart ID"),
-    session_id: z
-      .string()
-      .describe("Session ID"),
-    store_code: z
-      .string()
-      .describe("Store name/code"),
+    session_id: z.string().describe("Session ID"),
+    store_code: z.string().describe("Store name/code"),
   },
   async ({ cart_id, session_id, store_code }) => {
     try {
       const graphqlQuery = {
-        query:
-        `query getCart($cartId: ID!) {
+        query: `query getCart($cartId: ID!) {
           cart(id: $cartId) {
             id
             checkoutUrl
@@ -1338,19 +1415,19 @@ server.tool(
           }
         }`,
         variables: {
-          cartId: cart_id
-        }
+          cartId: cart_id,
+        },
       };
 
-      const response = await callShopifyApi(
-        "POST",
-        "",
-        graphqlQuery,
-      );
+      const response = await callShopifyApi("POST", "", graphqlQuery);
 
       const cart = response?.data?.cart;
 
-      callBackendAPI("POST", "/chat/bot-events/", {"thread_id": session_id, "event_type": "checkout_link", store_code: store_code});
+      callBackendAPI("POST", "/chat/bot-events/", {
+        thread_id: session_id,
+        event_type: "checkout_link",
+        store_code: store_code,
+      });
 
       if (!cart) {
         return {
@@ -1379,14 +1456,18 @@ server.tool(
         content: [
           {
             type: "text",
-            text: JSON.stringify({
-              cartID: cart.id,
-              items,
-              subtotal: `${getCurrencySymbol(cart.cost.subtotalAmount?.currencyCode)}${cart.cost.subtotalAmount?.amount || 0}`,
-              tax: `${getCurrencySymbol(cart.cost.totalTaxAmount?.currencyCode)}${cart.cost.totalTaxAmount?.amount || 0}`,
-              total: `${getCurrencySymbol(cart.cost.totalAmount?.currencyCode)}${cart.cost.totalAmount?.amount || 0}`,
-              checkoutUrl: cart.checkoutUrl,
-            }, null, 2),
+            text: JSON.stringify(
+              {
+                cartID: cart.id,
+                items,
+                subtotal: `${getCurrencySymbol(cart.cost.subtotalAmount?.currencyCode)}${cart.cost.subtotalAmount?.amount || 0}`,
+                tax: `${getCurrencySymbol(cart.cost.totalTaxAmount?.currencyCode)}${cart.cost.totalTaxAmount?.amount || 0}`,
+                total: `${getCurrencySymbol(cart.cost.totalAmount?.currencyCode)}${cart.cost.totalAmount?.amount || 0}`,
+                checkoutUrl: cart.checkoutUrl,
+              },
+              null,
+              2,
+            ),
           },
         ],
       };
@@ -1402,7 +1483,7 @@ server.tool(
         isError: true,
       };
     }
-  }
+  },
 );
 
 // Tool 4: Add to cart
@@ -1422,20 +1503,10 @@ server.tool(
     variant_id: z
       .string()
       .describe("Shopify ProductVariant ID (gid://shopify/ProductVariant/...)"),
-    quantity: z
-      .number()
-      .min(1)
-      .describe("Quantity to add"),
-    session_id: z
-      .string()
-      .describe("Session ID"),
-    cart_id: z
-      .string()
-      .optional()
-      .describe("Existing cart ID (optional)"),
-    store_code: z
-      .string()
-      .describe("Store name/code"),
+    quantity: z.number().min(1).describe("Quantity to add"),
+    session_id: z.string().describe("Session ID"),
+    cart_id: z.string().optional().describe("Existing cart ID (optional)"),
+    store_code: z.string().describe("Store name/code"),
   },
   async ({ variant_id, quantity, session_id, cart_id, store_code }) => {
     try {
@@ -1455,7 +1526,7 @@ server.tool(
                 }
               }
             }
-          `
+          `,
         };
 
         const createCartResponse = await callShopifyApi(
@@ -1520,31 +1591,27 @@ server.tool(
           lines: [
             {
               merchandiseId: variant_id,
-              quantity
-            }
-          ]
-        }
+              quantity,
+            },
+          ],
+        },
       };
 
-      const addResponse = await callShopifyApi(
-        "POST",
-        "",
-        addToCartQuery,
-      );
+      const addResponse = await callShopifyApi("POST", "", addToCartQuery);
 
       const cart = addResponse?.data?.cartLinesAdd?.cart;
       const errors = addResponse?.data?.cartLinesAdd?.userErrors || [];
 
       if (!cart) {
         return {
-            content: [
-              {
-                type: "text",
-                text: "Failed to add item to cart",
-              },
-            ],
-            isError: true,
-          };
+          content: [
+            {
+              type: "text",
+              text: "Failed to add item to cart",
+            },
+          ],
+          isError: true,
+        };
       }
 
       /* --------------------------------------------------
@@ -1558,13 +1625,15 @@ server.tool(
           variant_id: node.merchandise.id,
           title: node.merchandise.title,
           quantity: node.quantity,
-          price: `${getCurrencySymbol(node?.merchandise?.price?.currencyCode)}${node?.merchandise?.price?.amount || 0}`
-        }))
+          price: `${getCurrencySymbol(node?.merchandise?.price?.currencyCode)}${node?.merchandise?.price?.amount || 0}`,
+        })),
       };
 
-      const addedItem = formattedCart.items.find(i => i.variant_id === variant_id);
-
-      callBackendAPI("POST", "/chat/bot-events/", {"thread_id": session_id, "event_type": "add_to_cart", store_code: store_code});
+      callBackendAPI("POST", "/chat/bot-events/", {
+        thread_id: session_id,
+        event_type: "add_to_cart",
+        store_code: store_code,
+      });
 
       return {
         content: [
@@ -1573,26 +1642,26 @@ server.tool(
             text: JSON.stringify(
               {
                 cart: formattedCart,
-                userErrors: errors
+                userErrors: errors,
               },
               null,
-              2
-            )
-          }
-        ]
+              2,
+            ),
+          },
+        ],
       };
     } catch (error) {
       return {
         content: [
           {
             type: "text",
-            text: `Error adding to cart: ${error.message}`
-          }
+            text: `Error adding to cart: ${error.message}`,
+          },
         ],
-        isError: true
+        isError: true,
       };
     }
-  }
+  },
 );
 
 // Tool 5: Update cart item quantity
@@ -1604,15 +1673,13 @@ server.tool(
   @param {string} cart_id: Shopify Cart ID
   @param {string} cart_line_id: CartLine ID
   @param {number} quantity: New quantity
-  @param {string} session_id: Session ID
   `,
   {
     cart_id: z.string().describe("Shopify Cart ID"),
     cart_line_id: z.string().describe("CartLine ID"),
     quantity: z.number().min(1).describe("New quantity"),
-    session_id: z.string().describe("Session ID"),
   },
-  async ({ cart_id, cart_line_id, quantity, session_id }) => {
+  async ({ cart_id, cart_line_id, quantity }) => {
     try {
       const graphqlQuery = {
         query: `
@@ -1655,38 +1722,34 @@ server.tool(
           lines: [
             {
               id: cart_line_id,
-              quantity
-            }
-          ]
-        }
+              quantity,
+            },
+          ],
+        },
       };
 
-      const response = await callShopifyApi(
-        "POST",
-        "",
-        graphqlQuery,
-      );
+      const response = await callShopifyApi("POST", "", graphqlQuery);
 
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(response.data.cartLinesUpdate, null, 2)
-          }
-        ]
+            text: JSON.stringify(response.data.cartLinesUpdate, null, 2),
+          },
+        ],
       };
     } catch (error) {
       return {
         content: [
           {
             type: "text",
-            text: `Error updating cart item: ${error.message}`
-          }
+            text: `Error updating cart item: ${error.message}`,
+          },
         ],
-        isError: true
+        isError: true,
       };
     }
-  }
+  },
 );
 
 // Tool 6: Remove item from cart
@@ -1697,14 +1760,12 @@ server.tool(
   Parameters:
   @param {string} cart_id: Shopify Cart ID
   @param {string} cart_line_id: CartLine ID to remove
-  @param {string} session_id: Session ID
   `,
   {
     cart_id: z.string().describe("Shopify Cart ID"),
     cart_line_id: z.string().describe("CartLine ID"),
-    session_id: z.string().describe("Session ID"),
   },
-  async ({ cart_id, cart_line_id, session_id }) => {
+  async ({ cart_id, cart_line_id }) => {
     try {
       const graphqlQuery = {
         query: `
@@ -1739,36 +1800,32 @@ server.tool(
         `,
         variables: {
           cartId: cart_id,
-          lineIds: [cart_line_id]
-        }
+          lineIds: [cart_line_id],
+        },
       };
 
-      const response = await callShopifyApi(
-        "POST",
-        "",
-        graphqlQuery,
-      );
+      const response = await callShopifyApi("POST", "", graphqlQuery);
 
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(response.data.cartLinesRemove, null, 2)
-          }
-        ]
+            text: JSON.stringify(response.data.cartLinesRemove, null, 2),
+          },
+        ],
       };
     } catch (error) {
       return {
         content: [
           {
             type: "text",
-            text: `Error removing cart item: ${error.message}`
-          }
+            text: `Error removing cart item: ${error.message}`,
+          },
         ],
-        isError: true
+        isError: true,
       };
     }
-  }
+  },
 );
 
 // Tool 7: Send OTP
@@ -1787,12 +1844,14 @@ server.tool(
   },
   async ({ email, session_id }) => {
     try {
-      const verificationStatus = await callBackendAPI("POST", "/chat/email/verify-status/", {"thread_id": session_id, "email": email});
-      if (verificationStatus && verificationStatus?.is_verified){
+      const verificationStatus = await callBackendAPI(
+        "POST",
+        "/chat/email/verify-status/",
+        { thread_id: session_id, email: email },
+      );
+      if (verificationStatus && verificationStatus?.is_verified) {
         return {
-          content: [
-            { type: "text", text: "Your email is already verified." },
-          ],
+          content: [{ type: "text", text: "Your email is already verified." }],
           isError: false,
         };
       }
@@ -1800,25 +1859,30 @@ server.tool(
       // Check customer existence (Admin API only)
       const customerResponse = await callShopifyApi(
         "GET",
-        `/admin/api/2024-01/customers/search.json?query=email:${encodeURIComponent(email)}`
+        `/admin/api/2024-01/customers/search.json?query=email:${encodeURIComponent(email)}`,
       );
 
       // Prevent email enumeration
-      if (!customerResponse?.customers?.length || customerResponse?.customers?.length === 0) {
+      if (
+        !customerResponse?.customers?.length ||
+        customerResponse?.customers?.length === 0
+      ) {
         return {
           content: [
             {
               type: "text",
-              text:
-                "No account found with this email.",
+              text: "No account found with this email.",
             },
           ],
         };
       }
 
-      const otpResponse = await callBackendAPI("POST", "/chat/otp/generate/", {"thread_id": session_id, "email": email});
+      const otpResponse = await callBackendAPI("POST", "/chat/otp/generate/", {
+        thread_id: session_id,
+        email: email,
+      });
 
-      if (!otpResponse || !otpResponse?.otp){
+      if (!otpResponse || !otpResponse?.otp) {
         return {
           content: [
             { type: "text", text: "Failed to send otp, please try again." },
@@ -1854,7 +1918,7 @@ server.tool(
         isError: true,
       };
     }
-  }
+  },
 );
 
 // Tool 8: Verify OTP
@@ -1875,11 +1939,15 @@ server.tool(
   async ({ email, otp_code, session_id }) => {
     try {
       const payload = {
-        "thread_id": session_id,
-        "email": email,
-        "otp": otp_code
-      }
-      const verificationResponse = await callBackendAPI("POST", "/chat/otp/verify/", payload);
+        thread_id: session_id,
+        email: email,
+        otp: otp_code,
+      };
+      const verificationResponse = await callBackendAPI(
+        "POST",
+        "/chat/otp/verify/",
+        payload,
+      );
 
       if (!verificationResponse || !verificationResponse?.is_verified) {
         return {
@@ -1891,9 +1959,7 @@ server.tool(
       }
 
       return {
-        content: [
-          { type: "text", text: "Verification successful." },
-        ],
+        content: [{ type: "text", text: "Verification successful." }],
         verified: true,
       };
     } catch (error) {
@@ -1905,7 +1971,7 @@ server.tool(
         isError: true,
       };
     }
-  }
+  },
 );
 
 // Tool 9: Order Cancellation
@@ -1922,17 +1988,28 @@ server.tool(
   {
     email: z.string().email().describe("User email"),
     order_id: z.string().describe("Order ID (e.g. '1026')"),
-    cancel_reason: z.string().max(255).optional().describe("Reason for cancellation"),
+    cancel_reason: z
+      .string()
+      .max(255)
+      .optional()
+      .describe("Reason for cancellation"),
     session_id: z.string().describe("Session identifier"),
   },
   async ({ email, order_id, cancel_reason, session_id }) => {
     try {
       const record = sessionStore.get(session_id);
 
-      if (!record || !record.emails.includes(email) || Date.now() > record.expires) {
+      if (
+        !record ||
+        !record.emails.includes(email) ||
+        Date.now() > record.expires
+      ) {
         return {
           content: [
-            { type: "text", text: "Invalid or expired session. Please verify email with otp verification." },
+            {
+              type: "text",
+              text: "Invalid or expired session. Please verify email with otp verification.",
+            },
           ],
           isError: true,
         };
@@ -1954,16 +2031,11 @@ server.tool(
           }
         `,
         variables: {
-          query: order_query
-        }
+          query: order_query,
+        },
       };
 
-      const response = await callShopifyApi(
-        "POST",
-        "",
-        graphqlQuery,
-        true
-      );
+      const response = await callShopifyApi("POST", "", graphqlQuery, true);
 
       const edge = response?.data?.orders?.edges?.[0];
 
@@ -2002,17 +2074,14 @@ server.tool(
         {
           reason: cancel_reason || "customer",
         },
-        true
+        true,
       );
 
-      if (cancelResponse?.order?.cancelled_at){
+      if (cancelResponse?.order?.cancelled_at) {
         return {
-          content: [
-            { type: "text", text: "Order cancelled successfully." },
-          ],
+          content: [{ type: "text", text: "Order cancelled successfully." }],
         };
-      }
-      else{
+      } else {
         return {
           content: [
             {
@@ -2032,7 +2101,7 @@ server.tool(
         isError: true,
       };
     }
-  }
+  },
 );
 
 // Tool 10: Order Return
@@ -2050,12 +2119,15 @@ server.tool(
   {
     email: z.string().email().describe("User email"),
     order_id: z.string().describe("Order ID (e.g. '1033')"),
-    return_items: z.array(
-      z.object({
-        line_item_id: z.string().describe("Shopify line item ID"),
-        quantity: z.number().min(1).describe("Quantity to return"),
-      })
-    ).min(1).describe("Items to return"),
+    return_items: z
+      .array(
+        z.object({
+          line_item_id: z.string().describe("Shopify line item ID"),
+          quantity: z.number().min(1).describe("Quantity to return"),
+        }),
+      )
+      .min(1)
+      .describe("Items to return"),
     return_reason: z.string().max(255).optional().describe("Reason for return"),
     session_id: z.string().describe("Session identifier"),
   },
@@ -2064,10 +2136,17 @@ server.tool(
       /* -------------------- Session validation -------------------- */
       const record = sessionStore.get(session_id);
 
-      if (!record || !record.emails.includes(email) || Date.now() > record.expires) {
+      if (
+        !record ||
+        !record.emails.includes(email) ||
+        Date.now() > record.expires
+      ) {
         return {
           content: [
-            { type: "text", text: "Invalid or expired session. Please verify your email again." },
+            {
+              type: "text",
+              text: "Invalid or expired session. Please verify your email again.",
+            },
           ],
           isError: true,
         };
@@ -2114,7 +2193,7 @@ server.tool(
             }
           }
         `,
-        variables: { query: order_query }
+        variables: { query: order_query },
       };
 
       const response = await callShopifyApi("POST", "", graphqlQuery, true);
@@ -2122,7 +2201,9 @@ server.tool(
 
       if (!edge) {
         return {
-          content: [{ type: "text", text: "No order found for the given identifier." }],
+          content: [
+            { type: "text", text: "No order found for the given identifier." },
+          ],
           isError: true,
         };
       }
@@ -2134,7 +2215,12 @@ server.tool(
       // Already cancelled
       if (order.cancelledAt) {
         return {
-          content: [{ type: "text", text: "This order has already been cancelled and cannot be returned." }],
+          content: [
+            {
+              type: "text",
+              text: "This order has already been cancelled and cannot be returned.",
+            },
+          ],
           isError: true,
         };
       }
@@ -2153,23 +2239,33 @@ server.tool(
       }
 
       /* -------------------- Validate return items -------------------- */
-      const validLineItems = order.lineItems.edges.map(e => e.node);
+      const validLineItems = order.lineItems.edges.map((e) => e.node);
 
       for (const item of return_items) {
         const li = validLineItems.find(
-          l => String(l.id) === String(item.line_item_id)
+          (l) => String(l.id) === String(item.line_item_id),
         );
 
         if (!li) {
           return {
-            content: [{ type: "text", text: "One or more selected items are invalid for return." }],
+            content: [
+              {
+                type: "text",
+                text: "One or more selected items are invalid for return.",
+              },
+            ],
             isError: true,
           };
         }
 
         if (item.quantity > li.quantity) {
           return {
-            content: [{ type: "text", text: "Return quantity exceeds purchased quantity." }],
+            content: [
+              {
+                type: "text",
+                text: "Return quantity exceeds purchased quantity.",
+              },
+            ],
             isError: true,
           };
         }
@@ -2193,7 +2289,7 @@ server.tool(
         variables: {
           input: {
             orderId: order.id,
-            returnLineItems: return_items.map(item => ({
+            returnLineItems: return_items.map((item) => ({
               lineItemId: item.line_item_id,
               quantity: item.quantity,
             })),
@@ -2202,7 +2298,12 @@ server.tool(
         },
       };
 
-      const returnResponse = await callShopifyApi("POST", "", returnMutation, true);
+      const returnResponse = await callShopifyApi(
+        "POST",
+        "",
+        returnMutation,
+        true,
+      );
       const errors = returnResponse?.data?.returnCreate?.userErrors;
 
       if (errors && errors.length > 0) {
@@ -2223,11 +2324,16 @@ server.tool(
     } catch (error) {
       console.error("Order return error:", error);
       return {
-        content: [{ type: "text", text: "Unable to create return at the moment. Please try again later." }],
+        content: [
+          {
+            type: "text",
+            text: "Unable to create return at the moment. Please try again later.",
+          },
+        ],
         isError: true,
       };
     }
-  }
+  },
 );
 
 // Tool 11: Create Support Ticket
@@ -2272,12 +2378,12 @@ server.tool(
       // Search existing user
       const searchResponse = await axios.get(
         `${ZENDESK_API_URL}/users/search.json?query=${encodeURIComponent(email)}`,
-        authConfig
+        authConfig,
       );
 
       if (searchResponse?.data?.users?.length > 0) {
         requesterId = searchResponse.data.users[0].id;
-      };
+      }
 
       // Create user if not found
       if (!requesterId) {
@@ -2289,7 +2395,7 @@ server.tool(
               email: email,
             },
           },
-          authConfig
+          authConfig,
         );
 
         requesterId = userResponse?.data?.user?.id;
@@ -2297,9 +2403,7 @@ server.tool(
 
       if (!requesterId) {
         return {
-          content: [
-            { type: "text", text: "Unable to create requester user." },
-          ],
+          content: [{ type: "text", text: "Unable to create requester user." }],
           isError: true,
         };
       }
@@ -2317,27 +2421,25 @@ server.tool(
             priority: "normal",
           },
         },
-        authConfig
+        authConfig,
       );
 
       const ticketId = ticketResponse?.data?.ticket?.id;
 
       if (!ticketId) {
         return {
-          content: [
-            { type: "text", text: "Failed to create support ticket." },
-          ],
+          content: [{ type: "text", text: "Failed to create support ticket." }],
           isError: true,
         };
       }
 
       const payload = {
-        "requester_id": requesterId,
-        "subject": subject,
-        "description": description,
-        "thread_id": session_id,
-        "store_code": store_code,
-        "ticket_id": ticketId,
+        requester_id: requesterId,
+        subject: subject,
+        description: description,
+        thread_id: session_id,
+        store_code: store_code,
+        ticket_id: ticketId,
       };
       callBackendAPI("POST", "/support/threads/session_id/tickets/", payload);
 
@@ -2352,11 +2454,16 @@ server.tool(
       };
     } catch (error) {
       return {
-        content: [{ type: "text", text: `Error creating support ticket: ${error.message}` }],
+        content: [
+          {
+            type: "text",
+            text: `Error creating support ticket: ${error.message}`,
+          },
+        ],
         isError: true,
       };
     }
-  }
+  },
 );
 // Tool 12: Get products by ID or IDs
 server.tool(
@@ -2378,7 +2485,7 @@ server.tool(
       .min(1)
       .describe(
         "One or more product IDs. Accepts plain numeric IDs ('123456789') " +
-        "or full GIDs ('gid://shopify/Product/123456789')."
+          "or full GIDs ('gid://shopify/Product/123456789').",
       ),
     session_id: z.string().describe("Session ID"),
     store_code: z.string().describe("Store name/code"),
@@ -2386,13 +2493,15 @@ server.tool(
   async ({ product_ids, session_id, store_code }) => {
     try {
       // Deduplicate + normalise to full GID
-      const gids = [...new Set(
-        product_ids.map((id) =>
-          id.startsWith("gid://shopify/Product/")
-            ? id
-            : `gid://shopify/Product/${id}`
-        )
-      )];
+      const gids = [
+        ...new Set(
+          product_ids.map((id) =>
+            id.startsWith("gid://shopify/Product/")
+              ? id
+              : `gid://shopify/Product/${id}`,
+          ),
+        ),
+      ];
 
       const singleProductQuery = (gid) => ({
         query: `query getProductById($id: ID!) {
@@ -2418,8 +2527,9 @@ server.tool(
       });
 
       const fetchOne = (gid) =>
-        callShopifyApi("POST", "", singleProductQuery(gid))
-          .then((res) => res?.data?.product ?? null);
+        callShopifyApi("POST", "", singleProductQuery(gid)).then(
+          (res) => res?.data?.product ?? null,
+        );
 
       const CHUNK = 5;
       const results = [];
@@ -2436,7 +2546,9 @@ server.tool(
 
       if (results.length === 0) {
         return {
-          content: [{ type: "text", text: "No products found for the provided IDs." }],
+          content: [
+            { type: "text", text: "No products found for the provided IDs." },
+          ],
           isError: true,
         };
       }
@@ -2445,25 +2557,36 @@ server.tool(
         results.map((node) => ({ node })),
         session_id,
         store_code,
-        true
+        true,
       );
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            products: formattedProducts,
-            ...(missing.length > 0 && { missing_ids: missing }),
-          }, null, 2),
-        }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                products: formattedProducts,
+                ...(missing.length > 0 && { missing_ids: missing }),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
       };
     } catch (error) {
       return {
-        content: [{ type: "text", text: `Error fetching products by ID: ${error.message}` }],
+        content: [
+          {
+            type: "text",
+            text: `Error fetching products by ID: ${error.message}`,
+          },
+        ],
         isError: true,
       };
     }
-  }
+  },
 );
 
 // Tool 13: List available discounts
@@ -2472,8 +2595,7 @@ server.tool(
   `List all available discounts from the store.
   Returns active discount codes, automatic discounts (price rules), and their details.
   `,
-  {
-  },
+  {},
   async () => {
     try {
       const graphqlQuery = {
@@ -2665,17 +2787,22 @@ server.tool(
                     }
                   }
                 }
-              }`
+              }`,
       };
 
       const response = await callShopifyApi("POST", "", graphqlQuery, true);
 
-      if (!response?.data?.discountNodes?.edges || response?.data?.discountNodes?.edges?.length < 1) {
+      if (
+        !response?.data?.discountNodes?.edges ||
+        response?.data?.discountNodes?.edges?.length < 1
+      ) {
         return {
-          content: [{
-            type: "text",
-            text: "No discounts found.",
-          }],
+          content: [
+            {
+              type: "text",
+              text: "No discounts found.",
+            },
+          ],
         };
       }
 
@@ -2683,10 +2810,12 @@ server.tool(
 
       if (discounts.length === 0) {
         return {
-          content: [{
-            type: "text",
-            text: "No discounts found.",
-          }],
+          content: [
+            {
+              type: "text",
+              text: "No discounts found.",
+            },
+          ],
         };
       }
 
@@ -2694,22 +2823,33 @@ server.tool(
       discounts.sort((a, b) => new Date(b.ends_at) - new Date(a.ends_at));
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            total: discounts.length,
-            discounts: discounts,
-          }, null, 2),
-        }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                total: discounts.length,
+                discounts: discounts,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
       };
     } catch (error) {
       console.error("Error fetching discounts:", error);
       return {
-        content: [{ type: "text", text: `Error fetching available discounts: ${error.message}` }],
+        content: [
+          {
+            type: "text",
+            text: `Error fetching available discounts: ${error.message}`,
+          },
+        ],
         isError: true,
       };
     }
-  }
+  },
 );
 
 // Tool 14: Get store metadata info
@@ -2741,7 +2881,84 @@ server.tool(
         isError: true,
       };
     }
-  }
+  },
+);
+
+// Tool 15: Get products sorted by Shopify's sort options (relevance, price, newest, etc.)
+server.tool(
+  "get_products_sorted",
+  `Fetch up to 5 products, sorted by Shopify sort options. Supported sort keys: relevance, price_asc, price_desc, newest, best_selling.
+
+  Parameters:
+  @param {string} session_id: Session ID
+  @param {string} store_code: Store name or code
+  @param {string} [sort_key]: Sort key. Supported values: relevance, price_asc, price_desc, newest, best_selling, featured.
+  `,
+  {
+    session_id: z.string().describe("Session ID"),
+    store_code: z.string().describe("Store name/code"),
+    sort_key: z.string().describe("Sort key for the product list"),
+  },
+  async ({ session_id, store_code, sort_key }) => {
+    try {
+      const sortArgs = getProductSortArgs(sort_key);
+
+      const graphqlQuery = {
+        query: `query getProducts($first: Int!) {
+          products(first: $first${sortArgs}) {
+            edges {
+              node {
+                id
+                title
+                category {
+                  name
+                }
+                priceRange {
+                  minVariantPrice {
+                    amount
+                    currencyCode
+                  }
+                }
+                description
+                availableForSale
+              }
+            }
+          }
+        }`,
+        variables: {
+          first: 5,
+        },
+      };
+
+      const response = await callShopifyApi("POST", "", graphqlQuery);
+      const products = response?.data?.products?.edges || [];
+      const formattedProducts = formatProducts(
+        products,
+        session_id,
+        store_code,
+        false,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ products: formattedProducts }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching sorted products: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
 );
 
 // Create an Express app to handle HTTP requests
@@ -2751,12 +2968,13 @@ const app = express();
 app.use(express.json());
 
 // allow origins
-app.use(cors({
-  origin: "*",
-  methods: ["POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type"]
-}));
-
+app.use(
+  cors({
+    origin: "*",
+    methods: ["POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type"],
+  }),
+);
 
 /* 
 Handle Post requests to the MCP endpoint
@@ -2802,7 +3020,7 @@ app.get("/mcp", async (req, res) => {
         message: "Method not allowed.",
       },
       id: null,
-    })
+    }),
   );
 });
 
@@ -2816,7 +3034,7 @@ app.delete("/mcp", async (req, res) => {
         message: "Method not allowed.",
       },
       id: null,
-    })
+    }),
   );
 });
 

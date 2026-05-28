@@ -4,6 +4,10 @@
   "description": "A Node.js utility for connecting Shopify with MCP (Model Context Protocol) to handle requests, responses, and server integration.",
   "main": "server.js",
   "scripts": {
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier . --check",
+    "format:fix": "prettier . --write",
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "node server.js",
     "build": "echo \"There is nothing to build\""
@@ -26,7 +30,15 @@
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "https": "^1.0.0",
+    "lint": "^1.2.2",
     "nodemailer": "^7.0.5",
     "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.4.0",
+    "globals": "^17.6.0",
+    "prettier": "^3.8.3",
+    "typescript": "^6.0.3"
   }
 }
