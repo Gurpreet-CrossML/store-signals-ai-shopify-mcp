@@ -654,6 +654,54 @@ const fetchRelatedProducts = async (product_id) => {
   }
 }
 
+// Sorting options
+const SortOption = Object.freeze({
+  RELEVANCE: "relevance",
+  PRICE_ASC: "price_asc",
+  PRICE_DESC: "price_desc",
+  NEWEST: "newest",
+  BEST_SELLING: "best_selling",
+});
+
+// Mapping of sorting options to Shopify sort keys and order
+const SHOPIFY_SORT_MAPPING = {
+  [SortOption.RELEVANCE]: {
+    sortKey: "RELEVANCE",
+    reverse: false,
+  },
+
+  [SortOption.PRICE_ASC]: {
+    sortKey: "PRICE",
+    reverse: false,
+  },
+
+  [SortOption.PRICE_DESC]: {
+    sortKey: "PRICE",
+    reverse: true,
+  },
+
+  [SortOption.NEWEST]: {
+    sortKey: "CREATED_AT",
+    reverse: true,
+  },
+
+  [SortOption.BEST_SELLING]: {
+    sortKey: "BEST_SELLING",
+    reverse: false,
+  },
+};
+
+// Helper to get Shopify sort arguments based on user-friendly sort key
+const getProductSortArgs = (sortKey) => {
+  if (!sortKey) return `, sortKey: ${SHOPIFY_SORT_MAPPING.relevance.sortKey}, reverse: ${SHOPIFY_SORT_MAPPING.relevance.reverse}`;
+
+  const normalizedKey = String(sortKey).toLowerCase();
+  const mapping = SHOPIFY_SORT_MAPPING[normalizedKey];
+  if (!mapping) return "";
+  return `, sortKey: ${mapping.sortKey}, reverse: ${mapping.reverse}`;
+};
+
+
 // Tool 1: Search products
 server.tool(
   "search_products",
@@ -2736,6 +2784,78 @@ server.tool(
           {
             type: "text",
             text: `Error fetching store metadata: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool 15: Get products sorted by Shopify's sort options (relevance, price, newest, etc.)
+server.tool(
+  "get_products_sorted",
+  `Fetch up to 5 products, sorted by Shopify sort options. Supported sort keys: relevance, price_asc, price_desc, newest, best_selling.
+
+  Parameters:
+  @param {string} session_id: Session ID
+  @param {string} store_code: Store name or code
+  @param {string} [sort_key]: Sort key. Supported values: relevance, price_asc, price_desc, newest, best_selling, featured.
+  `,
+  {
+    session_id: z.string().describe("Session ID"),
+    store_code: z.string().describe("Store name/code"),
+    sort_key: z.string().describe("Sort key for the product list"),
+  },
+  async ({ session_id, store_code, sort_key }) => {
+    try {
+      const sortArgs = getProductSortArgs(sort_key);
+
+      const graphqlQuery = {
+        query: `query getProducts($first: Int!) {
+          products(first: $first${sortArgs}) {
+            edges {
+              node {
+                id
+                title
+                category {
+                  name
+                }
+                priceRange {
+                  minVariantPrice {
+                    amount
+                    currencyCode
+                  }
+                }
+                description
+                availableForSale
+              }
+            }
+          }
+        }`,
+        variables: {
+          first: 5,
+        },
+      };
+
+      const response = await callShopifyApi("POST", "", graphqlQuery);
+      const products = response?.data?.products?.edges || [];
+      const formattedProducts = formatProducts(products, session_id, store_code, false);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ products: formattedProducts }, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching sorted products: ${error.message}`,
           },
         ],
         isError: true,
