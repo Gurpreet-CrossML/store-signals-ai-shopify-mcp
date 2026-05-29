@@ -10,6 +10,7 @@ const express = require("express");
 const https = require("https");
 const nodemailer = require("nodemailer");
 const cors = require("cors");
+const SemanticCache = require("./semantic-cache");
 
 // Load environment variables from .env file
 dotenv.config();
@@ -26,6 +27,7 @@ const ZENDESK_USERNAME = process.env.ZENDESK_USERNAME;
 const ZENDESK_PASSWORD = process.env.ZENDESK_PASSWORD;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL;
+
 // Validate environment variables
 if (!SHOPIFY_BASE_URL) {
   console.error("ERROR: SHOPIFY_BASE_URL environment variable is required");
@@ -73,6 +75,32 @@ if (!OPENAI_MODEL) {
   console.error("ERROR: OPENAI_MODEL environment variable is required");
   process.exit(1);
 }
+
+// ─── Semantic Cache Store ──────────────────────────────────────────────────
+// One cache instance per logical cache type.
+// Tune TTL and threshold via env vars so you can adjust without code changes.
+const CACHE_TYPES = {
+  PRODUCT_SEARCH: "product_search",
+  STORE_METADATA: "store_metadata",
+};
+
+const cacheStore = {
+  [CACHE_TYPES.PRODUCT_SEARCH]: new SemanticCache({
+    openaiApiKey: OPENAI_API_KEY,
+    model: OPENAI_MODEL,                                          // fast + cheap for similarity checks
+    ttlMs: Number(process.env.CACHE_TTL_MS) || 30 * 60 * 1000,     // default 30 min
+    similarityThreshold: Number(process.env.CACHE_SIMILARITY_THRESHOLD) || 0.82,
+    maxEntries: Number(process.env.CACHE_MAX_ENTRIES) || 200,
+  }),
+  [CACHE_TYPES.STORE_METADATA]: new SemanticCache({
+    openaiApiKey: OPENAI_API_KEY,
+    model: OPENAI_MODEL,
+    ttlMs: Number(process.env.CACHE_TTL_MS) || 30 * 60 * 1000,
+    similarityThreshold: Number(process.env.CACHE_SIMILARITY_THRESHOLD) || 0.82,
+    maxEntries: Number(process.env.CACHE_MAX_ENTRIES) || 200,
+  }),
+};
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Memory store for sessions
 const sessionStore = new Map();
@@ -337,6 +365,12 @@ const callBackendAPI = async (method, endpoint, data = {}) => {
 // Fetch products metadata
 const productsMetadata = async () => {
   try {
+    const cacheKey = "store_metadata";
+    const cachedMetadata = await getCacheResults(cacheKey, CACHE_TYPES.STORE_METADATA);
+    if (cachedMetadata) {
+      return cachedMetadata;
+    }
+
     const graphqlQuery = {
       query: `query {
         productTags(first: 250) {
@@ -401,12 +435,23 @@ const productsMetadata = async () => {
       ),
     ];
 
-    return {
+    const metadata = {
       tags,
       types,
       collections,
       categories,
     };
+
+    try {
+      cacheStore[CACHE_TYPES.STORE_METADATA].set(cacheKey, {
+        cache_type: CACHE_TYPES.STORE_METADATA,
+        result: metadata,
+      });
+    } catch (e) {
+      console.warn("productsMetadata cache set failed:", e?.message || e);
+    }
+
+    return metadata;
   } catch (error) {
     console.error("productsMetadata Error:", error);
 
@@ -712,6 +757,47 @@ const getProductSortArgs = (sortKey) => {
   return `, sortKey: ${mapping.sortKey}, reverse: ${mapping.reverse}`;
 };
 
+// Helper to get cached results based on cache key and type
+const getCacheResults = async (cache_key, cache_type, session_id = null, store_code = null, full_details = false) => {
+  try {
+    console.log(`[Cache Lookup] Key: "${cache_key}", Type: "${cache_type}"`);
+    const cache = cacheStore[cache_type];
+    if (!cache) return null;
+
+    const cached = await cache.get(cache_key);
+    console.log(`[Cache Lookup] Result for key "${cache_key}":`, cached ? "HIT" : "MISS");
+    if (!cached) return null;
+
+    if (cached?.cache_type && cached.cache_type !== cache_type) {
+      return null;
+    }
+
+    let cacheResult = null;
+
+    if (cached?.cache_type === CACHE_TYPES.PRODUCT_SEARCH && cached?.result) {
+      const productsData = cached.result;
+      const products = formatProducts(productsData?.products || [], session_id, store_code, full_details);
+      cacheResult = {
+        product: products,
+      }
+      if (productsData?.relatedProducts && productsData?.relatedProducts.length > 0) {
+        cacheResult.relatedProducts = productsData.relatedProducts;
+      }
+      if (productsData?.missing_ids && productsData?.missing_ids.length > 0) {
+        cacheResult.missing_ids = productsData.missing_ids;
+      }
+    }
+    else if (cached?.cache_type === CACHE_TYPES.STORE_METADATA && cached?.result) {
+      cacheResult = cached.result;
+    }
+
+    return cacheResult;
+  } catch (error) {
+    console.error("Cache lookup error:", error);
+    return null;
+  }
+};
+
 // Tool 1: Search products
 server.tool(
   "search_products",
@@ -754,8 +840,24 @@ server.tool(
         is_single = false;
       }
 
-      const productFields = full_details
-        ? `
+      let cacheProductsData = null;
+
+      // ── Cache lookup ──────────────────────────────────────────────────────
+      const cacheKey = `${query}`;
+      let cacheOutput = null;
+      try {
+        cacheOutput = await getCacheResults(cacheKey, CACHE_TYPES.PRODUCT_SEARCH, session_id, store_code, full_details);
+      } catch (e) {
+        console.warn("search_products cache get failed:", e?.message || e);
+      }
+
+      if (cacheOutput) {
+        return {
+          content: [{ type: "text", text: JSON.stringify(cacheOutput, null, 2) }],
+        };
+      }
+
+      const productFields = `
         id 
         title
         handle 
@@ -806,21 +908,7 @@ server.tool(
         }
             }
           }
-        }`
-        : `
-        id 
-        title
-        category {
-          name
-        }
-        priceRange {
-          minVariantPrice {
-            amount
-            currencyCode
-          }
-        }
-        description 
-        availableForSale`;
+        }`;
 
       const graphqlQuery = {
         query: is_single
@@ -871,6 +959,14 @@ server.tool(
         };
       }
 
+      // Store results in cache for future similar queries.
+      if (searchResponse?.data?.products?.edges?.length > 0) {
+        cacheProductsData = searchResponse.data.products.edges;
+      }
+      else if (is_single && searchResponse?.data?.product) {
+        cacheProductsData = [{ node: searchResponse.data.product }];
+      }
+
       const formattedProducts = formatProducts(
         !is_single
           ? searchResponse.data.products.edges
@@ -912,6 +1008,9 @@ server.tool(
           const searchResponse = await callShopifyApi("POST", "", gQuery);
 
           if (searchResponse?.data?.products?.edges) {
+            // Store results in cache for future similar queries.
+            cacheProductsData = searchResponse.data.products.edges;
+
             const formattedProducts = formatProducts(
               searchResponse.data.products.edges,
               session_id,
@@ -954,6 +1053,19 @@ server.tool(
               break;
             }
           }
+        }
+      }
+
+      // Cache the final result along with related products for future similar queries.
+      if (cacheProductsData){
+        const cacheData = {products: cacheProductsData, relatedProducts: result.relatedProducts || []};
+        try {
+          cacheStore[CACHE_TYPES.PRODUCT_SEARCH].set(cacheKey, {
+            cache_type: CACHE_TYPES.PRODUCT_SEARCH,
+            result: cacheData,
+          });
+        } catch (e) {
+          console.warn("search_products cache set failed:", e?.message || e);
         }
       }
 
@@ -2492,7 +2604,7 @@ server.tool(
   },
   async ({ product_ids, session_id, store_code }) => {
     try {
-      // Deduplicate + normalise to full GID
+      // Deduplicate + normalize to full GID
       const gids = [
         ...new Set(
           product_ids.map((id) =>
@@ -2502,6 +2614,31 @@ server.tool(
           ),
         ),
       ];
+
+      const cacheKey = `get_products_by_ids:${gids.join(",")}`;
+      let cacheOutput = null;
+      try {
+        cacheOutput = await getCacheResults(
+          cacheKey,
+          CACHE_TYPES.PRODUCT_SEARCH,
+          session_id,
+          store_code,
+          true,
+        );
+      } catch (e) {
+        console.warn("get_products_by_ids cache get failed:", e?.message || e);
+      }
+
+      if (cacheOutput) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(cacheOutput, null, 2),
+            },
+          ],
+        };
+      }
 
       const singleProductQuery = (gid) => ({
         query: `query getProductById($id: ID!) {
@@ -2553,6 +2690,18 @@ server.tool(
         };
       }
 
+      try {
+        cacheStore[CACHE_TYPES.PRODUCT_SEARCH].set(cacheKey, {
+          cache_type: CACHE_TYPES.PRODUCT_SEARCH,
+          result: {
+            products: results.map((node) => ({ node })),
+            missing_ids: missing,
+          },
+        });
+      } catch (e) {
+        console.warn("get_products_by_ids cache set failed:", e?.message || e);
+      }
+
       const formattedProducts = formatProducts(
         results.map((node) => ({ node })),
         session_id,
@@ -2560,18 +2709,16 @@ server.tool(
         true,
       );
 
+      const responsePayload = {
+        products: formattedProducts,
+        ...(missing.length > 0 && { missing_ids: missing }),
+      };
+
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(
-              {
-                products: formattedProducts,
-                ...(missing.length > 0 && { missing_ids: missing }),
-              },
-              null,
-              2,
-            ),
+            text: JSON.stringify(responsePayload, null, 2),
           },
         ],
       };
@@ -2598,6 +2745,28 @@ server.tool(
   {},
   async () => {
     try {
+      const cacheKey = "available_discounts";
+      let cacheOutput = null;
+      try {
+        cacheOutput = await getCacheResults(
+          cacheKey,
+          CACHE_TYPES.STORE_METADATA,
+        );
+      } catch (e) {
+        console.warn("list_available_discounts cache get failed:", e?.message || e);
+      }
+
+      if (cacheOutput) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(cacheOutput, null, 2),
+            },
+          ],
+        };
+      }
+
       const graphqlQuery = {
         query: `{
                 discountNodes(first: 20) {
@@ -2822,18 +2991,26 @@ server.tool(
       // Sort by end date (active first)
       discounts.sort((a, b) => new Date(b.ends_at) - new Date(a.ends_at));
 
+      const payload = {
+        total: discounts.length,
+        discounts: discounts,
+      };
+
+      // Cache the discounts under store metadata cache
+      try {
+        cacheStore[CACHE_TYPES.STORE_METADATA].set(cacheKey, {
+          cache_type: CACHE_TYPES.STORE_METADATA,
+          result: payload,
+        });
+      } catch (e) {
+        console.warn("list_available_discounts cache set failed:", e?.message || e);
+      }
+
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(
-              {
-                total: discounts.length,
-                discounts: discounts,
-              },
-              null,
-              2,
-            ),
+            text: JSON.stringify(payload, null, 2),
           },
         ],
       };
@@ -2903,6 +3080,32 @@ server.tool(
     try {
       const sortArgs = getProductSortArgs(sort_key);
 
+      // Check cache first for this sort key
+      const cacheKey = `get_products_sorted:${String(sort_key || "default")}`;
+      let cacheOutput = null;
+      try {
+        cacheOutput = await getCacheResults(
+          cacheKey,
+          CACHE_TYPES.PRODUCT_SEARCH,
+          session_id,
+          store_code,
+          false,
+        );
+      } catch (e) {
+        console.warn("get_products_sorted cache get failed:", e?.message || e);
+      }
+
+      if (cacheOutput) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(cacheOutput, null, 2),
+            },
+          ],
+        };
+      }
+
       const graphqlQuery = {
         query: `query getProducts($first: Int!) {
           products(first: $first${sortArgs}) {
@@ -2938,6 +3141,16 @@ server.tool(
         store_code,
         false,
       );
+
+      // Cache formatted products for this sorted query
+      try {
+        cacheStore[CACHE_TYPES.PRODUCT_SEARCH].set(cacheKey, {
+          cache_type: CACHE_TYPES.PRODUCT_SEARCH,
+          result: { products: products },
+        });
+      } catch (e) {
+        console.warn("Failed to set cache for get_products_sorted:", e.message);
+      }
 
       return {
         content: [
