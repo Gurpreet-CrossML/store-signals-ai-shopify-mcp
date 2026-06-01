@@ -1059,7 +1059,7 @@ server.tool(
         ticket_id: ticketId,
       };
 
-      callBackendAPI("POST", "/support/threads/session_id/tickets/", payload);
+      callBackendAPI("POST", `/support/tickets/`, payload);
 
       // Success Response
       return {
