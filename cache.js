@@ -14,7 +14,8 @@ require("dotenv").config();
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS) || 30 * 60 * 1000;
-const CACHE_SIMILARITY_THRESHOLD = Number(process.env.CACHE_SIMILARITY_THRESHOLD) || 0.82;
+const CACHE_SIMILARITY_THRESHOLD =
+  Number(process.env.CACHE_SIMILARITY_THRESHOLD) || 0.82;
 const CACHE_MAX_ENTRIES = Number(process.env.CACHE_MAX_ENTRIES) || 200;
 
 class SemanticCache {
@@ -38,7 +39,7 @@ class SemanticCache {
 
     console.log(
       `[SemanticCache] Initialized — TTL: ${this.ttlMs / 1000}s | ` +
-        `Threshold: ${this.similarityThreshold} | Model: ${this.model}`
+        `Threshold: ${this.similarityThreshold} | Model: ${this.model}`,
     );
   }
 
@@ -56,7 +57,7 @@ class SemanticCache {
     const keys = [...this._store.keys()];
     if (keys.length === 0) return null;
 
-    let matchedKey = null;
+    let matchedKey;
     const exactMatchPrefixes = [
       "product:",
       "get_products_sorted:",
@@ -82,7 +83,7 @@ class SemanticCache {
     }
 
     console.log(
-      `[SemanticCache] HIT — "${query}" matched cached key "${matchedKey}"`
+      `[SemanticCache] HIT — "${query}" matched cached key "${matchedKey}"`,
     );
     return entry.result;
   }
@@ -103,7 +104,7 @@ class SemanticCache {
     });
 
     console.log(
-      `[SemanticCache] SET — "${query}" (${this._store.size} entries in cache)`
+      `[SemanticCache] SET — "${query}" (${this._store.size} entries in cache)`,
     );
   }
 
@@ -163,7 +164,7 @@ ${cachedKeys.map((k, i) => `${i + 1}. "${k.replace(/"/g, '\\"')}"`).join("\n")}`
             Authorization: `Bearer ${this.openaiApiKey}`,
           },
           timeout: 8000,
-        }
+        },
       );
 
       const raw = response?.data?.choices?.[0]?.message?.content?.trim() || "";

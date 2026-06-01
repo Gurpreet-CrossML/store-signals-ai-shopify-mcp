@@ -7,12 +7,20 @@ const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 const nodemailer = require("nodemailer");
-const { productSearchByQuery, productByIdQuery, productSortQuery, discountQuery } = require("./graphql_queries");
+const {
+  productSearchByQuery,
+  productByIdQuery,
+  productSortQuery,
+  discountQuery,
+} = require("./graphql_queries");
 const {
   MCP_NAME,
   MCP_VERSION,
   SMTP_USER,
   SMTP_PASS,
+  ZENDESK_USERNAME,
+  ZENDESK_PASSWORD,
+  ZENDESK_API_URL,
   callShopifyApi,
   callBackendAPI,
   formatProducts,
@@ -52,7 +60,6 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-
 // ********************************** MCP Tools **********************************
 // ######### 1. Search Products #########
 server.tool(
@@ -67,24 +74,19 @@ server.tool(
   @param {boolean} full_details: 
   `,
   {
-  query: z
-    .string()
-    .describe("Search query (product name, description, etc.)"),
-  session_id: z.string().describe("Session ID"),
-  store_code: z.string().describe("Store name/code"),
-  full_details: z
-    .boolean()
-    .optional()
-    .describe(
-      "Whether to return full product details including variants, images, and URLs. Defaults to false.",
-    ),
+    query: z
+      .string()
+      .describe("Search query (product name, description, etc.)"),
+    session_id: z.string().describe("Session ID"),
+    store_code: z.string().describe("Store name/code"),
+    full_details: z
+      .boolean()
+      .optional()
+      .describe(
+        "Whether to return full product details including variants, images, and URLs. Defaults to false.",
+      ),
   },
-  async ({
-    query,
-    session_id,
-    store_code,
-    full_details=false,
-  }) => {
+  async ({ query, session_id, store_code, full_details = false }) => {
     try {
       const cacheKey = `search:${query}:${full_details ? "full" : "brief"}`;
       const cached = await getCache(cacheKey);
@@ -152,7 +154,10 @@ server.tool(
 
           const searchResponse = await callShopifyApi("POST", "", gQuery);
 
-          if (searchResponse?.data?.products?.edges && searchResponse?.data?.products?.edges?.length > 0) {
+          if (
+            searchResponse?.data?.products?.edges &&
+            searchResponse?.data?.products?.edges?.length > 0
+          ) {
             const formattedProducts = formatProducts(
               searchResponse.data.products.edges,
               session_id,
@@ -265,7 +270,9 @@ server.tool(
       ];
 
       // check cache first per product id
-      const numericIds = gids.map((g) => g.replace("gid://shopify/Product/", ""));
+      const numericIds = gids.map((g) =>
+        g.replace("gid://shopify/Product/", ""),
+      );
       const cachedProducts = [];
       const toFetch = [];
 
@@ -297,14 +304,20 @@ server.tool(
           const chunk = fetchGids.slice(i, i + CHUNK);
           const settled = await Promise.allSettled(chunk.map(fetchOne));
           settled.forEach((s, idx) => {
-            if (s.status === "fulfilled" && s.value) fetchedResults.push(s.value);
+            if (s.status === "fulfilled" && s.value)
+              fetchedResults.push(s.value);
             else missing.push(chunk[idx]);
           });
         }
       }
 
       const formattedFetched = fetchedResults.length
-        ? formatProducts(fetchedResults.map((node) => ({ node })), session_id, store_code, true)
+        ? formatProducts(
+            fetchedResults.map((node) => ({ node })),
+            session_id,
+            store_code,
+            true,
+          )
         : [];
 
       // cache fetched products
@@ -411,7 +424,10 @@ server.tool(
       try {
         await setCache(cacheKey, result);
       } catch (cacheError) {
-        console.warn("get_products_sorted cache set failed:", cacheError?.message || cacheError);
+        console.warn(
+          "get_products_sorted cache set failed:",
+          cacheError?.message || cacheError,
+        );
       }
 
       return {
@@ -664,7 +680,10 @@ server.tool(
       try {
         await setCache(cacheKey, payload);
       } catch (cacheError) {
-        console.warn("available_discounts cache set failed:", cacheError?.message || cacheError);
+        console.warn(
+          "available_discounts cache set failed:",
+          cacheError?.message || cacheError,
+        );
       }
 
       return {
@@ -854,7 +873,7 @@ server.tool(
     session_id: z.string().describe("Session identifier"),
     customer_id: z.string().describe("Customer ID"),
   },
-  async ({ email, order_id, session_id, customer_id="" }) => {
+  async ({ email, order_id, session_id, customer_id = "" }) => {
     if (!customer_id) {
       const verificationStatus = await callBackendAPI(
         "POST",

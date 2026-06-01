@@ -343,4 +343,11 @@ const discountQuery = `{
   }
 }`;
 // Export the GraphQL query for use in other modules
-module.exports = { productSearchByQuery, storeMetadataQuery, relatedProductsQuery, productByIdQuery, productSortQuery, discountQuery };
+module.exports = {
+  productSearchByQuery,
+  storeMetadataQuery,
+  relatedProductsQuery,
+  productByIdQuery,
+  productSortQuery,
+  discountQuery,
+};

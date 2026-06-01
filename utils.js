@@ -1,9 +1,11 @@
 const axios = require("axios");
 const dotenv = require("dotenv");
 const https = require("https");
-const { storeMetadataQuery, relatedProductsQuery } = require("./graphql_queries");
+const {
+  storeMetadataQuery,
+  relatedProductsQuery,
+} = require("./graphql_queries");
 const { getCache, setCache } = require("./cache");
-
 
 // Load environment variables from .env file
 dotenv.config();
@@ -44,7 +46,7 @@ for (const [key, value] of Object.entries(allEnvironmentVariables)) {
     console.error(`ERROR: ${key} environment variable is required`);
     process.exit(1);
   }
-};
+}
 
 // Define sort options and their mapping to Shopify's sort keys and reverse flags
 const SortOption = Object.freeze({
@@ -130,7 +132,7 @@ const callShopifyApi = async (
 };
 
 // Utility function to call the backend API
-const callBackendAPI = async (method, endpoint, data={}) => {
+const callBackendAPI = async (method, endpoint, data = {}) => {
   try {
     const url = `${BACKEND_API_URL}${endpoint}`;
 
@@ -160,6 +162,32 @@ const getCurrencySymbol = (code) => {
   return symbols[code] || (code ? `${code} ` : "");
 };
 
+// Convert a numeric value from various units to centimeters.
+function toCm(value, unit) {
+  if (value == null) return NaN;
+  const num = Number(value);
+  if (Number.isNaN(num)) return NaN;
+  const u = (unit || "").toString().toLowerCase();
+  switch (u) {
+    case "cm":
+      return num;
+    case "mm":
+      return num / 10;
+    case "m":
+      return num * 100;
+    case "in":
+    case "inch":
+    case "inches":
+      return num * 2.54;
+    case "ft":
+    case "feet":
+      return num * 30.48;
+    default:
+      return num; // assume already cm if unknown
+  }
+}
+
+// Save viewed products to backend for analytics
 const logProductViewEvents = async (products, session_id, store_code) => {
   if (!Array.isArray(products) || !session_id || !store_code) {
     return;
@@ -167,7 +195,9 @@ const logProductViewEvents = async (products, session_id, store_code) => {
 
   await Promise.all(
     products.map((product) => {
-      const productId = String(product?.id || "").split("/").pop();
+      const productId = String(product?.id || "")
+        .split("/")
+        .pop();
       if (!productId) return Promise.resolve();
 
       return callBackendAPI("POST", "/chat/bot-events/", {
@@ -205,155 +235,157 @@ const getVariantDiscount = (variant) => {
 
 // Utility function to format products data received from Shopify API, and also log product view events to the backend for analytics.
 const formatProducts = (
-    products,
-    session_id,
-    store_code,
-    full_details=false,
+  products,
+  session_id,
+  store_code,
+  full_details = false,
 ) => {
-    try {
-        return products.map(({ node }) => {
-            const productId = node.id.split("/").pop();
-            const productName = node.title;
-            const productCategory = node?.category?.name;
+  try {
+    return products.map(({ node }) => {
+      const productId = node.id.split("/").pop();
+      const productName = node.title;
+      const productCategory = node?.category?.name;
 
-            // Log product view event to backend for analytics
-            callBackendAPI("POST", "/chat/bot-events/", {
-                thread_id: session_id,
-                event_type: "view_product",
-                store_code: store_code,
-                product_id: productId,
-                product_name: productName,
-                category: productCategory || "",
-            });
+      // Log product view event to backend for analytics
+      callBackendAPI("POST", "/chat/bot-events/", {
+        thread_id: session_id,
+        event_type: "view_product",
+        store_code: store_code,
+        product_id: productId,
+        product_name: productName,
+        category: productCategory || "",
+      });
 
-            const baseProduct = {
-                id: productId,
-                name: productName,
-                category: productCategory,
-                price: `${getCurrencySymbol(node.priceRange?.minVariantPrice?.currencyCode)}${node.priceRange?.minVariantPrice?.amount || 0}`,
-                description: node.description || "",
-                available_for_sale: node.availableForSale,
-            };
+      const baseProduct = {
+        id: productId,
+        name: productName,
+        category: productCategory,
+        price: `${getCurrencySymbol(node.priceRange?.minVariantPrice?.currencyCode)}${node.priceRange?.minVariantPrice?.amount || 0}`,
+        description: node.description || "",
+        available_for_sale: node.availableForSale,
+      };
 
-            if (!full_details) {
-                return baseProduct;
-            }
+      if (!full_details) {
+        return baseProduct;
+      }
 
-            return {
-                ...baseProduct,
-                image: node.images?.edges?.[0]?.node?.url || null,
-                product_url:
-                    node.onlineStoreUrl || `${SHOPIFY_BASE_URL}/products/${node?.handle}`,
-                variants: node.variants?.edges?.map(({ node: v }) => {
-                    const discount = getVariantDiscount(v);
+      return {
+        ...baseProduct,
+        image: node.images?.edges?.[0]?.node?.url || null,
+        product_url:
+          node.onlineStoreUrl || `${SHOPIFY_BASE_URL}/products/${node?.handle}`,
+        variants: node.variants?.edges?.map(({ node: v }) => {
+          const discount = getVariantDiscount(v);
 
-                    return {
-                    variant_id: v.id.split("/").pop(),
-                    title: v.title,
+          return {
+            variant_id: v.id.split("/").pop(),
+            title: v.title,
 
-                    price: {
-                        amount: `${getCurrencySymbol(v.priceV2?.currencyCode)}${v.priceV2?.amount || 0}`,
-                        currency: v.priceV2?.currencyCode || null,
-                    },
+            price: {
+              amount: `${getCurrencySymbol(v.priceV2?.currencyCode)}${v.priceV2?.amount || 0}`,
+              currency: v.priceV2?.currencyCode || null,
+            },
 
-                    compare_at_price: v.compareAtPriceV2?.amount
-                        ? `${getCurrencySymbol(v.compareAtPriceV2?.currencyCode)}${v.compareAtPriceV2.amount}`
-                        : null,
+            compare_at_price: v.compareAtPriceV2?.amount
+              ? `${getCurrencySymbol(v.compareAtPriceV2?.currencyCode)}${v.compareAtPriceV2.amount}`
+              : null,
 
-                    discount: discount,
+            discount: discount,
 
-                    available_for_sale: v.availableForSale,
-                    options: v.selectedOptions,
-                    };
-                }),
-            };
-        });
-    }
-    catch (err) {
-        console.error("Error formatting products, error:", err);
-        return [];
-    }
+            available_for_sale: v.availableForSale,
+            options: v.selectedOptions,
+          };
+        }),
+      };
+    });
+  } catch (err) {
+    console.error("Error formatting products, error:", err);
+    return [];
+  }
 };
 
 // Utility function to fetch store metadata like product tags, types, collections, and categories. This metadata can be used for various purposes like improving search relevance, generating search queries, etc.
 const storeMetadata = async () => {
-    const cacheKey = "store_metadata";
+  const cacheKey = "store_metadata";
+
+  try {
+    const cachedMetadata = await getCache(cacheKey);
+    if (cachedMetadata) {
+      return cachedMetadata;
+    }
+
+    const graphqlQuery = {
+      query: storeMetadataQuery,
+    };
+
+    const result = await callShopifyApi("POST", "", graphqlQuery);
+
+    if (result.errors) {
+      return {
+        tags: [],
+        types: [],
+        collections: [],
+        categories: [],
+      };
+    }
+
+    const tags =
+      result?.data?.productTags?.edges?.map((item) => item?.node) || [];
+
+    const types =
+      result?.data?.productTypes?.edges?.map((item) => item?.node) || [];
+
+    const collections =
+      result?.data?.collections?.edges?.map((item) => item?.node?.title) || [];
+
+    const categories = [
+      ...new Set(
+        (
+          result?.data?.products?.edges?.map(
+            (item) => item?.node?.category?.name,
+          ) || []
+        ).filter(Boolean),
+      ),
+    ];
+
+    const metadata = {
+      tags,
+      types,
+      collections,
+      categories,
+    };
 
     try {
-        const cachedMetadata = await getCache(cacheKey);
-        if (cachedMetadata) {
-            return cachedMetadata;
-        }
-
-        const graphqlQuery = {
-            query: storeMetadataQuery,
-        };
-
-        const result = await callShopifyApi("POST", "", graphqlQuery);
-
-        if (result.errors) {
-            return {
-                tags: [],
-                types: [],
-                collections: [],
-                categories: [],
-            };
-        }
-
-        const tags =
-        result?.data?.productTags?.edges?.map((item) => item?.node) || [];
-
-        const types =
-        result?.data?.productTypes?.edges?.map((item) => item?.node) || [];
-
-        const collections =
-        result?.data?.collections?.edges?.map((item) => item?.node?.title) || [];
-
-        const categories = [
-            ...new Set(
-                (
-                result?.data?.products?.edges?.map(
-                    (item) => item?.node?.category?.name,
-                ) || []
-                ).filter(Boolean),
-            ),
-        ];
-
-        const metadata = {
-            tags,
-            types,
-            collections,
-            categories,
-        };
-
-        try {
-            await setCache(cacheKey, metadata);
-        } catch (cacheError) {
-            console.warn("storeMetadata cache set failed:", cacheError?.message || cacheError);
-        }
-        return metadata;
-    } catch (error) {
-        console.error("productsMetadata Error:", error);
-
-        return {
-            tags: [],
-            types: [],
-            collections: [],
-            categories: [],
-        };
+      await setCache(cacheKey, metadata);
+    } catch (cacheError) {
+      console.warn(
+        "storeMetadata cache set failed:",
+        cacheError?.message || cacheError,
+      );
     }
+    return metadata;
+  } catch (error) {
+    console.error("productsMetadata Error:", error);
+
+    return {
+      tags: [],
+      types: [],
+      collections: [],
+      categories: [],
+    };
+  }
 };
 
 // Utility function to extract relevant search terms from a user query using OpenAI's language model. It uses the store metadata to generate more accurate and relevant search terms that can be used to query the product catalog.
 const extractSearchTerms = async (query) => {
-    if (!query || typeof query !== "string") {
-        return [];
-    }
+  if (!query || typeof query !== "string") {
+    return [];
+  }
 
-    try {
-        const metadata = await storeMetadata();
+  try {
+    const metadata = await storeMetadata();
 
-        const prompt = `You are an eCommerce search query generator.
+    const prompt = `You are an eCommerce search query generator.
 
     Given a user query and store catalog metadata, generate 3-4 short search queries to find relevant products.
 
@@ -374,37 +406,37 @@ const extractSearchTerms = async (query) => {
 
     Return format: ["query1", "query2", "query3"]`;
 
-        const response = await axios.post(
-        "https://api.openai.com/v1/chat/completions",
-        {
-            model: OPENAI_MODEL,
-            messages: [{ role: "user", content: prompt }],
-            temperature: 0.3,
-            max_tokens: 100,
+    const response = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: OPENAI_MODEL,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.3,
+        max_tokens: 100,
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
         },
-        {
-            headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${OPENAI_API_KEY}`,
-            },
-            timeout: 10000,
-        },
-        );
+        timeout: 10000,
+      },
+    );
 
-        const content = response?.data?.choices?.[0]?.message?.content?.trim();
-        const cleaned = content.replace(/```json|```/g, "").trim();
-        const parsed = JSON.parse(cleaned);
+    const content = response?.data?.choices?.[0]?.message?.content?.trim();
+    const cleaned = content.replace(/```json|```/g, "").trim();
+    const parsed = JSON.parse(cleaned);
 
-        if (!Array.isArray(parsed)) return [];
+    if (!Array.isArray(parsed)) return [];
 
-        return parsed
-        .filter((q) => typeof q === "string" && q.trim().length > 0)
-        .map((q) => q.trim().toLowerCase())
-        .slice(0, 4);
-    } catch (error) {
-        console.error("extractSearchTerms Error:", error);
-        return [];
-    }
+    return parsed
+      .filter((q) => typeof q === "string" && q.trim().length > 0)
+      .map((q) => q.trim().toLowerCase())
+      .slice(0, 4);
+  } catch (error) {
+    console.error("extractSearchTerms Error:", error);
+    return [];
+  }
 };
 
 // Utility function to fetch related products for a given product ID using Shopify's product recommendations API. This can be used to provide additional product suggestions to users based on the products they are viewing or have shown interest in.
