@@ -9,6 +9,13 @@
  */
 
 const axios = require("axios");
+require("dotenv").config();
+
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS) || 30 * 60 * 1000;
+const CACHE_SIMILARITY_THRESHOLD = Number(process.env.CACHE_SIMILARITY_THRESHOLD) || 0.82;
+const CACHE_MAX_ENTRIES = Number(process.env.CACHE_MAX_ENTRIES) || 200;
 
 class SemanticCache {
   /**
@@ -50,12 +57,22 @@ class SemanticCache {
     if (keys.length === 0) return null;
 
     let matchedKey = null;
-    if (!query.startsWith("get_products_by_ids:") && !query.startsWith("get_product_by_id:")) {
+    const exactMatchPrefixes = [
+      "product:",
+      "get_products_sorted:",
+      "store_metadata",
+      "available_discounts",
+    ];
+
+    const isExactMatch = exactMatchPrefixes.some((prefix) =>
+      query.startsWith(prefix),
+    );
+
+    if (isExactMatch) {
+      matchedKey = query;
+    } else {
       matchedKey = await this._findSimilarQuery(query, keys);
       if (!matchedKey) return null;
-    }
-    else{
-      matchedKey = query;
     }
 
     const entry = this._store.get(matchedKey);
@@ -75,13 +92,14 @@ class SemanticCache {
    * @param {string} query
    * @param {any}    result
    */
-  set(query, result) {
+  set(query, result, ttlMsOverride = null) {
     this._purgeExpired();
     this._evictIfFull();
 
+    const ttl = ttlMsOverride ?? this.ttlMs;
     this._store.set(query, {
       result,
-      expiresAt: Date.now() + this.ttlMs,
+      expiresAt: Date.now() + ttl,
     });
 
     console.log(
@@ -190,4 +208,30 @@ ${cachedKeys.map((k, i) => `${i + 1}. "${k.replace(/"/g, '\\"')}"`).join("\n")}`
   }
 }
 
-module.exports = SemanticCache;
+const defaultCache = new SemanticCache({
+  openaiApiKey: OPENAI_API_KEY,
+  model: OPENAI_MODEL,
+  ttlMs: CACHE_TTL_MS,
+  similarityThreshold: CACHE_SIMILARITY_THRESHOLD,
+  maxEntries: CACHE_MAX_ENTRIES,
+});
+
+async function getCache(key) {
+  return defaultCache.get(key);
+}
+
+async function setCache(key, value, ttlSeconds = null) {
+  const ttlMs = ttlSeconds !== null ? Number(ttlSeconds) * 1000 : null;
+  return defaultCache.set(key, value, ttlMs);
+}
+
+function clearCache() {
+  return defaultCache.clear();
+}
+
+module.exports = {
+  SemanticCache,
+  getCache,
+  setCache,
+  clearCache,
+};
