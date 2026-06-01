@@ -1,83 +1,55 @@
-#!/usr/bin/env node
 const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
 const {
   StreamableHTTPServerTransport,
 } = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const { z } = require("zod");
-const axios = require("axios");
-const dotenv = require("dotenv");
 const express = require("express");
-const https = require("https");
-const nodemailer = require("nodemailer");
 const cors = require("cors");
+const axios = require("axios");
+const nodemailer = require("nodemailer");
+const {
+  productSearchByQuery,
+  productByIdQuery,
+  productSortQuery,
+  discountQuery,
+} = require("./graphql_queries");
+const {
+  MCP_NAME,
+  MCP_VERSION,
+  SMTP_USER,
+  SMTP_PASS,
+  ZENDESK_USERNAME,
+  ZENDESK_PASSWORD,
+  ZENDESK_API_URL,
+  callShopifyApi,
+  callBackendAPI,
+  formatProducts,
+  extractSearchTerms,
+  fetchRelatedProducts,
+  getProductSortConfig,
+  storeMetadata,
+  logProductViewEvents,
+  parseSpaceInput,
+  extractDimensions,
+  normalizeDims,
+  getRelevanceScore,
+  formatDiscounts,
+  formatOrder,
+} = require("./utils");
 
-// Load environment variables from .env file
-dotenv.config();
+const { getCache, setCache } = require("./cache");
 
-// Shopify API and SMTP Configuration
-const SHOPIFY_BASE_URL = process.env.SHOPIFY_BASE_URL;
-const SHOPIFY_STOREFRONT_API_TOKEN = process.env.SHOPIFY_STOREFRONT_API_TOKEN;
-const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
-const SMTP_USER = process.env.SMTP_USER;
-const SMTP_PASS = process.env.SMTP_PASS;
-const BACKEND_API_URL = process.env.BACKEND_API_URL;
-const ZENDESK_API_URL = process.env.ZENDESK_API_URL;
-const ZENDESK_USERNAME = process.env.ZENDESK_USERNAME;
-const ZENDESK_PASSWORD = process.env.ZENDESK_PASSWORD;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL;
-// Validate environment variables
-if (!SHOPIFY_BASE_URL) {
-  console.error("ERROR: SHOPIFY_BASE_URL environment variable is required");
-  process.exit(1);
-}
-if (!SHOPIFY_STOREFRONT_API_TOKEN) {
-  console.error(
-    "ERROR: SHOPIFY_STOREFRONT_API_TOKEN environment variable is required",
-  );
-  process.exit(1);
-}
-if (!SHOPIFY_ACCESS_TOKEN) {
-  console.error("ERROR: SHOPIFY_ACCESS_TOKEN environment variable is required");
-  process.exit(1);
-}
-if (!SMTP_USER) {
-  console.error("ERROR: SMTP_USER environment variable is required");
-  process.exit(1);
-}
-if (!SMTP_PASS) {
-  console.error("ERROR: SMTP_PASS environment variable is required");
-  process.exit(1);
-}
-if (!BACKEND_API_URL) {
-  console.error("ERROR: BACKEND_API_URL environment variable is required");
-  process.exit(1);
-}
-if (!ZENDESK_API_URL) {
-  console.error("ERROR: ZENDESK_API_URL environment variable is required");
-  process.exit(1);
-}
-if (!ZENDESK_USERNAME) {
-  console.error("ERROR: ZENDESK_USERNAME environment variable is required");
-  process.exit(1);
-}
-if (!ZENDESK_PASSWORD) {
-  console.error("ERROR: ZENDESK_PASSWORD environment variable is required");
-  process.exit(1);
-}
-if (!OPENAI_API_KEY) {
-  console.error("ERROR: OPENAI_API_KEY environment variable is required");
-  process.exit(1);
-}
-if (!OPENAI_MODEL) {
-  console.error("ERROR: OPENAI_MODEL environment variable is required");
-  process.exit(1);
-}
+// Initialize the MCP server
+const server = new McpServer({
+  name: MCP_NAME,
+  version: MCP_VERSION,
+  capabilities: {
+    tools: true,
+    resources: true,
+  },
+});
 
-// Memory store for sessions
-const sessionStore = new Map();
-
-// Setup SMTP
+// Configure Nodemailer transporter for sending OTP emails using SMTP credentials from environment variables.
 const transporter = nodemailer.createTransport({
   host: "smtp.gmail.com",
   port: 587,
@@ -88,631 +60,8 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// Create an MCP server
-const server = new McpServer({
-  name: "shopify-mcp-server",
-  version: "1.0.0",
-  capabilities: {
-    tools: true,
-    resources: true,
-  },
-});
-
-// Call Shopify APIs
-async function callShopifyApi(
-  method = "GET",
-  endpoint = "",
-  data = null,
-  isAdmin = false,
-) {
-  try {
-    let url = isAdmin
-      ? `${SHOPIFY_BASE_URL}/admin/api/2025-10/graphql.json`
-      : `${SHOPIFY_BASE_URL}/api/2025-01/graphql.json`;
-    if (endpoint) {
-      url = `${SHOPIFY_BASE_URL}${endpoint}`;
-    }
-    console.log(`Calling Shopify API: ${method} ${url}`);
-    const headers = {
-      "Content-Type": "application/json",
-      "X-Shopify-Storefront-Access-Token": SHOPIFY_STOREFRONT_API_TOKEN,
-      "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-    };
-
-    const config = {
-      method,
-      url,
-      headers,
-      timeout: 15000, // 15 seconds timeout
-      data: data ? JSON.stringify(data) : undefined,
-      // Bypass SSL certificate verification for development
-      httpsAgent: new https.Agent({
-        rejectUnauthorized: false,
-      }),
-    };
-
-    const response = await axios(config);
-    return response.data;
-  } catch (error) {
-    console.error(
-      "Shopify API Error:",
-      error?.response?.data || error.message || error?.errors,
-    );
-    throw error;
-  }
-}
-
-// Calculate discount details for a product variant
-const getVariantDiscount = (variant) => {
-  const price = parseFloat(variant.priceV2?.amount || 0);
-  const compare = parseFloat(variant.compareAtPriceV2?.amount || 0);
-
-  if (compare && compare > price) {
-    const discount = ((compare - price) / compare) * 100;
-
-    return {
-      original_price: compare,
-      discounted_price: price,
-      discount_percentage: Math.round(discount),
-      savings: compare - price,
-    };
-  }
-
-  return null;
-};
-
-// Map ISO currency code to its symbol
-const getCurrencySymbol = (code) => {
-  const symbols = {
-    USD: "$",
-    INR: "₹",
-  };
-  return symbols[code] || (code ? `${code} ` : "");
-};
-
-// Format product data
-const formatProducts = (
-  products,
-  session_id,
-  store_code,
-  full_details = false,
-) => {
-  return products.map(({ node }) => {
-    const productId = node.id.split("/").pop();
-    const productName = node.title;
-    const productCategory = node?.category?.name;
-
-    // Fire event for each product
-    callBackendAPI("POST", "/chat/bot-events/", {
-      thread_id: session_id,
-      event_type: "view_product",
-      store_code: store_code,
-      product_id: productId,
-      product_name: productName,
-      category: productCategory || "",
-    });
-
-    const baseProduct = {
-      id: productId,
-      name: productName,
-      category: productCategory,
-      price: `${getCurrencySymbol(node.priceRange?.minVariantPrice?.currencyCode)}${node.priceRange?.minVariantPrice?.amount || 0}`,
-      description: node.description || "",
-      available_for_sale: node.availableForSale,
-    };
-
-    if (!full_details) {
-      return baseProduct;
-    }
-
-    return {
-      ...baseProduct,
-      image: node.images?.edges?.[0]?.node?.url || null,
-      product_url:
-        node.onlineStoreUrl || `${SHOPIFY_BASE_URL}/products/${node?.handle}`,
-      variants: node.variants?.edges?.map(({ node: v }) => {
-        const discount = getVariantDiscount(v);
-
-        return {
-          variant_id: v.id.split("/").pop(),
-          title: v.title,
-
-          price: {
-            amount: `${getCurrencySymbol(v.priceV2?.currencyCode)}${v.priceV2?.amount || 0}`,
-            currency: v.priceV2?.currencyCode || null,
-          },
-
-          compare_at_price: v.compareAtPriceV2?.amount
-            ? `${getCurrencySymbol(v.compareAtPriceV2?.currencyCode)}${v.compareAtPriceV2.amount}`
-            : null,
-
-          discount: discount,
-
-          available_for_sale: v.availableForSale,
-          options: v.selectedOptions,
-        };
-      }),
-    };
-  });
-};
-
-const getCancelStatus = (o) => {
-  if (o.cancelled_at)
-    return { allowed: false, reason: "Order already cancelled" };
-
-  if (["fulfilled", "shipped"].includes(o.fulfillment_status)) {
-    return { allowed: false, reason: "Order already shipped" };
-  }
-
-  if (["refunded", "voided"].includes(o.financial_status)) {
-    return { allowed: false, reason: "Order already refunded" };
-  }
-
-  return { allowed: true };
-};
-
-const getReturnStatus = (o) => {
-  if (o.cancelled_at) {
-    return { allowed: false, reason: "Order is cancelled" };
-  }
-
-  if (!["fulfilled", "delivered"].includes(o.fulfillment_status)) {
-    return { allowed: false, reason: "Order not delivered yet" };
-  }
-
-  const createdDate = new Date(o.created_at);
-  const now = new Date();
-
-  const diffDays = (now - createdDate) / (1000 * 60 * 60 * 24);
-
-  if (diffDays > 7) {
-    return { allowed: false, reason: "Return window expired (7 days)" };
-  }
-
-  return { allowed: true };
-};
-
-// Format order data
-const formatOrder = (o) => {
-  const cancelStatus = getCancelStatus(o);
-  const returnStatus = getReturnStatus(o);
-
-  const formattedOrder = {
-    order_id: o.order_number,
-    email: o.email,
-    financial_status: o.financial_status,
-    fulfillment_status: o.fulfillment_status,
-    created_at: o.created_at,
-    cancelled_at: o.cancelled_at,
-    cancel_reason: o.cancel_reason,
-    payment_gateways: o.payment_gateway_names,
-    note: o.note,
-    discount_codes: o?.discount_codes,
-    order_url: o?.order_status_url,
-
-    subtotal: `${getCurrencySymbol(o.presentment_currency)}${o.subtotal_price || 0}`,
-    discount: `${getCurrencySymbol(o.presentment_currency)}${o.total_discounts}`,
-    total: `${getCurrencySymbol(o.presentment_currency)}${o.total_price || 0}`,
-    tax: `${getCurrencySymbol(o.presentment_currency)}${o.total_tax || 0}`,
-
-    is_cancelable: cancelStatus.allowed,
-    cancel_message: cancelStatus.reason || "Eligible for cancel",
-    is_returnable: returnStatus.allowed,
-    return_message: returnStatus.reason || "Eligible for return",
-
-    items: o.line_items.map((item) => ({
-      line_item_id: item.id,
-      product_id: item.product_id,
-      variant_id: item.variant_id,
-      name: item.name,
-      quantity: item.quantity,
-      price: `${getCurrencySymbol(o.presentment_currency)}${item.price || 0}`,
-    })),
-  };
-
-  return formattedOrder;
-};
-
-// Helper function to call the backend api
-const callBackendAPI = async (method, endpoint, data = {}) => {
-  try {
-    const url = `${BACKEND_API_URL}${endpoint}`;
-    console.log("Backend api calling:", url);
-
-    const config = {
-      method,
-      url,
-      timeout: 15000,
-      data: data,
-    };
-
-    const response = await axios(config);
-    return response?.data?.data;
-  } catch (err) {
-    console.error("Error calling backend API, error:", err?.response?.data);
-    return null;
-  }
-};
-
-// Fetch products metadata
-const productsMetadata = async () => {
-  try {
-    const graphqlQuery = {
-      query: `query {
-        productTags(first: 250) {
-          edges {
-            node
-          }
-        }
-
-        productTypes(first: 250) {
-          edges {
-            node
-          }
-        }
-
-        collections(first: 250) {
-          edges {
-            node {
-              title
-            }
-          }
-        }
-
-        products(first: 250) {
-          edges {
-            node {
-              category {
-                name
-              }
-            }
-          }
-        }
-      }`,
-    };
-
-    const result = await callShopifyApi("POST", "", graphqlQuery);
-
-    if (result.errors) {
-      return {
-        tags: [],
-        types: [],
-        collections: [],
-        categories: [],
-      };
-    }
-
-    const tags =
-      result?.data?.productTags?.edges?.map((item) => item?.node) || [];
-
-    const types =
-      result?.data?.productTypes?.edges?.map((item) => item?.node) || [];
-
-    const collections =
-      result?.data?.collections?.edges?.map((item) => item?.node?.title) || [];
-
-    const categories = [
-      ...new Set(
-        (
-          result?.data?.products?.edges?.map(
-            (item) => item?.node?.category?.name,
-          ) || []
-        ).filter(Boolean),
-      ),
-    ];
-
-    return {
-      tags,
-      types,
-      collections,
-      categories,
-    };
-  } catch (error) {
-    console.error("productsMetadata Error:", error);
-
-    return {
-      tags: [],
-      types: [],
-      collections: [],
-      categories: [],
-    };
-  }
-};
-
-// Extract search keywords
-const extractSearchTerms = async (query) => {
-  if (!query || typeof query !== "string") {
-    return [];
-  }
-
-  try {
-    const metadata = await productsMetadata();
-
-    const prompt = `You are an eCommerce search query generator.
-
-Given a user query and store catalog metadata, generate 3-4 short search queries to find relevant products.
-
-Rules:
-- Each query should contain a maximum of 2 words and can also be a single-word query.
-- Queries must look like real ecommerce catalog searches
-- Use catalog metadata to pick accurate product type terms
-- Never use conversational language
-- Return ONLY a JSON array of strings, nothing else
-
-Store Catalog Metadata:
-- Product Types: ${metadata.types.filter(Boolean).join(", ") || "N/A"}
-- Collections: ${metadata.collections.filter(Boolean).join(", ") || "N/A"}
-- Categories: ${metadata.categories.filter(Boolean).join(", ") || "N/A"}
-- Tags: ${metadata.tags.filter(Boolean).slice(0, 50).join(", ") || "N/A"}
-
-User Query: "${query}"
-
-Return format: ["query1", "query2", "query3"]`;
-
-    const response = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: OPENAI_MODEL,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.3,
-        max_tokens: 100,
-      },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
-        timeout: 10000,
-      },
-    );
-
-    const content = response?.data?.choices?.[0]?.message?.content?.trim();
-    const cleaned = content.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(cleaned);
-
-    if (!Array.isArray(parsed)) return [];
-
-    return parsed
-      .filter((q) => typeof q === "string" && q.trim().length > 0)
-      .map((q) => q.trim().toLowerCase())
-      .slice(0, 4);
-  } catch (error) {
-    console.error("extractSearchTerms Error:", error);
-    return [];
-  }
-};
-
-// Helper to extract appliesTo
-const getAppliesTo = (discount) => {
-  const items = discount?.customerGets?.items;
-
-  if (!items) return { type: "all" };
-
-  switch (items.__typename) {
-    case "AllDiscountItems":
-      return { type: "all" };
-
-    case "DiscountProducts":
-      return {
-        type: "products",
-        products:
-          items.products?.edges?.map((e) => ({
-            // id: e.node.id.split("/").pop(),
-            title: e.node.title,
-          })) || [],
-      };
-
-    case "DiscountCollections":
-      return {
-        type: "collections",
-        collections:
-          items.collections?.edges?.map((e) => ({
-            // id: e.node.id.split("/").pop(),
-            title: e.node.title,
-          })) || [],
-      };
-
-    default:
-      return { type: "unknown" };
-  }
-};
-
-const getDiscountValue = (discount) => {
-  const value = discount?.customerGets?.value;
-
-  if (!value) return null;
-
-  switch (value.__typename) {
-    case "DiscountPercentage": {
-      const percentage = value.percentage * 100;
-      return {
-        type: "percentage",
-        value: percentage,
-        label: `${percentage}% OFF`,
-      };
-    }
-
-    case "DiscountAmount":
-      return {
-        type: "fixed",
-        value: parseFloat(value.amount?.amount || 0),
-        currency: value.amount?.currencyCode,
-        label: `₹${value.amount?.amount} OFF`,
-      };
-
-    default:
-      return null;
-  }
-};
-
-// Main formatter
-const formatDiscounts = (discounts) => {
-  if (!discounts || !Array.isArray(discounts)) return [];
-
-  const now = Date.now();
-
-  const validDiscounts = discounts.filter((d) => {
-    const discount = d?.node?.discount;
-    if (!discount) return false;
-
-    const startsAt = discount.startsAt
-      ? new Date(discount.startsAt).getTime()
-      : null;
-    const endsAt = discount.endsAt ? new Date(discount.endsAt).getTime() : null;
-
-    if (startsAt && startsAt > now) return false;
-    if (endsAt && endsAt < now) return false;
-
-    return true;
-  });
-
-  return validDiscounts.map((d) => {
-    const discount = d.node.discount;
-    const type = discount.__typename;
-
-    const code = discount.codes?.edges?.[0]?.node?.code || null;
-
-    const appliesTo = getAppliesTo(discount);
-
-    let normalizedType = "unknown";
-    let description;
-
-    switch (type) {
-      case "DiscountCodeBasic":
-        normalizedType = "code";
-        description = code
-          ? `Use code ${code} to get a discount`
-          : `Apply discount code to get offer`;
-        break;
-
-      case "DiscountAutomaticBasic":
-        normalizedType = "automatic";
-        description = "Discount will be applied automatically at checkout";
-        break;
-
-      case "DiscountAutomaticBxgy":
-        normalizedType = "bxgy";
-        description = discount.title || "Buy X get Y offer";
-        break;
-
-      case "DiscountAutomaticFreeShipping":
-        normalizedType = "free_shipping";
-        description = discount.title || "Free shipping offer";
-        break;
-
-      default:
-        description = discount.title || "Discount available";
-    }
-
-    // Improve description based on applicability
-    if (appliesTo.type === "collections" && appliesTo.collections.length) {
-      description += ` (Valid on ${appliesTo.collections.map((c) => c.title).join(", ")})`;
-    }
-
-    if (appliesTo.type === "products" && appliesTo.products.length) {
-      description += ` (Valid on selected products)`;
-    }
-
-    const discountValue = getDiscountValue(discount);
-
-    return {
-      type: normalizedType,
-      title: discount.title,
-      code,
-      description,
-      isAutomatic: type !== "DiscountCodeBasic",
-      appliesTo,
-      discountValue,
-    };
-  });
-};
-
-// Fetch related products using product id
-const fetchRelatedProducts = async (product_id) => {
-  try {
-    if (!product_id) return [];
-
-    const graphqlQuery = {
-      query: `query getRecommendations($productId: ID!) {
-        productRecommendations(productId: $productId) {
-          id
-        }
-      }`,
-      variables: {
-        productId: `gid://shopify/Product/${product_id}`,
-      },
-    };
-
-    // Call Shopify API
-    const searchResponse = await callShopifyApi("POST", "", graphqlQuery);
-
-    const recommendations = searchResponse?.data?.productRecommendations || [];
-
-    if (!recommendations.length) {
-      return [];
-    }
-
-    // Extract clean product IDs
-    const productIds = recommendations.map((product) =>
-      product.id.replace("gid://shopify/Product/", ""),
-    );
-
-    return productIds.slice(0, 4);
-  } catch (error) {
-    console.log("Related product search getting error, Error:", error);
-    return [];
-  }
-};
-
-// Sorting options
-const SortOption = Object.freeze({
-  RELEVANCE: "relevance",
-  PRICE_ASC: "price_asc",
-  PRICE_DESC: "price_desc",
-  NEWEST: "newest",
-  BEST_SELLING: "best_selling",
-});
-
-// Mapping of sorting options to Shopify sort keys and order
-const SHOPIFY_SORT_MAPPING = {
-  [SortOption.RELEVANCE]: {
-    sortKey: "RELEVANCE",
-    reverse: false,
-  },
-
-  [SortOption.PRICE_ASC]: {
-    sortKey: "PRICE",
-    reverse: false,
-  },
-
-  [SortOption.PRICE_DESC]: {
-    sortKey: "PRICE",
-    reverse: true,
-  },
-
-  [SortOption.NEWEST]: {
-    sortKey: "CREATED_AT",
-    reverse: true,
-  },
-
-  [SortOption.BEST_SELLING]: {
-    sortKey: "BEST_SELLING",
-    reverse: false,
-  },
-};
-
-// Helper to get Shopify sort arguments based on user-friendly sort key
-const getProductSortArgs = (sortKey) => {
-  if (!sortKey)
-    return `, sortKey: ${SHOPIFY_SORT_MAPPING.relevance.sortKey}, reverse: ${SHOPIFY_SORT_MAPPING.relevance.reverse}`;
-
-  const normalizedKey = String(sortKey).toLowerCase();
-  const mapping = SHOPIFY_SORT_MAPPING[normalizedKey];
-  if (!mapping) return "";
-  return `, sortKey: ${mapping.sortKey}, reverse: ${mapping.reverse}`;
-};
-
-// Tool 1: Search products
+// ********************************** MCP Tools **********************************
+// ######### 1. Search Products #########
 server.tool(
   "search_products",
   `Search for products based on the user's query. 
@@ -720,7 +69,6 @@ server.tool(
 
   Parameters:
   @param {string} query: The search query (product name, description, etc.)
-  @param {boolean} is_single: Whether to return a single product or multiple products
   @param {string} session_id: Session ID
   @param {string} store_code: Store name or code
   @param {boolean} full_details: 
@@ -731,10 +79,6 @@ server.tool(
       .describe("Search query (product name, description, etc.)"),
     session_id: z.string().describe("Session ID"),
     store_code: z.string().describe("Store name/code"),
-    is_single: z
-      .boolean()
-      .optional()
-      .describe("Whether to return a single product or multiple products"),
     full_details: z
       .boolean()
       .optional()
@@ -742,103 +86,24 @@ server.tool(
         "Whether to return full product details including variants, images, and URLs. Defaults to false.",
       ),
   },
-  async ({
-    query,
-    session_id,
-    store_code,
-    is_single = false,
-    full_details = false,
-  }) => {
+  async ({ query, session_id, store_code, full_details = false }) => {
     try {
-      if (!query?.includes("gid://shopify/Product/")) {
-        is_single = false;
+      const cacheKey = `search:${query}:${full_details ? "full" : "brief"}`;
+      const cached = await getCache(cacheKey);
+      if (cached) {
+        logProductViewEvents(cached.products, session_id, store_code);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(cached, null, 2),
+            },
+          ],
+        };
       }
 
-      const productFields = full_details
-        ? `
-        id 
-        title
-        handle 
-        productType
-        category {
-          name
-        }
-        availableForSale 
-        onlineStoreUrl 
-        description 
-        descriptionHtml
-
-        images(first: 5) { 
-        edges { 
-        node { 
-        url 
-        altText
-          } 
-        }
-          }
-
-    priceRange {
-    minVariantPrice {
-        amount
-        currencyCode
-    }
-    }
-
-        variants(first: 20) {
-          edges {
-            node {
-        id
-        title
-        priceV2 {
-            amount
-            currencyCode
-        }
-        compareAtPriceV2 {
-            amount
-            currencyCode
-        }
-        availableForSale
-        quantityAvailable
-        currentlyNotInStock
-        selectedOptions {
-            name
-            value
-        }
-            }
-          }
-        }`
-        : `
-        id 
-        title
-        category {
-          name
-        }
-        priceRange {
-          minVariantPrice {
-            amount
-            currencyCode
-          }
-        }
-        description 
-        availableForSale`;
-
       const graphqlQuery = {
-        query: is_single
-          ? `query getProductById($search: ID!) {
-              product(id: $search) {
-                ${productFields}
-              }
-            }`
-          : `query getProducts($search: String!) {
-              products(first: 5, query: $search) {
-                edges {
-                  node {
-                    ${productFields}
-                  }
-                }
-              }
-            }
-            `,
+        query: productSearchByQuery,
         variables: {
           search: query,
         },
@@ -847,46 +112,33 @@ server.tool(
       // Call Shopify API to search products
       const searchResponse = await callShopifyApi("POST", "", graphqlQuery);
 
-      if (!searchResponse?.data?.products?.edges && !is_single) {
+      // If no products found, return an error message.
+      if (!searchResponse?.data?.products?.edges) {
         return {
           content: [
             {
               type: "text",
-              text: "No products found for the given query",
+              text: "No products found for the query: ",
             },
           ],
-          isError: true,
         };
       }
 
-      if (is_single && !searchResponse?.data?.product) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "No product found for the given ID",
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      const formattedProducts = formatProducts(
-        !is_single
-          ? searchResponse.data.products.edges
-          : [{ node: searchResponse.data.product }],
+      // Format the products data to be returned
+      let formattedProducts = formatProducts(
+        searchResponse.data.products.edges,
         session_id,
         store_code,
         full_details,
       );
 
-      // BUILD FINAL RESPONSE
+      // Final response object to be returned, which may include related products if found.
       const result = {
         products: formattedProducts,
       };
 
+      // If no products found with the initial query, try extracting keywords and searching again.
       if (result?.products?.length === 0) {
-        // Retry with keywords
         const keywords = await extractSearchTerms(query);
         console.log(
           `No products found for this query "${query}", retrying with keywords - [${keywords}]...`,
@@ -894,16 +146,7 @@ server.tool(
 
         for (let q of keywords) {
           const gQuery = {
-            query: `query getProducts($search: String!) {
-              products(first: 5, query: $search) {
-                edges {
-                  node {
-                    ${productFields}
-                  }
-                }
-              }
-            }
-            `,
+            query: productSearchByQuery,
             variables: {
               search: q,
             },
@@ -911,7 +154,10 @@ server.tool(
 
           const searchResponse = await callShopifyApi("POST", "", gQuery);
 
-          if (searchResponse?.data?.products?.edges) {
+          if (
+            searchResponse?.data?.products?.edges &&
+            searchResponse?.data?.products?.edges?.length > 0
+          ) {
             const formattedProducts = formatProducts(
               searchResponse.data.products.edges,
               session_id,
@@ -925,8 +171,8 @@ server.tool(
         }
       }
 
-      // Fetch related products
-      if (result?.products && result?.products?.length > 0) {
+      // Fetch related products for the found products to provide more comprehensive results.
+      if (result?.products && result.products?.length > 0) {
         // Existing product IDs
         const existingProductIds = result.products.map((p) => String(p.id));
 
@@ -957,6 +203,12 @@ server.tool(
         }
       }
 
+      try {
+        await setCache(cacheKey, result);
+      } catch (e) {
+        console.warn("search cache set failed:", e?.message || e);
+      }
+
       return {
         content: [
           {
@@ -979,148 +231,260 @@ server.tool(
   },
 );
 
-// UTILITY FUNCTIONS (Moved outside the tool for reusability)
+// ######### 2. Fetch Products by IDs #########
+server.tool(
+  "get_products_by_ids",
+  `Fetch one or more products by their Shopify product IDs.
+  Returns the same shape as search_products.
 
-/**
- * Converts any length unit to centimeters
- * @param {number} value - The numeric value to convert
- * @param {string} unit - The unit (cm, m, ft, feet, inch, in)
- * @returns {number|null} - Value in centimeters, or null if invalid
- */
-const toCm = (value, unit) => {
-  if (!value) return null;
-  if (unit === "cm") return value;
-  if (unit === "m") return value * 100;
-  if (unit === "ft" || unit === "feet") return value * 30.48;
-  if (unit === "inch" || unit === "in") return value * 2.54;
-  return value;
-};
+  Use this when you already have product IDs (e.g. from a previous search,
+  a cart payload, or user-supplied links) and need full product details.
 
-/**
- * Extracts dimensions (length, width, height) from a product description
- * @param {string} description - The product description text
- * @returns {Object|null} - { length, width, height } in cm, or null if nothing found
- */
-const extractDimensions = (description) => {
-  if (!description) return null;
+  Parameters:
+  @param {string[]} product_ids  One or more numeric or GID product IDs
+  @param {string}   session_id   Session ID
+  @param {string}   store_code   Store name or code
+  `,
+  {
+    product_ids: z
+      .array(z.string())
+      .min(1)
+      .describe(
+        "One or more product IDs. Accepts plain numeric IDs ('123456789') " +
+          "or full GIDs ('gid://shopify/Product/123456789').",
+      ),
+    session_id: z.string().describe("Session ID"),
+    store_code: z.string().describe("Store name/code"),
+  },
+  async ({ product_ids, session_id, store_code }) => {
+    try {
+      // Deduplicate + normalize to full GID
+      const gids = [
+        ...new Set(
+          product_ids.map((id) =>
+            id.startsWith("gid://shopify/Product/")
+              ? id
+              : `gid://shopify/Product/${id}`,
+          ),
+        ),
+      ];
 
-  const text = description.replace(/\n/g, " ").toLowerCase();
+      // check cache first per product id
+      const numericIds = gids.map((g) =>
+        g.replace("gid://shopify/Product/", ""),
+      );
+      const cachedProducts = [];
+      const toFetch = [];
 
-  const extractValue = (label) => {
-    const regex = new RegExp(`${label}[^0-9]*([\\d.]+)\\s*(cm|m)`, "i");
-    const match = text.match(regex);
+      for (const id of numericIds) {
+        const cached = await getCache(`product:${id}`);
+        if (cached) cachedProducts.push(cached);
+        else toFetch.push(id);
+      }
 
-    if (!match) return null;
+      const singleProductQuery = (gid) => ({
+        query: productByIdQuery,
+        variables: { id: gid },
+      });
 
-    let value = parseFloat(match[1]);
-    const unit = match[2];
+      // Helper to fetch a single product by GID, returning the product node or null if not found.
+      const fetchOne = (gid) =>
+        callShopifyApi("POST", "", singleProductQuery(gid)).then(
+          (res) => res?.data?.product ?? null,
+        );
 
-    if (unit === "m") value = value * 100;
+      const CHUNK = 5;
+      const fetchedResults = [];
+      const missing = [];
 
-    return value;
-  };
+      if (toFetch.length > 0) {
+        // convert numeric IDs back to gids for fetchOne
+        const fetchGids = toFetch.map((id) => `gid://shopify/Product/${id}`);
+        for (let i = 0; i < fetchGids.length; i += CHUNK) {
+          const chunk = fetchGids.slice(i, i + CHUNK);
+          const settled = await Promise.allSettled(chunk.map(fetchOne));
+          settled.forEach((s, idx) => {
+            if (s.status === "fulfilled" && s.value)
+              fetchedResults.push(s.value);
+            else missing.push(chunk[idx]);
+          });
+        }
+      }
 
-  const length = extractValue("length");
-  const width = extractValue("width");
-  const height = extractValue("height");
+      const formattedFetched = fetchedResults.length
+        ? formatProducts(
+            fetchedResults.map((node) => ({ node })),
+            session_id,
+            store_code,
+            true,
+          )
+        : [];
 
-  return { length, width, height };
-};
+      // cache fetched products
+      for (const p of formattedFetched) {
+        try {
+          await setCache(`product:${p.id}`, p);
+        } catch (e) {
+          console.warn("product cache set failed:", e?.message || e);
+        }
+      }
 
-/**
- * Normalizes dimensions by filling in missing values
- * If only one dimension exists, it's used for both length and width
- * @param {Object} dims - Raw dimensions object from extractDimensions
- * @returns {Object|null} - Normalized { length, width } or null if both missing
- */
-const normalizeDims = (dims) => {
-  if (!dims) return null;
+      const formattedProducts = [...cachedProducts, ...formattedFetched];
 
-  let { length, width } = dims;
+      if (formattedProducts.length === 0) {
+        return {
+          content: [
+            { type: "text", text: "No products found for the provided IDs." },
+          ],
+        };
+      }
 
-  if (!length && width) length = width;
-  if (!width && length) width = length;
+      logProductViewEvents(formattedProducts, session_id, store_code);
 
-  if (!length && !width) return null;
+      const responsePayload = {
+        products: formattedProducts,
+        ...(missing.length > 0 && { missing_ids: missing }),
+      };
 
-  return { length, width };
-};
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(responsePayload, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching products by ID: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
 
-/**
- * Calculates a relevance score for a product based on its suitability for small spaces
- * @param {Object} product - The product object
- * @param {Object} dims - Normalized dimensions { length, width }
- * @returns {number} - Relevance score (higher = better fit for small spaces)
- */
-const getRelevanceScore = (product, dims) => {
-  let score = 0;
+// ######### 3. Fetch Sorted Products #########
+server.tool(
+  "get_products_sorted",
+  `Fetch up to 5 products, sorted by Shopify sort options. Supported sort keys: relevance, price_asc, price_desc, newest, best_selling.
 
-  const title = (product.title || "").toLowerCase();
+  Parameters:
+  @param {string} session_id: Session ID
+  @param {string} store_code: Store name or code
+  @param {string} [sort_key]: Sort key. Supported values: relevance, price_asc, price_desc, newest, best_selling, featured.
+  `,
+  {
+    session_id: z.string().describe("Session ID"),
+    store_code: z.string().describe("Store name/code"),
+    sort_key: z.string().describe("Sort key for the product list"),
+  },
+  async ({ session_id, store_code, sort_key }) => {
+    try {
+      const cacheKey = `get_products_sorted:${String(sort_key || "relevance")}`;
+      const cached = await getCache(cacheKey);
+      if (cached) {
+        logProductViewEvents(cached.products, session_id, store_code);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(cached, null, 2),
+            },
+          ],
+        };
+      }
 
-  // Good for small spaces
-  if (
-    title.includes("table") ||
-    title.includes("side") ||
-    title.includes("stool")
-  )
-    score += 3;
-  if (title.includes("wall") || title.includes("shelf")) score += 4;
+      const { sortKey, reverse } = getProductSortConfig(sort_key);
 
-  // Bad for small spaces
-  if (
-    title.includes("sofa") ||
-    title.includes("bed") ||
-    title.includes("wardrobe")
-  )
-    score -= 5;
-  if (title.includes("sideboard")) score -= 3;
+      const graphqlQuery = {
+        query: productSortQuery,
+        variables: {
+          sortKey,
+          reverse,
+        },
+      };
 
-  // Dimension-based scoring
-  if (dims) {
-    const area = dims.length * dims.width;
-    if (area < 5000) score += 3;
-    else if (area < 10000) score += 1;
-    else score -= 2;
-  }
+      const response = await callShopifyApi("POST", "", graphqlQuery);
 
-  return score;
-};
+      const products = response?.data?.products?.edges || [];
 
-/**
- * Parses and validates space input, converting to centimeters
- * @param {Object} space - Raw space object from tool input
- * @returns {Object|null} - { widthCm, lengthCm, isValid } or null if invalid
- */
-const parseSpaceInput = (space) => {
-  if (!space || typeof space !== "object") {
-    console.warn("Invalid space object:", space);
-    return null;
-  }
+      const formattedProducts = formatProducts(
+        products,
+        session_id,
+        store_code,
+        false,
+      );
 
-  const width =
-    typeof space.width === "number" ? space.width : parseFloat(space.width);
-  const length =
-    typeof space.length === "number" ? space.length : parseFloat(space.length);
-  const unit = space.unit?.toLowerCase();
+      const result = { products: formattedProducts };
+      try {
+        await setCache(cacheKey, result);
+      } catch (cacheError) {
+        console.warn(
+          "get_products_sorted cache set failed:",
+          cacheError?.message || cacheError,
+        );
+      }
 
-  if (isNaN(width) || isNaN(length) || !unit) {
-    console.warn("Invalid dimensions in space:", space);
-    return null;
-  }
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching sorted products: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
 
-  const widthCm = toCm(width, unit);
-  const lengthCm = toCm(length, unit);
+// ######### 4. Fetch Store Metadata #########
+server.tool(
+  "get_store_meta_info",
+  `Fetch metadata about the store's product catalog.
+  Returns product tags, types, collections, and categories available in the store.
+  `,
+  async () => {
+    try {
+      const metadata = await storeMetadata();
 
-  return {
-    widthCm,
-    lengthCm,
-    isValid: true,
-    original: { width, length, unit },
-  };
-};
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(metadata, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching store metadata: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
 
-// TOOL 11: Filter products by space
-
+// ######### 5. Filter Products by Space #########
 server.tool(
   "filter_products_by_space",
   `Filters and ranks products based on available space by extracting dimensions from product descriptions.
@@ -1250,7 +614,248 @@ server.tool(
   },
 );
 
-// Tool 2: Get order details
+// ######### 6. List Available Discounts #########
+server.tool(
+  "list_available_discounts",
+  `List all available discounts from the store.
+  Returns active discount codes, automatic discounts (price rules), and their details.
+  `,
+  {},
+  async () => {
+    try {
+      const cacheKey = "available_discounts";
+      const cached = await getCache(cacheKey);
+      if (cached) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(cached, null, 2),
+            },
+          ],
+        };
+      }
+
+      const graphqlQuery = {
+        query: discountQuery,
+      };
+
+      const response = await callShopifyApi("POST", "", graphqlQuery, true);
+
+      if (
+        !response?.data?.discountNodes?.edges ||
+        response?.data?.discountNodes?.edges?.length < 1
+      ) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "No discounts found.",
+            },
+          ],
+        };
+      }
+
+      const discounts = formatDiscounts(response?.data?.discountNodes?.edges);
+
+      if (discounts.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "No discounts found.",
+            },
+          ],
+        };
+      }
+
+      // Sort by end date (active first)
+      discounts.sort((a, b) => new Date(b.ends_at) - new Date(a.ends_at));
+
+      const payload = {
+        total: discounts.length,
+        discounts: discounts,
+      };
+
+      try {
+        await setCache(cacheKey, payload);
+      } catch (cacheError) {
+        console.warn(
+          "available_discounts cache set failed:",
+          cacheError?.message || cacheError,
+        );
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(payload, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("Error fetching discounts:", error);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching available discounts: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ######### 7. Send OTP #########
+server.tool(
+  "send_otp",
+  `Send a verification OTP to the provided email.
+  This tool is strictly used for order tracking verification.
+
+  Parameters:
+  @param {string} email - User email to receive OTP
+  @param {string} session_id - Unique session identifier
+  `,
+  {
+    email: z.string().email().describe("User email address"),
+    session_id: z.string().min(5).describe("Unique session identifier"),
+  },
+  async ({ email, session_id }) => {
+    try {
+      const verificationStatus = await callBackendAPI(
+        "POST",
+        "/chat/email/verify-status/",
+        { thread_id: session_id, email: email },
+      );
+      if (verificationStatus && verificationStatus?.is_verified) {
+        return {
+          content: [{ type: "text", text: "Your email is already verified." }],
+          isError: false,
+        };
+      }
+
+      // Check customer existence (Admin API only)
+      const customerResponse = await callShopifyApi(
+        "GET",
+        `/admin/api/2024-01/customers/search.json?query=email:${encodeURIComponent(email)}`,
+      );
+
+      // Prevent email enumeration
+      if (
+        !customerResponse?.customers?.length ||
+        customerResponse?.customers?.length === 0
+      ) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "No account found with this email.",
+            },
+          ],
+        };
+      }
+
+      const otpResponse = await callBackendAPI("POST", "/chat/otp/generate/", {
+        thread_id: session_id,
+        email: email,
+      });
+
+      if (!otpResponse || !otpResponse?.otp) {
+        return {
+          content: [
+            { type: "text", text: "Failed to send otp, please try again." },
+          ],
+          isError: true,
+        };
+      }
+
+      // Send email
+      await transporter.sendMail({
+        from: `"Shopify Support" <${process.env.SMTP_USER}>`,
+        to: email,
+        subject: "Your verification code",
+        text: `Your verification code is ${otpResponse?.otp}. It will expire in ${otpResponse?.expires_in_seconds} seconds.`,
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              // "If an account exists with this email, a verification code has been sent.",
+              "A 6-digit verification code has been sent to your email.",
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("Send OTP error:", error);
+      return {
+        content: [
+          { type: "text", text: "Unable to send verification code right now." },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ######### 8. Verify OTP #########
+server.tool(
+  "verify_otp",
+  `Verify an OTP sent for order tracking email verification.
+
+  Parameters:
+  @param {string} email - User email used for verification
+  @param {string} otp_code - 6 digit OTP
+  @param {string} session_id - Session identifier
+  `,
+  {
+    email: z.string().email().describe("User email"),
+    otp_code: z.string().length(6).describe("6 digit OTP"),
+    session_id: z.string().describe("Session identifier"),
+  },
+  async ({ email, otp_code, session_id }) => {
+    try {
+      const payload = {
+        thread_id: session_id,
+        email: email,
+        otp: otp_code,
+      };
+      const verificationResponse = await callBackendAPI(
+        "POST",
+        "/chat/otp/verify/",
+        payload,
+      );
+
+      if (!verificationResponse || !verificationResponse?.is_verified) {
+        return {
+          content: [
+            { type: "text", text: "Invalid or expired verification code." },
+          ],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [{ type: "text", text: "Verification successful." }],
+        verified: true,
+      };
+    } catch (error) {
+      console.error("Verify OTP error:", error);
+      return {
+        content: [
+          { type: "text", text: "Verification failed. Please try again." },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ######### 9. Get Order Detail #########
 server.tool(
   "get_order_detail",
   `Fetch a specific order by order number and email.
@@ -1348,995 +953,7 @@ server.tool(
   },
 );
 
-// Tool 3: Cart Details
-server.tool(
-  "get_cart_details",
-  `Retrieve cart details using a Shopify Storefront Cart ID.
-
-  This tool returns cart items, pricing summary, and checkout URL.
-  It must only be used when a Cart ID already exists in context.
-
-  Parameters:
-  @param {string} cart_id - Shopify Storefront Cart ID (gid://shopify/Cart/...)
-  @param {string} session_id: Session ID
-  @param {string} store_code: Store name or code
-  `,
-  {
-    cart_id: z
-      .string()
-      .startsWith("gid://shopify/Cart/")
-      .describe("Shopify Storefront Cart ID"),
-    session_id: z.string().describe("Session ID"),
-    store_code: z.string().describe("Store name/code"),
-  },
-  async ({ cart_id, session_id, store_code }) => {
-    try {
-      const graphqlQuery = {
-        query: `query getCart($cartId: ID!) {
-          cart(id: $cartId) {
-            id
-            checkoutUrl
-            lines(first: 50) {
-              edges {
-                node {
-                  id
-                  quantity
-                  merchandise {
-                    ... on ProductVariant {
-                      id
-                      title
-                      availableForSale
-                      price {
-                        amount
-                        currencyCode
-                      }
-                      product {
-                        title
-                      }
-                    }
-                  }
-                }
-              }
-            }
-            cost {
-              subtotalAmount {
-                amount
-                currencyCode
-              }
-              totalTaxAmount {
-                amount
-                currencyCode
-              }
-              totalAmount {
-                amount
-                currencyCode
-              }
-            }
-          }
-        }`,
-        variables: {
-          cartId: cart_id,
-        },
-      };
-
-      const response = await callShopifyApi("POST", "", graphqlQuery);
-
-      const cart = response?.data?.cart;
-
-      callBackendAPI("POST", "/chat/bot-events/", {
-        thread_id: session_id,
-        event_type: "checkout_link",
-        store_code: store_code,
-      });
-
-      if (!cart) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Unable to retrieve cart details at the moment.",
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      // Normalize cart items
-      const items = cart.lines.edges.map(({ node }) => ({
-        lineId: node.id,
-        productName: node.merchandise.product.title,
-        variantTitle: node.merchandise.title,
-        quantity: node.quantity,
-        price: `${getCurrencySymbol(node.merchandise.price?.currencyCode)}${node.merchandise.price?.amount || 0}`,
-        currency: node.merchandise.price.currencyCode,
-        inStock: node.merchandise.availableForSale,
-      }));
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                cartID: cart.id,
-                items,
-                subtotal: `${getCurrencySymbol(cart.cost.subtotalAmount?.currencyCode)}${cart.cost.subtotalAmount?.amount || 0}`,
-                tax: `${getCurrencySymbol(cart.cost.totalTaxAmount?.currencyCode)}${cart.cost.totalTaxAmount?.amount || 0}`,
-                total: `${getCurrencySymbol(cart.cost.totalAmount?.currencyCode)}${cart.cost.totalAmount?.amount || 0}`,
-                checkoutUrl: cart.checkoutUrl,
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    } catch (error) {
-      console.error("Get cart details error:", error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Something went wrong while fetching your cart.",
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// Tool 4: Add to cart
-server.tool(
-  "add_to_cart",
-  `Add a product variant to cart.
-  If cart_id is not provided, a new cart will be created first.
-
-  Parameters:
-  @param {string} variant_id: Shopify ProductVariant ID
-  @param {number} quantity: Quantity to add
-  @param {string} session_id: Session ID
-  @param {string} [cart_id]: Existing cart ID (optional)
-  @param {string} store_code: Store name or code
-  `,
-  {
-    variant_id: z
-      .string()
-      .describe("Shopify ProductVariant ID (gid://shopify/ProductVariant/...)"),
-    quantity: z.number().min(1).describe("Quantity to add"),
-    session_id: z.string().describe("Session ID"),
-    cart_id: z.string().optional().describe("Existing cart ID (optional)"),
-    store_code: z.string().describe("Store name/code"),
-  },
-  async ({ variant_id, quantity, session_id, cart_id, store_code }) => {
-    try {
-      let cartId = cart_id;
-
-      /* --------------------------------------------------
-         STEP 1: Create cart if not exists
-      -------------------------------------------------- */
-      if (!cartId) {
-        const createCartQuery = {
-          query: `
-            mutation cartCreate {
-              cartCreate {
-                cart {
-                  id
-                  checkoutUrl
-                }
-              }
-            }
-          `,
-        };
-
-        const createCartResponse = await callShopifyApi(
-          "POST",
-          "",
-          createCartQuery,
-        );
-
-        cartId = createCartResponse?.data?.cartCreate?.cart?.id;
-
-        if (!cartId) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Failed to create cart",
-              },
-            ],
-            isError: true,
-          };
-        }
-      }
-
-      /* --------------------------------------------------
-         STEP 2: Add item to cart
-      -------------------------------------------------- */
-      const addToCartQuery = {
-        query: `
-          mutation cartLinesAdd($cartId: ID!, $lines: [CartLineInput!]!) {
-            cartLinesAdd(cartId: $cartId, lines: $lines) {
-              cart {
-                id
-                checkoutUrl
-                lines(first: 20) {
-                  edges {
-                    node {
-                      id
-                      quantity
-                      merchandise {
-                        ... on ProductVariant {
-                          id
-                          title
-                          price {
-                            amount
-                            currencyCode
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-              userErrors {
-                field
-                message
-              }
-            }
-          }
-        `,
-        variables: {
-          cartId,
-          lines: [
-            {
-              merchandiseId: variant_id,
-              quantity,
-            },
-          ],
-        },
-      };
-
-      const addResponse = await callShopifyApi("POST", "", addToCartQuery);
-
-      const cart = addResponse?.data?.cartLinesAdd?.cart;
-      const errors = addResponse?.data?.cartLinesAdd?.userErrors || [];
-
-      if (!cart) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Failed to add item to cart",
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      /* --------------------------------------------------
-         STEP 3: Normalize cart response
-      -------------------------------------------------- */
-      const formattedCart = {
-        cart_id: cart.id,
-        checkout_url: cart.checkoutUrl,
-        items: cart.lines.edges.map(({ node }) => ({
-          cart_line_id: node.id,
-          variant_id: node.merchandise.id,
-          title: node.merchandise.title,
-          quantity: node.quantity,
-          price: `${getCurrencySymbol(node?.merchandise?.price?.currencyCode)}${node?.merchandise?.price?.amount || 0}`,
-        })),
-      };
-
-      callBackendAPI("POST", "/chat/bot-events/", {
-        thread_id: session_id,
-        event_type: "add_to_cart",
-        store_code: store_code,
-      });
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                cart: formattedCart,
-                userErrors: errors,
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error adding to cart: ${error.message}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// Tool 5: Update cart item quantity
-server.tool(
-  "update_cart_item",
-  `Update quantity of a cart line item.
-
-  Parameters:
-  @param {string} cart_id: Shopify Cart ID
-  @param {string} cart_line_id: CartLine ID
-  @param {number} quantity: New quantity
-  `,
-  {
-    cart_id: z.string().describe("Shopify Cart ID"),
-    cart_line_id: z.string().describe("CartLine ID"),
-    quantity: z.number().min(1).describe("New quantity"),
-  },
-  async ({ cart_id, cart_line_id, quantity }) => {
-    try {
-      const graphqlQuery = {
-        query: `
-          mutation cartLinesUpdate(
-            $cartId: ID!,
-            $lines: [CartLineUpdateInput!]!
-          ) {
-            cartLinesUpdate(cartId: $cartId, lines: $lines) {
-              cart {
-                id
-                checkoutUrl
-                lines(first: 20) {
-                  edges {
-                    node {
-                      id
-                      quantity
-                      merchandise {
-                        ... on ProductVariant {
-                          id
-                          title
-                          price {
-                            amount
-                            currencyCode
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-              userErrors {
-                field
-                message
-              }
-            }
-          }
-        `,
-        variables: {
-          cartId: cart_id,
-          lines: [
-            {
-              id: cart_line_id,
-              quantity,
-            },
-          ],
-        },
-      };
-
-      const response = await callShopifyApi("POST", "", graphqlQuery);
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(response.data.cartLinesUpdate, null, 2),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error updating cart item: ${error.message}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// Tool 6: Remove item from cart
-server.tool(
-  "remove_from_cart",
-  `Remove an item from cart.
-
-  Parameters:
-  @param {string} cart_id: Shopify Cart ID
-  @param {string} cart_line_id: CartLine ID to remove
-  `,
-  {
-    cart_id: z.string().describe("Shopify Cart ID"),
-    cart_line_id: z.string().describe("CartLine ID"),
-  },
-  async ({ cart_id, cart_line_id }) => {
-    try {
-      const graphqlQuery = {
-        query: `
-          mutation cartLinesRemove(
-            $cartId: ID!,
-            $lineIds: [ID!]!
-          ) {
-            cartLinesRemove(cartId: $cartId, lineIds: $lineIds) {
-              cart {
-                id
-                checkoutUrl
-                lines(first: 20) {
-                  edges {
-                    node {
-                      id
-                      quantity
-                      merchandise {
-                        ... on ProductVariant {
-                          title
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-              userErrors {
-                field
-                message
-              }
-            }
-          }
-        `,
-        variables: {
-          cartId: cart_id,
-          lineIds: [cart_line_id],
-        },
-      };
-
-      const response = await callShopifyApi("POST", "", graphqlQuery);
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(response.data.cartLinesRemove, null, 2),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error removing cart item: ${error.message}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// Tool 7: Send OTP
-server.tool(
-  "send_otp",
-  `Send a verification OTP to the provided email.
-  This tool is strictly used for order tracking verification.
-
-  Parameters:
-  @param {string} email - User email to receive OTP
-  @param {string} session_id - Unique session identifier
-  `,
-  {
-    email: z.string().email().describe("User email address"),
-    session_id: z.string().min(5).describe("Unique session identifier"),
-  },
-  async ({ email, session_id }) => {
-    try {
-      const verificationStatus = await callBackendAPI(
-        "POST",
-        "/chat/email/verify-status/",
-        { thread_id: session_id, email: email },
-      );
-      if (verificationStatus && verificationStatus?.is_verified) {
-        return {
-          content: [{ type: "text", text: "Your email is already verified." }],
-          isError: false,
-        };
-      }
-
-      // Check customer existence (Admin API only)
-      const customerResponse = await callShopifyApi(
-        "GET",
-        `/admin/api/2024-01/customers/search.json?query=email:${encodeURIComponent(email)}`,
-      );
-
-      // Prevent email enumeration
-      if (
-        !customerResponse?.customers?.length ||
-        customerResponse?.customers?.length === 0
-      ) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "No account found with this email.",
-            },
-          ],
-        };
-      }
-
-      const otpResponse = await callBackendAPI("POST", "/chat/otp/generate/", {
-        thread_id: session_id,
-        email: email,
-      });
-
-      if (!otpResponse || !otpResponse?.otp) {
-        return {
-          content: [
-            { type: "text", text: "Failed to send otp, please try again." },
-          ],
-          isError: true,
-        };
-      }
-
-      // Send email
-      await transporter.sendMail({
-        from: `"Shopify Support" <${process.env.SMTP_USER}>`,
-        to: email,
-        subject: "Your verification code",
-        text: `Your verification code is ${otpResponse?.otp}. It will expire in ${otpResponse?.expires_in_seconds} seconds.`,
-      });
-
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              // "If an account exists with this email, a verification code has been sent.",
-              "A 6-digit verification code has been sent to your email.",
-          },
-        ],
-      };
-    } catch (error) {
-      console.error("Send OTP error:", error);
-      return {
-        content: [
-          { type: "text", text: "Unable to send verification code right now." },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// Tool 8: Verify OTP
-server.tool(
-  "verify_otp",
-  `Verify an OTP sent for order tracking email verification.
-
-  Parameters:
-  @param {string} email - User email used for verification
-  @param {string} otp_code - 6 digit OTP
-  @param {string} session_id - Session identifier
-  `,
-  {
-    email: z.string().email().describe("User email"),
-    otp_code: z.string().length(6).describe("6 digit OTP"),
-    session_id: z.string().describe("Session identifier"),
-  },
-  async ({ email, otp_code, session_id }) => {
-    try {
-      const payload = {
-        thread_id: session_id,
-        email: email,
-        otp: otp_code,
-      };
-      const verificationResponse = await callBackendAPI(
-        "POST",
-        "/chat/otp/verify/",
-        payload,
-      );
-
-      if (!verificationResponse || !verificationResponse?.is_verified) {
-        return {
-          content: [
-            { type: "text", text: "Invalid or expired verification code." },
-          ],
-          isError: true,
-        };
-      }
-
-      return {
-        content: [{ type: "text", text: "Verification successful." }],
-        verified: true,
-      };
-    } catch (error) {
-      console.error("Verify OTP error:", error);
-      return {
-        content: [
-          { type: "text", text: "Verification failed. Please try again." },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// Tool 9: Order Cancellation
-server.tool(
-  "order_cancel",
-  `Cancel an order for a user.
-
-  Parameters:
-  @param {string} email - User email
-  @param {string} order_id - Order ID
-  @param {string} cancel_reason - Reason for cancellation
-  @param {string} session_id - Session identifier
-  `,
-  {
-    email: z.string().email().describe("User email"),
-    order_id: z.string().describe("Order ID (e.g. '1026')"),
-    cancel_reason: z
-      .string()
-      .max(255)
-      .optional()
-      .describe("Reason for cancellation"),
-    session_id: z.string().describe("Session identifier"),
-  },
-  async ({ email, order_id, cancel_reason, session_id }) => {
-    try {
-      const record = sessionStore.get(session_id);
-
-      if (
-        !record ||
-        !record.emails.includes(email) ||
-        Date.now() > record.expires
-      ) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Invalid or expired session. Please verify email with otp verification.",
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      // Fetch order details
-      const order_query = `email:${email} AND name:#${order_id}`;
-
-      const graphqlQuery = {
-        query: `
-          query GetOrder($query: String!) {
-            orders(first: 1, query: $query) {
-              edges {
-                node {
-                  id cancelledAt legacyResourceId
-                }
-              }
-            }
-          }
-        `,
-        variables: {
-          query: order_query,
-        },
-      };
-
-      const response = await callShopifyApi("POST", "", graphqlQuery, true);
-
-      const edge = response?.data?.orders?.edges?.[0];
-
-      if (!edge) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "No order found for the given identifier",
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      const o = edge.node;
-
-      // Check if already cancelled
-      if (o?.cancelledAt) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Order is already cancelled.",
-            },
-          ],
-        };
-      }
-
-      // Cancel the order (Admin API)
-      const endpoint = `/admin/api/2024-04/orders/${o.legacyResourceId}/cancel.json`;
-
-      const cancelResponse = await callShopifyApi(
-        "POST",
-        endpoint,
-        {
-          reason: cancel_reason || "customer",
-        },
-        true,
-      );
-
-      if (cancelResponse?.order?.cancelled_at) {
-        return {
-          content: [{ type: "text", text: "Order cancelled successfully." }],
-        };
-      } else {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Order cancellation failed: ${cancelResponse?.errors?.[0]?.message || "Unknown error"}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    } catch (error) {
-      console.error("Verify OTP error:", error);
-      return {
-        content: [
-          { type: "text", text: "Verification failed. Please try again." },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// Tool 10: Order Return
-server.tool(
-  "order_return",
-  `Create a return request for an order.
-
-  Parameters:
-  @param {string} email - User email
-  @param {string} order_id - Order ID
-  @param {Array} return_items - Items to return (line_item_id + quantity)
-  @param {string} return_reason - Reason for return (optional)
-  @param {string} session_id - Session identifier
-  `,
-  {
-    email: z.string().email().describe("User email"),
-    order_id: z.string().describe("Order ID (e.g. '1033')"),
-    return_items: z
-      .array(
-        z.object({
-          line_item_id: z.string().describe("Shopify line item ID"),
-          quantity: z.number().min(1).describe("Quantity to return"),
-        }),
-      )
-      .min(1)
-      .describe("Items to return"),
-    return_reason: z.string().max(255).optional().describe("Reason for return"),
-    session_id: z.string().describe("Session identifier"),
-  },
-  async ({ email, order_id, return_items, return_reason, session_id }) => {
-    try {
-      /* -------------------- Session validation -------------------- */
-      const record = sessionStore.get(session_id);
-
-      if (
-        !record ||
-        !record.emails.includes(email) ||
-        Date.now() > record.expires
-      ) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Invalid or expired session. Please verify your email again.",
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      /* -------------------- Fetch order -------------------- */
-      const order_query = `email:${email} AND name:#${order_id}`;
-
-      const graphqlQuery = {
-        query: `
-          query GetOrder($query: String!) {
-            orders(first: 1, query: $query) {
-              edges {
-                node {
-                  id
-                  legacyResourceId
-                  displayFulfillmentStatus
-                  displayFinancialStatus
-                  cancelledAt
-                  lineItems(first: 10) {
-                    edges {
-                      node {
-                        id
-                        title
-                        originalUnitPriceSet {
-                            shopMoney {
-                                amount
-                                currencyCode
-                            }
-                        }
-                        discountedUnitPriceSet {
-                            shopMoney {
-                                amount
-                                currencyCode
-                            }
-                        }
-                        quantity
-                        fulfillableQuantity
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        `,
-        variables: { query: order_query },
-      };
-
-      const response = await callShopifyApi("POST", "", graphqlQuery, true);
-      const edge = response?.data?.orders?.edges?.[0];
-
-      if (!edge) {
-        return {
-          content: [
-            { type: "text", text: "No order found for the given identifier." },
-          ],
-          isError: true,
-        };
-      }
-
-      const order = edge.node;
-
-      /* -------------------- Eligibility checks -------------------- */
-
-      // Already cancelled
-      if (order.cancelledAt) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "This order has already been cancelled and cannot be returned.",
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      // Not fulfilled → return not allowed
-      if (order.fulfillmentStatus !== "FULFILLED") {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "This order has not been delivered yet. You can cancel the order instead of returning it.",
-            },
-          ],
-          // isError: true,
-        };
-      }
-
-      /* -------------------- Validate return items -------------------- */
-      const validLineItems = order.lineItems.edges.map((e) => e.node);
-
-      for (const item of return_items) {
-        const li = validLineItems.find(
-          (l) => String(l.id) === String(item.line_item_id),
-        );
-
-        if (!li) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "One or more selected items are invalid for return.",
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        if (item.quantity > li.quantity) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Return quantity exceeds purchased quantity.",
-              },
-            ],
-            isError: true,
-          };
-        }
-      }
-
-      /* -------------------- Create return -------------------- */
-      const returnMutation = {
-        query: `
-          mutation returnCreate($input: ReturnCreateInput!) {
-            returnCreate(input: $input) {
-              return {
-                id
-                status
-              }
-              userErrors {
-                message
-              }
-            }
-          }
-        `,
-        variables: {
-          input: {
-            orderId: order.id,
-            returnLineItems: return_items.map((item) => ({
-              lineItemId: item.line_item_id,
-              quantity: item.quantity,
-            })),
-            note: return_reason || "Customer initiated return",
-          },
-        },
-      };
-
-      const returnResponse = await callShopifyApi(
-        "POST",
-        "",
-        returnMutation,
-        true,
-      );
-      const errors = returnResponse?.data?.returnCreate?.userErrors;
-
-      if (errors && errors.length > 0) {
-        return {
-          content: [{ type: "text", text: errors[0].message }],
-          isError: true,
-        };
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Return request created successfully. Further instructions will be shared shortly.",
-          },
-        ],
-      };
-    } catch (error) {
-      console.error("Order return error:", error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Unable to create return at the moment. Please try again later.",
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// Tool 11: Create Support Ticket
+// ######### 10. Create Support Ticket #########
 server.tool(
   "create_support_ticket",
   `Create a support ticket for a customer issue.
@@ -2441,7 +1058,8 @@ server.tool(
         store_code: store_code,
         ticket_id: ticketId,
       };
-      callBackendAPI("POST", "/support/threads/session_id/tickets/", payload);
+
+      callBackendAPI("POST", `/support/tickets/`, payload);
 
       // Success Response
       return {
@@ -2465,509 +1083,14 @@ server.tool(
     }
   },
 );
-// Tool 12: Get products by ID or IDs
-server.tool(
-  "get_products_by_ids",
-  `Fetch one or more products by their Shopify product IDs.
-  Returns the same shape as search_products.
 
-  Use this when you already have product IDs (e.g. from a previous search,
-  a cart payload, or user-supplied links) and need full product details.
+// ********************************** End of MCP Tools **********************************
 
-  Parameters:
-  @param {string[]} product_ids  One or more numeric or GID product IDs
-  @param {string}   session_id   Session ID
-  @param {string}   store_code   Store name or code
-  `,
-  {
-    product_ids: z
-      .array(z.string())
-      .min(1)
-      .describe(
-        "One or more product IDs. Accepts plain numeric IDs ('123456789') " +
-          "or full GIDs ('gid://shopify/Product/123456789').",
-      ),
-    session_id: z.string().describe("Session ID"),
-    store_code: z.string().describe("Store name/code"),
-  },
-  async ({ product_ids, session_id, store_code }) => {
-    try {
-      // Deduplicate + normalise to full GID
-      const gids = [
-        ...new Set(
-          product_ids.map((id) =>
-            id.startsWith("gid://shopify/Product/")
-              ? id
-              : `gid://shopify/Product/${id}`,
-          ),
-        ),
-      ];
-
-      const singleProductQuery = (gid) => ({
-        query: `query getProductById($id: ID!) {
-          product(id: $id) {
-            id title handle productType category { name } availableForSale onlineStoreUrl
-            description descriptionHtml
-            images(first: 5) { edges { node { url altText } } }
-            priceRange { minVariantPrice { amount currencyCode } }
-            variants(first: 20) {
-              edges {
-                node {
-                  id title
-                  priceV2 { amount currencyCode }
-                  compareAtPriceV2 { amount currencyCode }
-                  availableForSale quantityAvailable currentlyNotInStock
-                  selectedOptions { name value }
-                }
-              }
-            }
-          }
-        }`,
-        variables: { id: gid },
-      });
-
-      const fetchOne = (gid) =>
-        callShopifyApi("POST", "", singleProductQuery(gid)).then(
-          (res) => res?.data?.product ?? null,
-        );
-
-      const CHUNK = 5;
-      const results = [];
-      const missing = [];
-
-      for (let i = 0; i < gids.length; i += CHUNK) {
-        const chunk = gids.slice(i, i + CHUNK);
-        const settled = await Promise.allSettled(chunk.map(fetchOne));
-        settled.forEach((s, idx) => {
-          if (s.status === "fulfilled" && s.value) results.push(s.value);
-          else missing.push(chunk[idx]); // tracks not-found + errored IDs
-        });
-      }
-
-      if (results.length === 0) {
-        return {
-          content: [
-            { type: "text", text: "No products found for the provided IDs." },
-          ],
-          isError: true,
-        };
-      }
-
-      const formattedProducts = formatProducts(
-        results.map((node) => ({ node })),
-        session_id,
-        store_code,
-        true,
-      );
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                products: formattedProducts,
-                ...(missing.length > 0 && { missing_ids: missing }),
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching products by ID: ${error.message}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// Tool 13: List available discounts
-server.tool(
-  "list_available_discounts",
-  `List all available discounts from the store.
-  Returns active discount codes, automatic discounts (price rules), and their details.
-  `,
-  {},
-  async () => {
-    try {
-      const graphqlQuery = {
-        query: `{
-                discountNodes(first: 20) {
-                  edges {
-                    node {
-                      id
-                      discount {
-                        __typename
-
-                        ... on DiscountAutomaticBasic {
-                          title
-                          startsAt
-                          endsAt
-
-                          customerGets {
-                            value {
-                              __typename
-
-                              ... on DiscountPercentage {
-                                percentage
-                              }
-
-                              ... on DiscountAmount {
-                                amount {
-                                  amount
-                                  currencyCode
-                                }
-                              }
-                            }
-
-                            items {
-                              __typename
-
-                              ... on AllDiscountItems {
-                                allItems
-                              }
-
-                              ... on DiscountProducts {
-                                products(first: 10) {
-                                  edges {
-                                    node {
-                                      id
-                                      title
-                                    }
-                                  }
-                                }
-                              }
-
-                              ... on DiscountCollections {
-                                collections(first: 10) {
-                                  edges {
-                                    node {
-                                      id
-                                      title
-                                    }
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        }
-
-                        ... on DiscountCodeBasic {
-                          title
-                          startsAt
-                          endsAt
-
-                          codes(first: 5) {
-                            edges {
-                              node {
-                                code
-                              }
-                            }
-                          }
-
-                          customerGets {
-                            value {
-                              __typename
-
-                              ... on DiscountPercentage {
-                                percentage
-                              }
-
-                              ... on DiscountAmount {
-                                amount {
-                                  amount
-                                  currencyCode
-                                }
-                              }
-                            }
-
-                            items {
-                              __typename
-
-                              ... on AllDiscountItems {
-                                allItems
-                              }
-
-                              ... on DiscountProducts {
-                                products(first: 10) {
-                                  edges {
-                                    node {
-                                      id
-                                      title
-                                    }
-                                  }
-                                }
-                              }
-
-                              ... on DiscountCollections {
-                                collections(first: 10) {
-                                  edges {
-                                    node {
-                                      id
-                                      title
-                                    }
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        }
-
-                        ... on DiscountAutomaticBxgy {
-                          title
-                          startsAt
-                          endsAt
-
-                          customerGets {
-                            value {
-                              __typename
-
-                              ... on DiscountPercentage {
-                                percentage
-                              }
-
-                              ... on DiscountAmount {
-                                amount {
-                                  amount
-                                  currencyCode
-                                }
-                              }
-                            }
-
-                            items {
-                              __typename
-
-                              ... on DiscountProducts {
-                                products(first: 10) {
-                                  edges {
-                                    node {
-                                      id
-                                      title
-                                    }
-                                  }
-                                }
-                              }
-
-                              ... on DiscountCollections {
-                                collections(first: 10) {
-                                  edges {
-                                    node {
-                                      id
-                                      title
-                                    }
-                                  }
-                                }
-                              }
-                            }
-                          }
-
-                          customerBuys {
-                            value {
-                              ... on DiscountQuantity {
-                                quantity
-                              }
-                            }
-                          }
-                        }
-
-                        ... on DiscountAutomaticFreeShipping {
-                          title
-                          startsAt
-                          endsAt
-                        }
-                      }
-                    }
-                  }
-                }
-              }`,
-      };
-
-      const response = await callShopifyApi("POST", "", graphqlQuery, true);
-
-      if (
-        !response?.data?.discountNodes?.edges ||
-        response?.data?.discountNodes?.edges?.length < 1
-      ) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "No discounts found.",
-            },
-          ],
-        };
-      }
-
-      const discounts = formatDiscounts(response?.data?.discountNodes?.edges);
-
-      if (discounts.length === 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "No discounts found.",
-            },
-          ],
-        };
-      }
-
-      // Sort by end date (active first)
-      discounts.sort((a, b) => new Date(b.ends_at) - new Date(a.ends_at));
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                total: discounts.length,
-                discounts: discounts,
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    } catch (error) {
-      console.error("Error fetching discounts:", error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching available discounts: ${error.message}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// Tool 14: Get store metadata info
-server.tool(
-  "get_store_meta_info",
-  `Fetch metadata about the store's product catalog.
-  Returns product tags, types, collections, and categories available in the store.
-  `,
-  async () => {
-    try {
-      const metadata = await productsMetadata();
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(metadata, null, 2),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching store metadata: ${error.message}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// Tool 15: Get products sorted by Shopify's sort options (relevance, price, newest, etc.)
-server.tool(
-  "get_products_sorted",
-  `Fetch up to 5 products, sorted by Shopify sort options. Supported sort keys: relevance, price_asc, price_desc, newest, best_selling.
-
-  Parameters:
-  @param {string} session_id: Session ID
-  @param {string} store_code: Store name or code
-  @param {string} [sort_key]: Sort key. Supported values: relevance, price_asc, price_desc, newest, best_selling, featured.
-  `,
-  {
-    session_id: z.string().describe("Session ID"),
-    store_code: z.string().describe("Store name/code"),
-    sort_key: z.string().describe("Sort key for the product list"),
-  },
-  async ({ session_id, store_code, sort_key }) => {
-    try {
-      const sortArgs = getProductSortArgs(sort_key);
-
-      const graphqlQuery = {
-        query: `query getProducts($first: Int!) {
-          products(first: $first${sortArgs}) {
-            edges {
-              node {
-                id
-                title
-                category {
-                  name
-                }
-                priceRange {
-                  minVariantPrice {
-                    amount
-                    currencyCode
-                  }
-                }
-                description
-                availableForSale
-              }
-            }
-          }
-        }`,
-        variables: {
-          first: 5,
-        },
-      };
-
-      const response = await callShopifyApi("POST", "", graphqlQuery);
-      const products = response?.data?.products?.edges || [];
-      const formattedProducts = formatProducts(
-        products,
-        session_id,
-        store_code,
-        false,
-      );
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ products: formattedProducts }, null, 2),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching sorted products: ${error.message}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// Create an Express app to handle HTTP requests
+// Start the server
 const app = express();
-
-// Use JSON middleware to parse request bodies
 app.use(express.json());
 
-// allow origins
+// Enable CORS for all routes and origins to allow cross-origin requests from any client, which is essential for the MCP server to be accessible from different domains and frontend applications without CORS issues.
 app.use(
   cors({
     origin: "*",
@@ -2976,11 +1099,7 @@ app.use(
   }),
 );
 
-/* 
-Handle Post requests to the MCP endpoint
-This is the main entry point for the MCP server
-It connects the MCP server to the transport layer and processes the request
-*/
+// Handle incoming MCP requests at the /mcp endpoint, connecting them to the MCP server transport layer. This allows the server to process JSON-RPC requests sent to /mcp and route them to the appropriate tools defined in the MCP server.
 app.post("/mcp", async (req, res) => {
   try {
     const transport = new StreamableHTTPServerTransport({
@@ -3008,8 +1127,7 @@ app.post("/mcp", async (req, res) => {
   }
 });
 
-// Handle GET and DELETE requests to the MCP endpoint
-// These methods are not allowed, so we return a 405 Method Not Allowed response
+// Explicitly disallow GET and DELETE methods on the /mcp endpoint to ensure that only POST requests are accepted, which is important for maintaining the integrity of the MCP server's JSON-RPC communication and preventing unintended access or operations through unsupported HTTP methods.
 app.get("/mcp", async (req, res) => {
   console.log("Received GET MCP request");
   res.writeHead(405).end(
@@ -3023,7 +1141,6 @@ app.get("/mcp", async (req, res) => {
     }),
   );
 });
-
 app.delete("/mcp", async (req, res) => {
   console.log("Received DELETE MCP request");
   res.writeHead(405).end(
@@ -3038,8 +1155,8 @@ app.delete("/mcp", async (req, res) => {
   );
 });
 
-// Start the server and listen on the specified port
-const PORT = process.env.PORT || 3001;
+// Start the Express server on the specified port, and log a message indicating that the MCP Stateless Streamable HTTP Server is listening. If there is an error during startup, it will be logged and the process will exit with a failure code.
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, (error) => {
   if (error) {
     console.error("Failed to start server:", error);
