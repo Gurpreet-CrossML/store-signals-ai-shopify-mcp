@@ -861,15 +861,18 @@ server.tool(
   `Fetch a specific order by order number and email.
   Returns a single order object.
 
+  CRITICAL: Never guess, hallucinate, or use placeholders (e.g. "awaiting_order_id") for the order_id. 
+  If the user has not provided a specific numerical order ID, you MUST ask the user for it BEFORE calling this tool.
+
   Parameters:
   @param {string} email: Order identifier (e.g. "test@example.com")
-  @param {string} order_id: Order identifier (e.g. "1026")
+  @param {string} order_id: Exact numerical Order ID provided by user (e.g. "1026")
   @param {string} session_id - Session identifier
   @param {string} customer_id - Customer ID
   `,
   {
     email: z.string().describe("Order email (e.g. 'test@example.com')"),
-    order_id: z.string().describe("Order ID (e.g. '1026')"),
+    order_id: z.string().describe("Exact numerical Order ID provided by user. Never guess or use placeholders."),
     session_id: z.string().describe("Session identifier"),
     customer_id: z.string().describe("Customer ID"),
   },
