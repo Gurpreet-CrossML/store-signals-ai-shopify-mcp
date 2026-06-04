@@ -872,7 +872,11 @@ server.tool(
   `,
   {
     email: z.string().describe("Order email (e.g. 'test@example.com')"),
-    order_id: z.string().describe("Exact numerical Order ID provided by user. Never guess or use placeholders."),
+    order_id: z
+      .string()
+      .describe(
+        "Exact numerical Order ID provided by user. Never guess or use placeholders.",
+      ),
     session_id: z.string().describe("Session identifier"),
     customer_id: z.string().describe("Customer ID"),
   },
