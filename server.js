@@ -21,6 +21,8 @@ const {
   ZENDESK_USERNAME,
   ZENDESK_PASSWORD,
   ZENDESK_API_URL,
+  SHOPIFY_BASE_URL,
+  SHOPIFY_ACCESS_TOKEN,
   callShopifyApi,
   callBackendAPI,
   formatProducts,
@@ -59,6 +61,172 @@ const transporter = nodemailer.createTransport({
     pass: SMTP_PASS,
   },
 });
+
+/**
+ * ShopifyOrderEditor — implements the 3-step Order Edit API:
+ *   Step 1: orderEditBegin      → obtain a calculatedOrder ID
+ *   Step 2: apply mutations     → addVariant | setQuantity | removeLineItem
+ *   Step 3: orderEditCommit     → persist changes and optionally notify customer
+ *
+ * Derives the shop domain from SHOPIFY_BASE_URL (e.g. https://xxx.myshopify.com)
+ * and the access token from SHOPIFY_ACCESS_TOKEN — both already defined in .env.
+ */
+class ShopifyOrderEditor {
+  constructor() {
+    // Parse hostname from SHOPIFY_BASE_URL (e.g. "https://blushora-pdczux7n.myshopify.com")
+    const baseUrl = SHOPIFY_BASE_URL || "";
+    this.shopDomain = baseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    this.accessToken = SHOPIFY_ACCESS_TOKEN;
+    this.apiVersion = process.env.SHOPIFY_API_VERSION || "2024-04";
+    this.graphqlEndpoint = `https://${this.shopDomain}/admin/api/${this.apiVersion}/graphql.json`;
+  }
+
+  async _graphql(query, variables = {}) {
+    const response = await axios.post(
+      this.graphqlEndpoint,
+      { query, variables },
+      {
+        headers: {
+          "X-Shopify-Access-Token": this.accessToken,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+    const { data, errors } = response.data;
+    if (errors?.length > 0) {
+      throw new Error(`GraphQL Errors: ${JSON.stringify(errors)}`);
+    }
+    return data;
+  }
+
+  // Step 1 – Begin
+  async beginOrderEdit(orderId) {
+    const data = await this._graphql(
+      `mutation BeginOrderEdit($orderId: ID!) {
+        orderEditBegin(id: $orderId) {
+          calculatedOrder { id }
+          userErrors { field message }
+        }
+      }`,
+      { orderId },
+    );
+    return data.orderEditBegin;
+  }
+
+  // Step 2a – Add a variant
+  async addVariant(calculatedOrderId, variantId, quantity, locationId = null) {
+    const data = await this._graphql(
+      `mutation AddVariant($id: ID!, $variantId: ID!, $quantity: Int!, $locationId: ID) {
+        orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity, locationId: $locationId) {
+          calculatedOrder { id }
+          userErrors { field message }
+        }
+      }`,
+      { id: calculatedOrderId, variantId, quantity, locationId },
+    );
+    return data.orderEditAddVariant;
+  }
+
+  // Step 2b – Update quantity of an existing line item
+  async setQuantity(calculatedOrderId, lineItemId, quantity) {
+    const data = await this._graphql(
+      `mutation SetQuantity($id: ID!, $lineItemId: ID!, $quantity: Int!) {
+        orderEditSetQuantity(id: $id, lineItemId: $lineItemId, quantity: $quantity) {
+          calculatedOrder { id }
+          userErrors { field message }
+        }
+      }`,
+      { id: calculatedOrderId, lineItemId, quantity },
+    );
+    return data.orderEditSetQuantity;
+  }
+
+  // Step 2c – Remove a line item
+  async removeLineItem(calculatedOrderId, lineItemId) {
+    return await this.setQuantity(calculatedOrderId, lineItemId, 0);
+  }
+
+  // Step 3 – Commit
+  async commitOrderEdit(
+    calculatedOrderId,
+    notifyCustomer = false,
+    staffNote = "Modified via MCP Server",
+  ) {
+    const data = await this._graphql(
+      `mutation CommitOrderEdit($id: ID!, $notifyCustomer: Boolean, $staffNote: String) {
+        orderEditCommit(id: $id, notifyCustomer: $notifyCustomer, staffNote: $staffNote) {
+          order { id name totalPriceSet { shopMoney { amount currencyCode } } }
+          userErrors { field message }
+        }
+      }`,
+      { id: calculatedOrderId, notifyCustomer, staffNote },
+    );
+    return data.orderEditCommit;
+  }
+
+  /**
+   * High-level orchestrator used by the MCP tool.
+   * @param {string}   orderId   Full GID, e.g. "gid://shopify/Order/123"
+   * @param {Array}    changes   Array of change descriptors (see tool schema)
+   * @param {object}   options   { notifyCustomer, staffNote }
+   */
+  async modifyOrder(orderId, changes = [], options = {}) {
+    // Step 1
+    const begin = await this.beginOrderEdit(orderId);
+    if (begin.userErrors?.length) {
+      throw new Error(`Begin edit failed: ${begin.userErrors[0].message}`);
+    }
+    const calcId = begin.calculatedOrder.id;
+
+    // Step 2 – apply each change in sequence
+    for (const change of changes) {
+      let result;
+      if (change.type === "addVariant") {
+        result = await this.addVariant(
+          calcId,
+          change.variantId,
+          change.quantity,
+          change.locationId ?? null,
+        );
+      } else if (change.type === "setQuantity") {
+        result = await this.setQuantity(
+          calcId,
+          change.lineItemId,
+          change.quantity,
+        );
+      } else if (change.type === "remove") {
+        result = await this.removeLineItem(calcId, change.lineItemId);
+      } else {
+        throw new Error(`Unknown change type: "${change.type}"`);
+      }
+
+      if (result?.userErrors?.length) {
+        throw new Error(
+          `Change "${change.type}" failed: ${result.userErrors[0].message}`,
+        );
+      }
+    }
+
+    // Step 3
+    const commit = await this.commitOrderEdit(
+      calcId,
+      options.notifyCustomer ?? false,
+      options.staffNote ?? "Modified via MCP Server",
+    );
+
+    if (commit.userErrors?.length) {
+      throw new Error(`Commit failed: ${commit.userErrors[0].message}`);
+    }
+
+    return {
+      success: true,
+      orderId: commit.order.id,
+      orderName: commit.order.name,
+      totalPrice: commit.order.totalPriceSet?.shopMoney,
+      message: "Order modified successfully.",
+    };
+  }
+}
 
 // ********************************** MCP Tools **********************************
 // ######### 1. Search Products #########
@@ -1076,6 +1244,146 @@ server.tool(
           {
             type: "text",
             text: `Error creating support ticket: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ######### 11. Modify Order #########
+server.tool(
+  "modify_order",
+  `Modify an existing Shopify order using the 3-step Order Edit API
+  (orderEditBegin → apply changes → orderEditCommit).
+
+  Supported change types in the "changes" array:
+    • addVariant   – add a product variant to the order
+    • setQuantity  – update the quantity of an existing line item
+    • remove       – remove a line item from the order
+
+  Parameters:
+  @param {string}  order_id         Shopify Order GID or plain numeric ID (e.g. "123456789")
+  @param {array}   changes          List of change objects (see schema below)
+  @param {boolean} notify_customer  Whether to send a notification email to the customer (default: false)
+  @param {string}  staff_note       Internal note attached to the edit (default: "Modified via MCP Server")
+  `,
+  {
+    order_id: z
+      .string()
+      .describe(
+        "Shopify Order ID. Accepts plain numeric ID ('123456') " +
+          "or full GID ('gid://shopify/Order/123456').",
+      ),
+    changes: z
+      .array(
+        z.discriminatedUnion("type", [
+          // Add a new variant
+          z.object({
+            type: z.literal("addVariant"),
+            variantId: z
+              .string()
+              .describe(
+                "Variant GID or numeric ID to add, e.g. 'gid://shopify/ProductVariant/987'",
+              ),
+            quantity: z.number().int().positive().describe("Quantity to add"),
+            locationId: z
+              .string()
+              .optional()
+              .describe("Optional inventory location GID"),
+          }),
+          // Update quantity of an existing line item
+          z.object({
+            type: z.literal("setQuantity"),
+            lineItemId: z
+              .string()
+              .describe(
+                "CalculatedLineItem GID, e.g. 'gid://shopify/CalculatedLineItem/456'",
+              ),
+            quantity: z
+              .number()
+              .int()
+              .nonnegative()
+              .describe("New quantity (0 = remove)"),
+          }),
+          // Remove a line item
+          z.object({
+            type: z.literal("remove"),
+            lineItemId: z
+              .string()
+              .describe(
+                "CalculatedLineItem GID to remove, e.g. 'gid://shopify/CalculatedLineItem/456'",
+              ),
+          }),
+        ]),
+      )
+      .min(1)
+      .describe("One or more changes to apply to the order."),
+    notify_customer: z
+      .boolean()
+      .optional()
+      .describe(
+        "Send a notification email to the customer after the edit. Defaults to false.",
+      ),
+    staff_note: z
+      .string()
+      .optional()
+      .describe(
+        "Internal staff note for the edit. Defaults to 'Modified via MCP Server'.",
+      ),
+  },
+  async ({ order_id, changes, notify_customer = false, staff_note }) => {
+    try {
+      // Normalise to full GID
+      const orderId = order_id.startsWith("gid://shopify/Order/")
+        ? order_id
+        : `gid://shopify/Order/${order_id}`;
+
+      // Normalise variant / lineItem IDs inside changes
+      const normalisedChanges = changes.map((c) => {
+        if (c.type === "addVariant") {
+          return {
+            ...c,
+            variantId: c.variantId.startsWith("gid://shopify/ProductVariant/")
+              ? c.variantId
+              : `gid://shopify/ProductVariant/${c.variantId}`,
+          };
+        }
+        if (c.type === "setQuantity" || c.type === "remove") {
+          return {
+            ...c,
+            lineItemId: c.lineItemId.startsWith(
+              "gid://shopify/CalculatedLineItem/",
+            )
+              ? c.lineItemId
+              : `gid://shopify/CalculatedLineItem/${c.lineItemId}`,
+          };
+        }
+        return c;
+      });
+
+      const editor = new ShopifyOrderEditor();
+      const result = await editor.modifyOrder(orderId, normalisedChanges, {
+        notifyCustomer: notify_customer,
+        staffNote: staff_note,
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("modify_order error:", error);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error modifying order: ${error.message}`,
           },
         ],
         isError: true,
