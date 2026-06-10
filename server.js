@@ -1104,7 +1104,7 @@ server.tool(
     try {
       const response = await callShopifyApi(
         "GET",
-        `/admin/api/2024-04/orders.json?name=%23${order_id}&status=any`,
+        `/admin/api/2024-04/orders.json?name=%23${order_id}&status=any&email=${encodeURIComponent(email)}`,
       );
 
       const orders = response?.orders || [];
