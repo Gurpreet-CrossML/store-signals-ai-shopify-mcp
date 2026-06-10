@@ -1100,7 +1100,7 @@ server.tool(
     reason: z.string().describe("Cancellation reason"),
     session_id: z.string().describe("Session identifier"),
   },
-async ({ order_id, email, reason, session_id }) => {
+  async ({ order_id, email, reason, session_id }) => {
     try {
       const response = await callShopifyApi(
         "GET",
@@ -1119,15 +1119,29 @@ async ({ order_id, email, reason, session_id }) => {
 
       // inline cancellability check — no imported function needed
       if (order.cancelled_at) {
-        return { content: [{ type: "text", text: "Order already cancelled." }], isError: true };
+        return {
+          content: [{ type: "text", text: "Order already cancelled." }],
+          isError: true,
+        };
       }
       const fulfillment = (order.fulfillment_status || "").toLowerCase();
       if (["fulfilled", "shipped"].includes(fulfillment)) {
-        return { content: [{ type: "text", text: "Order already shipped and cannot be cancelled." }], isError: true };
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Order already shipped and cannot be cancelled.",
+            },
+          ],
+          isError: true,
+        };
       }
       const financial = (order.financial_status || "").toLowerCase();
       if (["refunded", "voided"].includes(financial)) {
-        return { content: [{ type: "text", text: "Order already refunded." }], isError: true };
+        return {
+          content: [{ type: "text", text: "Order already refunded." }],
+          isError: true,
+        };
       }
 
       const cancelResponse = await callShopifyApi(
@@ -1146,9 +1160,8 @@ async ({ order_id, email, reason, session_id }) => {
       const cancelled = cancelResponse.order;
 
       console.log(
-        `cancel_order: success | order_id=${cancelled.order_number} | email=${email} | session=${session_id} | reason=${reason}`
+        `cancel_order: success | order_id=${cancelled.order_number} | email=${email} | session=${session_id} | reason=${reason}`,
       );
-
 
       return {
         content: [
@@ -1168,7 +1181,9 @@ async ({ order_id, email, reason, session_id }) => {
     } catch (error) {
       console.error("cancel_order error:", error.message);
       return {
-        content: [{ type: "text", text: `Error cancelling order: ${error.message}` }],
+        content: [
+          { type: "text", text: `Error cancelling order: ${error.message}` },
+        ],
         isError: true,
       };
     }
