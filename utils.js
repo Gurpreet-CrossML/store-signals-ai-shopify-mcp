@@ -841,5 +841,4 @@ module.exports = {
   getRelevanceScore,
   formatDiscounts,
   formatOrder,
-  getCancelStatus,
 };

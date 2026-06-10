@@ -35,7 +35,6 @@ const {
   getRelevanceScore,
   formatDiscounts,
   formatOrder,
-  getCancelStatus,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
