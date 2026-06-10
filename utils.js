@@ -920,7 +920,6 @@ class ShopifyOrderEditor {
    * @param {object}   options   { notifyCustomer, staffNote }
    */
   async modifyOrder(orderId, changes = [], options = {}) {
-
     // Step 1
     const begin = await this.beginOrderEdit(orderId);
     if (begin.userErrors?.length) {
