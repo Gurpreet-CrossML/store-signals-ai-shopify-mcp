@@ -1165,7 +1165,12 @@ server.tool(
         "Internal staff note for the edit. Defaults to 'Modified via MCP Server'.",
       ),
   },
-  async ({ shopify_order_id, changes, notify_customer = false, staff_note }) => {
+  async ({
+    shopify_order_id,
+    changes,
+    notify_customer = false,
+    staff_note,
+  }) => {
     try {
       // Normalise to full GID
       const orderId = shopify_order_id.startsWith("gid://shopify/Order/")

@@ -850,7 +850,6 @@ class ShopifyOrderEditor {
 
   // Step 1 – Begin
   async beginOrderEdit(orderId) {
-    console.log(`[ShopifyOrderEditor] Calling beginOrderEdit with orderId: ${orderId}`);
     const data = await this._graphql(
       `mutation BeginOrderEdit($orderId: ID!) {
         orderEditBegin(id: $orderId) {
@@ -921,9 +920,7 @@ class ShopifyOrderEditor {
    * @param {object}   options   { notifyCustomer, staffNote }
    */
   async modifyOrder(orderId, changes = [], options = {}) {
-    console.log(`[ShopifyOrderEditor] modifyOrder called with orderId: ${orderId}`);
-    console.log(`[ShopifyOrderEditor] changes:`, JSON.stringify(changes, null, 2));
-    
+
     // Step 1
     const begin = await this.beginOrderEdit(orderId);
     if (begin.userErrors?.length) {
