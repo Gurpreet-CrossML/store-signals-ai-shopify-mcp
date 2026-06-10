@@ -1146,6 +1146,11 @@ async ({ order_id, email, reason, session_id }) => {
 
       const cancelled = cancelResponse.order;
 
+      console.log(
+        `cancel_order: success | order_id=${cancelled.order_number} | email=${email} | session=${session_id} | reason=${reason}`
+      );
+
+
       return {
         content: [
           {
