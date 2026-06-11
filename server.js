@@ -1116,26 +1116,29 @@ server.tool(
       }
 
       const order = orders[0];
+      const formatted = formatOrder(order);
 
-      // inline cancellability check — no imported function needed
       if (order.cancelled_at) {
         return {
           content: [{ type: "text", text: "Order already cancelled." }],
           isError: true,
         };
       }
-      const fulfillment = (order.fulfillment_status || "").toLowerCase();
-      if (["fulfilled", "shipped"].includes(fulfillment)) {
+
+      if (formatted.shipment_status === "delivered") {
         return {
-          content: [
-            {
-              type: "text",
-              text: "Order already shipped and cannot be cancelled.",
-            },
-          ],
+          content: [{ type: "text", text: "Order has already been delivered and cannot be cancelled." }],
           isError: true,
         };
       }
+
+      if (formatted.shipment_status === "shipped") {
+        return {
+          content: [{ type: "text", text: "Order has already been shipped and cannot be cancelled." }],
+          isError: true,
+        };
+      }
+
       const financial = (order.financial_status || "").toLowerCase();
       if (["refunded", "voided"].includes(financial)) {
         return {
