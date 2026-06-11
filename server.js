@@ -35,6 +35,7 @@ const {
   getRelevanceScore,
   formatDiscounts,
   formatOrder,
+  ShopifyOrderEditor,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
@@ -1076,6 +1077,269 @@ server.tool(
           {
             type: "text",
             text: `Error creating support ticket: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+// ######### 11. Cancel Order #########
+server.tool(
+  "cancel_order",
+  `Cancel a Shopify order by order number.
+
+  Parameters:
+  @param {string} order_id - Order number (e.g. "1006")
+  @param {string} email - Customer email
+  @param {string} reason - Cancellation reason
+  @param {string} session_id - Session identifier
+  `,
+  {
+    order_id: z.string().describe("Order number"),
+    email: z.string().email().describe("Customer email"),
+    reason: z.string().describe("Cancellation reason"),
+    session_id: z.string().describe("Session identifier"),
+  },
+  async ({ order_id, email, reason, session_id }) => {
+    try {
+      const response = await callShopifyApi(
+        "GET",
+        `/admin/api/2024-04/orders.json?name=%23${order_id}&status=any&email=${encodeURIComponent(email)}`,
+      );
+
+      const orders = response?.orders || [];
+      if (!orders.length) {
+        return {
+          content: [{ type: "text", text: `Order #${order_id} not found.` }],
+          isError: true,
+        };
+      }
+
+      const order = orders[0];
+      const formatted = formatOrder(order);
+
+      if (order.cancelled_at) {
+        return {
+          content: [{ type: "text", text: "Order already cancelled." }],
+          isError: true,
+        };
+      }
+
+      if (formatted.shipment_status === "delivered") {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Order has already been delivered and cannot be cancelled.",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      if (formatted.shipment_status === "shipped") {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Order has already been shipped and cannot be cancelled.",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const financial = (order.financial_status || "").toLowerCase();
+      if (["refunded", "voided"].includes(financial)) {
+        return {
+          content: [{ type: "text", text: "Order already refunded." }],
+          isError: true,
+        };
+      }
+
+      const cancelResponse = await callShopifyApi(
+        "POST",
+        `/admin/api/2024-04/orders/${order.id}/cancel.json`,
+        { reason: reason, email: true },
+      );
+
+      if (!cancelResponse?.order) {
+        return {
+          content: [{ type: "text", text: "Failed to cancel the order." }],
+          isError: true,
+        };
+      }
+
+      const cancelled = cancelResponse.order;
+
+      console.log(
+        `cancel_order: success | order_id=${cancelled.order_number} | email=${email} | session=${session_id} | reason=${reason}`,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              order_id: cancelled.order_number,
+              cancelled_at: cancelled.cancelled_at,
+              cancel_reason: cancelled.cancel_reason,
+              financial_status: cancelled.financial_status,
+              message: `Order #${order_id} has been successfully cancelled.`,
+            }),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("cancel_order error:", error.message);
+      return {
+        content: [
+          { type: "text", text: `Error cancelling order: ${error.message}` },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+// ######### 12. Modify Order #########
+server.tool(
+  "modify_order",
+  `Modify an existing Shopify order using the 3-step Order Edit API
+  (orderEditBegin → apply changes → orderEditCommit).
+
+  Supported change types in the "changes" array:
+    • addVariant   – add a product variant to the order
+    • setQuantity  – update the quantity of an existing line item
+    • remove       – remove a line item from the order
+
+  Parameters:
+  @param {string}  shopify_order_id         Shopify Order GID or plain numeric ID (e.g. "18693365366829")
+  @param {array}   changes          List of change objects (see schema below)
+  @param {boolean} notify_customer  Whether to send a notification email to the customer (default: false)
+  @param {string}  staff_note       Internal note attached to the edit (default: "Modified via MCP Server")
+  `,
+  {
+    shopify_order_id: z
+      .string()
+      .describe(
+        "Shopify Order ID (long ID). Accepts plain numeric ID ('18693365366829') " +
+          "or full GID ('gid://shopify/Order/18693365366829'). DO NOT PASS SHORT ORDER ID like '1012'.",
+      ),
+    changes: z
+      .array(
+        z.discriminatedUnion("type", [
+          // Add a new variant
+          z.object({
+            type: z.literal("addVariant"),
+            variantId: z
+              .string()
+              .describe(
+                "Variant GID or numeric ID to add, e.g. 'gid://shopify/ProductVariant/987'",
+              ),
+            quantity: z.number().int().positive().describe("Quantity to add"),
+            locationId: z
+              .string()
+              .optional()
+              .describe("Optional inventory location GID"),
+          }),
+          // Update quantity of an existing line item
+          z.object({
+            type: z.literal("setQuantity"),
+            lineItemId: z
+              .string()
+              .describe(
+                "CalculatedLineItem GID, e.g. 'gid://shopify/CalculatedLineItem/456'",
+              ),
+            quantity: z
+              .number()
+              .int()
+              .nonnegative()
+              .describe("New quantity (0 = remove)"),
+          }),
+          // Remove a line item
+          z.object({
+            type: z.literal("remove"),
+            lineItemId: z
+              .string()
+              .describe(
+                "CalculatedLineItem GID to remove, e.g. 'gid://shopify/CalculatedLineItem/456'",
+              ),
+          }),
+        ]),
+      )
+      .min(1)
+      .describe("One or more changes to apply to the order."),
+    notify_customer: z
+      .boolean()
+      .optional()
+      .describe(
+        "Send a notification email to the customer after the edit. Defaults to false.",
+      ),
+    staff_note: z
+      .string()
+      .optional()
+      .describe(
+        "Internal staff note for the edit. Defaults to 'Modified via MCP Server'.",
+      ),
+  },
+  async ({
+    shopify_order_id,
+    changes,
+    notify_customer = false,
+    staff_note,
+  }) => {
+    try {
+      // Normalise to full GID
+      const orderId = shopify_order_id.startsWith("gid://shopify/Order/")
+        ? shopify_order_id
+        : `gid://shopify/Order/${shopify_order_id}`;
+
+      // Normalise variant / lineItem IDs inside changes
+      const normalisedChanges = changes.map((c) => {
+        if (c.type === "addVariant") {
+          return {
+            ...c,
+            variantId: c.variantId.startsWith("gid://shopify/ProductVariant/")
+              ? c.variantId
+              : `gid://shopify/ProductVariant/${c.variantId}`,
+          };
+        }
+        if (c.type === "setQuantity" || c.type === "remove") {
+          return {
+            ...c,
+            lineItemId: c.lineItemId.startsWith(
+              "gid://shopify/CalculatedLineItem/",
+            )
+              ? c.lineItemId
+              : `gid://shopify/CalculatedLineItem/${c.lineItemId}`,
+          };
+        }
+        return c;
+      });
+
+      const editor = new ShopifyOrderEditor();
+      const result = await editor.modifyOrder(orderId, normalisedChanges, {
+        notifyCustomer: notify_customer,
+        staffNote: staff_note,
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("modify_order error:", error);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error modifying order: ${error.message}`,
           },
         ],
         isError: true,

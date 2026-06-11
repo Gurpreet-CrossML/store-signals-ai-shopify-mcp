@@ -774,11 +774,28 @@ const formatOrder = (o) => {
   const cancelStatus = getCancelStatus(o);
   const returnStatus = getReturnStatus(o);
 
+  // Extract shipment status from active fulfillments only
+  const fulfillments = o.fulfillments || [];
+  const activeFulfillments = fulfillments.filter(
+    (f) => (f.status || "").toLowerCase() !== "cancelled",
+  );
+  const isDelivered = activeFulfillments.some(
+    (f) => (f.shipment_status || "").toLowerCase() === "delivered",
+  );
+
+  const shipmentStatus = isDelivered
+    ? "delivered"
+    : (o.fulfillment_status || "").toLowerCase() === "fulfilled"
+      ? "shipped"
+      : "not_shipped";
+
   const formattedOrder = {
     order_id: o.order_number,
+    shopify_order_id: o.id,
     email: o.email,
     financial_status: o.financial_status,
     fulfillment_status: o.fulfillment_status,
+    shipment_status: shipmentStatus,
     created_at: o.created_at,
     cancelled_at: o.cancelled_at,
     cancel_reason: o.cancel_reason,
@@ -809,6 +826,172 @@ const formatOrder = (o) => {
 
   return formattedOrder;
 };
+
+/**
+ * ShopifyOrderEditor — implements the 3-step Order Edit API:
+ *   Step 1: orderEditBegin      → obtain a calculatedOrder ID
+ *   Step 2: apply mutations     → addVariant | setQuantity | removeLineItem
+ *   Step 3: orderEditCommit     → persist changes and optionally notify customer
+ *
+ * Derives the shop domain from SHOPIFY_BASE_URL (e.g. https://xxx.myshopify.com)
+ * and the access token from SHOPIFY_ACCESS_TOKEN — both already defined in .env.
+ */
+class ShopifyOrderEditor {
+  constructor() {
+    // Parse hostname from SHOPIFY_BASE_URL (e.g. "https://blushora-pdczux7n.myshopify.com")
+    const baseUrl = SHOPIFY_BASE_URL || "";
+    this.shopDomain = baseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    this.accessToken = SHOPIFY_ACCESS_TOKEN;
+    this.apiVersion = process.env.SHOPIFY_API_VERSION || "2024-04";
+    this.graphqlEndpoint = `https://${this.shopDomain}/admin/api/${this.apiVersion}/graphql.json`;
+  }
+
+  async _graphql(query, variables = {}) {
+    const response = await axios.post(
+      this.graphqlEndpoint,
+      { query, variables },
+      {
+        headers: {
+          "X-Shopify-Access-Token": this.accessToken,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+    const { data, errors } = response.data;
+    if (errors?.length > 0) {
+      throw new Error(`GraphQL Errors: ${JSON.stringify(errors)}`);
+    }
+    return data;
+  }
+
+  // Step 1 – Begin
+  async beginOrderEdit(orderId) {
+    const data = await this._graphql(
+      `mutation BeginOrderEdit($orderId: ID!) {
+        orderEditBegin(id: $orderId) {
+          calculatedOrder { id }
+          userErrors { field message }
+        }
+      }`,
+      { orderId },
+    );
+    return data.orderEditBegin;
+  }
+
+  // Step 2a – Add a variant
+  async addVariant(calculatedOrderId, variantId, quantity, locationId = null) {
+    const data = await this._graphql(
+      `mutation AddVariant($id: ID!, $variantId: ID!, $quantity: Int!, $locationId: ID) {
+        orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity, locationId: $locationId) {
+          calculatedOrder { id }
+          userErrors { field message }
+        }
+      }`,
+      { id: calculatedOrderId, variantId, quantity, locationId },
+    );
+    return data.orderEditAddVariant;
+  }
+
+  // Step 2b – Update quantity of an existing line item
+  async setQuantity(calculatedOrderId, lineItemId, quantity) {
+    const data = await this._graphql(
+      `mutation SetQuantity($id: ID!, $lineItemId: ID!, $quantity: Int!) {
+        orderEditSetQuantity(id: $id, lineItemId: $lineItemId, quantity: $quantity) {
+          calculatedOrder { id }
+          userErrors { field message }
+        }
+      }`,
+      { id: calculatedOrderId, lineItemId, quantity },
+    );
+    return data.orderEditSetQuantity;
+  }
+
+  // Step 2c – Remove a line item
+  async removeLineItem(calculatedOrderId, lineItemId) {
+    return await this.setQuantity(calculatedOrderId, lineItemId, 0);
+  }
+
+  // Step 3 – Commit
+  async commitOrderEdit(
+    calculatedOrderId,
+    notifyCustomer = false,
+    staffNote = "Modified via MCP Server",
+  ) {
+    const data = await this._graphql(
+      `mutation CommitOrderEdit($id: ID!, $notifyCustomer: Boolean, $staffNote: String) {
+        orderEditCommit(id: $id, notifyCustomer: $notifyCustomer, staffNote: $staffNote) {
+          order { id name totalPriceSet { shopMoney { amount currencyCode } } }
+          userErrors { field message }
+        }
+      }`,
+      { id: calculatedOrderId, notifyCustomer, staffNote },
+    );
+    return data.orderEditCommit;
+  }
+
+  /**
+   * High-level orchestrator used by the MCP tool.
+   * @param {string}   orderId   Full GID, e.g. "gid://shopify/Order/123"
+   * @param {Array}    changes   Array of change descriptors (see tool schema)
+   * @param {object}   options   { notifyCustomer, staffNote }
+   */
+  async modifyOrder(orderId, changes = [], options = {}) {
+    // Step 1
+    const begin = await this.beginOrderEdit(orderId);
+    if (begin.userErrors?.length) {
+      throw new Error(`Begin edit failed: ${begin.userErrors[0].message}`);
+    }
+    const calcId = begin.calculatedOrder.id;
+
+    // Step 2 – apply each change in sequence
+    for (const change of changes) {
+      let result;
+      if (change.type === "addVariant") {
+        result = await this.addVariant(
+          calcId,
+          change.variantId,
+          change.quantity,
+          change.locationId ?? null,
+        );
+      } else if (change.type === "setQuantity") {
+        result = await this.setQuantity(
+          calcId,
+          change.lineItemId,
+          change.quantity,
+        );
+      } else if (change.type === "remove") {
+        result = await this.removeLineItem(calcId, change.lineItemId);
+      } else {
+        throw new Error(`Unknown change type: "${change.type}"`);
+      }
+
+      if (result?.userErrors?.length) {
+        throw new Error(
+          `Change "${change.type}" failed: ${result.userErrors[0].message}`,
+        );
+      }
+    }
+
+    // Step 3
+    const commit = await this.commitOrderEdit(
+      calcId,
+      options.notifyCustomer ?? false,
+      options.staffNote ?? "Modified via MCP Server",
+    );
+
+    if (commit.userErrors?.length) {
+      throw new Error(`Commit failed: ${commit.userErrors[0].message}`);
+    }
+
+    return {
+      success: true,
+      orderId: commit.order.id,
+      orderName: commit.order.name,
+      totalPrice: commit.order.totalPriceSet?.shopMoney,
+      message: "Order modified successfully.",
+    };
+  }
+}
 
 // Export environment variables and utility functions
 module.exports = {
@@ -841,4 +1024,5 @@ module.exports = {
   getRelevanceScore,
   formatDiscounts,
   formatOrder,
+  ShopifyOrderEditor,
 };
