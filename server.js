@@ -1127,14 +1127,24 @@ server.tool(
 
       if (formatted.shipment_status === "delivered") {
         return {
-          content: [{ type: "text", text: "Order has already been delivered and cannot be cancelled." }],
+          content: [
+            {
+              type: "text",
+              text: "Order has already been delivered and cannot be cancelled.",
+            },
+          ],
           isError: true,
         };
       }
 
       if (formatted.shipment_status === "shipped") {
         return {
-          content: [{ type: "text", text: "Order has already been shipped and cannot be cancelled." }],
+          content: [
+            {
+              type: "text",
+              text: "Order has already been shipped and cannot be cancelled.",
+            },
+          ],
           isError: true,
         };
       }

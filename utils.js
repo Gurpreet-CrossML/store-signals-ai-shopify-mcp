@@ -777,10 +777,10 @@ const formatOrder = (o) => {
   // Extract shipment status from active fulfillments only
   const fulfillments = o.fulfillments || [];
   const activeFulfillments = fulfillments.filter(
-    (f) => (f.status || "").toLowerCase() !== "cancelled"
+    (f) => (f.status || "").toLowerCase() !== "cancelled",
   );
   const isDelivered = activeFulfillments.some(
-    (f) => (f.shipment_status || "").toLowerCase() === "delivered"
+    (f) => (f.shipment_status || "").toLowerCase() === "delivered",
   );
 
   const shipmentStatus = isDelivered
