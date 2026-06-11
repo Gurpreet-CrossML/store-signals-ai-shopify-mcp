@@ -1084,6 +1084,125 @@ server.tool(
     }
   },
 );
+// ######### 11. Cancel Order #########
+server.tool(
+  "cancel_order",
+  `Cancel a Shopify order by order number.
+
+  Parameters:
+  @param {string} order_id - Order number (e.g. "1006")
+  @param {string} email - Customer email
+  @param {string} reason - Cancellation reason
+  @param {string} session_id - Session identifier
+  `,
+  {
+    order_id: z.string().describe("Order number"),
+    email: z.string().email().describe("Customer email"),
+    reason: z.string().describe("Cancellation reason"),
+    session_id: z.string().describe("Session identifier"),
+  },
+  async ({ order_id, email, reason, session_id }) => {
+    try {
+      const response = await callShopifyApi(
+        "GET",
+        `/admin/api/2024-04/orders.json?name=%23${order_id}&status=any&email=${encodeURIComponent(email)}`,
+      );
+
+      const orders = response?.orders || [];
+      if (!orders.length) {
+        return {
+          content: [{ type: "text", text: `Order #${order_id} not found.` }],
+          isError: true,
+        };
+      }
+
+      const order = orders[0];
+      const formatted = formatOrder(order);
+
+      if (order.cancelled_at) {
+        return {
+          content: [{ type: "text", text: "Order already cancelled." }],
+          isError: true,
+        };
+      }
+
+      if (formatted.shipment_status === "delivered") {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Order has already been delivered and cannot be cancelled.",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      if (formatted.shipment_status === "shipped") {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Order has already been shipped and cannot be cancelled.",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const financial = (order.financial_status || "").toLowerCase();
+      if (["refunded", "voided"].includes(financial)) {
+        return {
+          content: [{ type: "text", text: "Order already refunded." }],
+          isError: true,
+        };
+      }
+
+      const cancelResponse = await callShopifyApi(
+        "POST",
+        `/admin/api/2024-04/orders/${order.id}/cancel.json`,
+        { reason: reason, email: true },
+      );
+
+      if (!cancelResponse?.order) {
+        return {
+          content: [{ type: "text", text: "Failed to cancel the order." }],
+          isError: true,
+        };
+      }
+
+      const cancelled = cancelResponse.order;
+
+      console.log(
+        `cancel_order: success | order_id=${cancelled.order_number} | email=${email} | session=${session_id} | reason=${reason}`,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              order_id: cancelled.order_number,
+              cancelled_at: cancelled.cancelled_at,
+              cancel_reason: cancelled.cancel_reason,
+              financial_status: cancelled.financial_status,
+              message: `Order #${order_id} has been successfully cancelled.`,
+            }),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("cancel_order error:", error.message);
+      return {
+        content: [
+          { type: "text", text: `Error cancelling order: ${error.message}` },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
 // ######### 12. Modify Order #########
 server.tool(
   "modify_order",

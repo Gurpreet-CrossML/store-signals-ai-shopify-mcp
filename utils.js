@@ -774,12 +774,28 @@ const formatOrder = (o) => {
   const cancelStatus = getCancelStatus(o);
   const returnStatus = getReturnStatus(o);
 
+  // Extract shipment status from active fulfillments only
+  const fulfillments = o.fulfillments || [];
+  const activeFulfillments = fulfillments.filter(
+    (f) => (f.status || "").toLowerCase() !== "cancelled",
+  );
+  const isDelivered = activeFulfillments.some(
+    (f) => (f.shipment_status || "").toLowerCase() === "delivered",
+  );
+
+  const shipmentStatus = isDelivered
+    ? "delivered"
+    : (o.fulfillment_status || "").toLowerCase() === "fulfilled"
+      ? "shipped"
+      : "not_shipped";
+
   const formattedOrder = {
     order_id: o.order_number,
     shopify_order_id: o.id,
     email: o.email,
     financial_status: o.financial_status,
     fulfillment_status: o.fulfillment_status,
+    shipment_status: shipmentStatus,
     created_at: o.created_at,
     cancelled_at: o.cancelled_at,
     cancel_reason: o.cancel_reason,
