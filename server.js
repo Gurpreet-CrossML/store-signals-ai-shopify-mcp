@@ -36,6 +36,7 @@ const {
   formatDiscounts,
   formatOrder,
   ShopifyOrderEditor,
+  formatOrderTransactions,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
@@ -1346,6 +1347,117 @@ server.tool(
       };
     }
   },
+);
+
+// ######### 11. Order Transactions #########
+server.tool(
+  "get_order_transactions",
+  `Fetch payment transactions for a specific order.
+
+  Returns a payment investigation summary that can be used
+  to identify duplicate charges, authorization holds,
+  refunds, captures, and other billing issues.
+
+  Parameters:
+  @param {string} email
+  @param {string} order_id
+  @param {string} session_id
+  @param {string} customer_id
+  `,
+  {
+    email: z.string().describe("Order email"),
+    order_id: z.string().describe("Order ID"),
+    session_id: z.string().describe("Session identifier"),
+    customer_id: z.string().describe("Customer ID"),
+  },
+  async ({ email, order_id, session_id, customer_id = "" }) => {
+    try {
+
+      // Verify email first
+      if (!customer_id) {
+        const verificationStatus = await callBackendAPI(
+          "POST",
+          "/chat/email/verify-status/",
+          {
+            thread_id: session_id,
+            email,
+          }
+        );
+
+        if (!verificationStatus?.is_verified) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Please verify your email before accessing payment information.",
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+
+      // Find order
+      const orderResponse = await callShopifyApi(
+        "GET",
+        `/admin/api/2024-04/orders.json?email=${encodeURIComponent(
+          email
+        )}&status=any`
+      );
+
+      const currentOrder = orderResponse?.orders?.find(
+        (o) => String(o.order_number) === String(order_id)
+      );
+
+      if (!currentOrder) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `We couldn’t locate order #${order_id}.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // Get transactions
+      const transactionResponse = await callShopifyApi(
+        "GET",
+        `/admin/api/2024-04/orders/${currentOrder.id}/transactions.json`
+      );
+
+      const formattedTransactions =
+        formatOrderTransactions(
+          currentOrder,
+          transactionResponse?.transactions || []
+        );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              formattedTransactions,
+              null,
+              2
+            ),
+          },
+        ],
+      };
+
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching order transactions: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
 );
 
 // ********************************** End of MCP Tools **********************************
