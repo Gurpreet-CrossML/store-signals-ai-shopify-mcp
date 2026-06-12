@@ -987,7 +987,14 @@ server.tool(
       .default([])
       .describe("Image URLs uploaded by the customer during the complaint"),
   },
-  async ({ email, subject, description, session_id, store_code, image_urls }) => {
+  async ({
+    email,
+    subject,
+    description,
+    session_id,
+    store_code,
+    image_urls,
+  }) => {
     try {
       const authConfig = {
         auth: {
@@ -1035,7 +1042,9 @@ server.tool(
       }
 
       // Build HTML comment body — plain description + embedded images
-      const safeImages = Array.isArray(image_urls) ? image_urls.filter(Boolean) : [];
+      const safeImages = Array.isArray(image_urls)
+        ? image_urls.filter(Boolean)
+        : [];
 
       let htmlBody = `<p>${description.replace(/\n/g, "<br/>")}</p>`;
 
