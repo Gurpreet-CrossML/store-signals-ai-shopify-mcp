@@ -1372,7 +1372,6 @@ server.tool(
   },
   async ({ email, order_id, session_id, customer_id = "" }) => {
     try {
-
       // Verify email first
       if (!customer_id) {
         const verificationStatus = await callBackendAPI(
@@ -1381,7 +1380,7 @@ server.tool(
           {
             thread_id: session_id,
             email,
-          }
+          },
         );
 
         if (!verificationStatus?.is_verified) {
@@ -1401,12 +1400,12 @@ server.tool(
       const orderResponse = await callShopifyApi(
         "GET",
         `/admin/api/2024-04/orders.json?email=${encodeURIComponent(
-          email
-        )}&status=any`
+          email,
+        )}&status=any`,
       );
 
       const currentOrder = orderResponse?.orders?.find(
-        (o) => String(o.order_number) === String(order_id)
+        (o) => String(o.order_number) === String(order_id),
       );
 
       if (!currentOrder) {
@@ -1424,28 +1423,22 @@ server.tool(
       // Get transactions
       const transactionResponse = await callShopifyApi(
         "GET",
-        `/admin/api/2024-04/orders/${currentOrder.id}/transactions.json`
+        `/admin/api/2024-04/orders/${currentOrder.id}/transactions.json`,
       );
 
-      const formattedTransactions =
-        formatOrderTransactions(
-          currentOrder,
-          transactionResponse?.transactions || []
-        );
+      const formattedTransactions = formatOrderTransactions(
+        currentOrder,
+        transactionResponse?.transactions || [],
+      );
 
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(
-              formattedTransactions,
-              null,
-              2
-            ),
+            text: JSON.stringify(formattedTransactions, null, 2),
           },
         ],
       };
-
     } catch (error) {
       return {
         content: [
@@ -1457,7 +1450,7 @@ server.tool(
         isError: true,
       };
     }
-  }
+  },
 );
 
 // ********************************** End of MCP Tools **********************************
