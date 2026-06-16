@@ -1106,7 +1106,7 @@ server.tool(
         attachments: safeImages,
       };
 
-      await callBackendAPI("POST", `/support/tickets/`, payload);
+      callBackendAPI("POST", `/support/tickets/`, payload);
 
       // Success Response
       return {
