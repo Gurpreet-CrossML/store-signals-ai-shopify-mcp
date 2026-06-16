@@ -981,7 +981,10 @@ server.tool(
     email: z.string().email().describe("Customer email address"),
     subject: z.string().min(3).describe("Short ticket subject"),
     description: z.string().min(5).describe("Detailed issue description"),
-    priority: z.enum(["low", "normal", "high", "urgent"]).default("normal").describe("Ticket priority level"),
+    priority: z
+      .enum(["low", "normal", "high", "urgent"])
+      .default("normal")
+      .describe("Ticket priority level"),
     session_id: z.string().describe("Session ID"),
     store_code: z.string().describe("Store Code"),
     image_urls: z
@@ -994,7 +997,7 @@ server.tool(
     email,
     subject,
     description,
-    priority, 
+    priority,
     session_id,
     store_code,
     image_urls,
