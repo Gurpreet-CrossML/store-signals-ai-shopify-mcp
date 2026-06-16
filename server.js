@@ -1096,7 +1096,7 @@ server.tool(
         thread_id: session_id,
         store_code: store_code,
         ticket_id: ticketId,
-        image_urls: safeImages,
+        attachments: safeImages,
       };
 
       callBackendAPI("POST", `/support/tickets/`, payload);
