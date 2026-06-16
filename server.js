@@ -971,6 +971,7 @@ server.tool(
   - email (string): Customer email address
   - subject (string): Ticket subject line
   - description (string): Detailed problem description
+  - priority (string): Ticket priority - low, normal, high, or urgent
   - session_id (string): Session ID
   - store_code (string): Store Code
   - image_urls (array, optional): S3/presigned image URLs the customer
@@ -980,6 +981,7 @@ server.tool(
     email: z.string().email().describe("Customer email address"),
     subject: z.string().min(3).describe("Short ticket subject"),
     description: z.string().min(5).describe("Detailed issue description"),
+    priority: z.enum(["low", "normal", "high", "urgent"]).default("normal").describe("Ticket priority level"),
     session_id: z.string().describe("Session ID"),
     store_code: z.string().describe("Store Code"),
     image_urls: z
@@ -992,6 +994,7 @@ server.tool(
     email,
     subject,
     description,
+    priority, 
     session_id,
     store_code,
     image_urls,
@@ -1074,7 +1077,7 @@ server.tool(
               html_body: htmlBody,
             },
             requester_id: requesterId,
-            priority: "normal",
+            priority: priority,
           },
         },
         authConfig,
@@ -1093,13 +1096,14 @@ server.tool(
         requester_id: requesterId,
         subject: subject,
         description: description,
+        priority: priority,
         thread_id: session_id,
         store_code: store_code,
         ticket_id: ticketId,
         attachments: safeImages,
       };
 
-      callBackendAPI("POST", `/support/tickets/`, payload);
+      await callBackendAPI("POST", `/support/tickets/`, payload);
 
       // Success Response
       return {
