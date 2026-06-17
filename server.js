@@ -930,7 +930,7 @@ server.tool(
         };
       }
 
-      const formattedOrder = formatOrder(currentOrder);
+      const formattedOrder = await formatOrder(currentOrder);
 
       return {
         content: [
@@ -1155,7 +1155,7 @@ server.tool(
       }
 
       const order = orders[0];
-      const formatted = formatOrder(order);
+      const formatted = await formatOrder(order);
 
       if (order.cancelled_at) {
         return {
