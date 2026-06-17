@@ -37,6 +37,7 @@ const {
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
+  queryVectorDatabase,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
@@ -1483,6 +1484,58 @@ server.tool(
           {
             type: "text",
             text: `Error fetching order transactions: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ######### 11. Shipping and Time Queries #########
+server.tool(
+  "shipping_and_time_queries",
+  `Answer shipping, return, and time-related policy queries using the store's knowledge base.
+  Queries the vector database for relevant store policies and FAQs.
+  
+  Parameters:
+  @param {string} query: The user's specific policy query.
+  @param {string} store_code: Store name or code.
+  `,
+  {
+    query: z.string().describe("The user's policy query"),
+    store_code: z.string().describe("Store name/code"),
+  },
+  async ({ query, store_code }) => {
+    try {
+      const response = await queryVectorDatabase(query, store_code);
+
+      if (!response || !response.result || response.result.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "No relevant policy information found for the query.",
+            },
+          ],
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(response.result, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("Vector database query error:", error);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching policy information: ${error.message}`,
           },
         ],
         isError: true,

@@ -1060,6 +1060,19 @@ const formatOrderTransactions = (order, transactions) => {
   };
 };
 
+// Utility function to query the vector database for knowledge retrieval
+const queryVectorDatabase = async (query, store_code) => {
+  try {
+    const endpoint = `/knowledge/vector-search/?store_code=${store_code}`;
+    const data = { query };
+    const response = await callBackendAPI("POST", endpoint, data);
+    return response;
+  } catch (err) {
+    console.error("Error querying vector database:", err?.message || err);
+    throw err;
+  }
+};
+
 // Export environment variables and utility functions
 module.exports = {
   // envs
@@ -1093,4 +1106,5 @@ module.exports = {
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
+  queryVectorDatabase,
 };
