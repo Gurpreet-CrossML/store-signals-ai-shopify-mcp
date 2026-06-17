@@ -18,9 +18,6 @@ const {
   MCP_VERSION,
   SMTP_USER,
   SMTP_PASS,
-  ZENDESK_USERNAME,
-  ZENDESK_PASSWORD,
-  ZENDESK_API_URL,
   callShopifyApi,
   callBackendAPI,
   formatProducts,
@@ -954,176 +951,7 @@ server.tool(
     }
   },
 );
-
-// ######### 10. Create Support Ticket #########
-server.tool(
-  "create_support_ticket",
-  `Create a support ticket for a customer issue.
-
-  Behavior:
-  1. Check if requester exists by email.
-  2. If not found, create new user.
-  3. Create support ticket linked to requester, embedding any
-     image_urls the customer sent while describing the problem.
-  4. Return ticket ID in response.
-
-  Parameters:
-  - email (string): Customer email address
-  - subject (string): Ticket subject line
-  - description (string): Detailed problem description
-  - session_id (string): Session ID
-  - store_code (string): Store Code
-  - image_urls (array, optional): S3/presigned image URLs the customer
-    uploaded while describing the wrong-item issue
-  `,
-  {
-    email: z.string().email().describe("Customer email address"),
-    subject: z.string().min(3).describe("Short ticket subject"),
-    description: z.string().min(5).describe("Detailed issue description"),
-    session_id: z.string().describe("Session ID"),
-    store_code: z.string().describe("Store Code"),
-    image_urls: z
-      .array(z.string().url())
-      .optional()
-      .default([])
-      .describe("Image URLs uploaded by the customer during the complaint"),
-  },
-  async ({
-    email,
-    subject,
-    description,
-    session_id,
-    store_code,
-    image_urls,
-  }) => {
-    try {
-      const authConfig = {
-        auth: {
-          username: `${ZENDESK_USERNAME}/token`,
-          password: ZENDESK_PASSWORD,
-        },
-        headers: {
-          "Content-Type": "application/json",
-        },
-      };
-
-      let requesterId = null;
-
-      // Search existing user
-      const searchResponse = await axios.get(
-        `${ZENDESK_API_URL}/users/search.json?query=${encodeURIComponent(email)}`,
-        authConfig,
-      );
-
-      if (searchResponse?.data?.users?.length > 0) {
-        requesterId = searchResponse.data.users[0].id;
-      }
-
-      // Create user if not found
-      if (!requesterId) {
-        const userResponse = await axios.post(
-          `${ZENDESK_API_URL}/users.json`,
-          {
-            user: {
-              name: email.split("@")[0],
-              email: email,
-            },
-          },
-          authConfig,
-        );
-
-        requesterId = userResponse?.data?.user?.id;
-      }
-
-      if (!requesterId) {
-        return {
-          content: [{ type: "text", text: "Unable to create requester user." }],
-          isError: true,
-        };
-      }
-
-      // Build HTML comment body — plain description + embedded images
-      const safeImages = Array.isArray(image_urls)
-        ? image_urls.filter(Boolean)
-        : [];
-
-      let htmlBody = `<p>${description.replace(/\n/g, "<br/>")}</p>`;
-
-      if (safeImages.length > 0) {
-        const imageBlocks = safeImages
-          .map(
-            (url, idx) =>
-              `<p><strong>Image ${idx + 1}:</strong><br/>` +
-              `<img src="${url}" alt="Customer image ${idx + 1}" ` +
-              `style="max-width:600px;border:1px solid #ddd;border-radius:4px;margin-top:6px;" /></p>`,
-          )
-          .join("\n");
-
-        htmlBody +=
-          `\n<hr/>\n<p><strong>Customer-uploaded images (${safeImages.length}):</strong></p>\n` +
-          imageBlocks;
-      }
-
-      // Create ticket
-      const ticketResponse = await axios.post(
-        `${ZENDESK_API_URL}/tickets.json`,
-        {
-          ticket: {
-            subject: subject,
-            comment: {
-              html_body: htmlBody,
-            },
-            requester_id: requesterId,
-            priority: "normal",
-          },
-        },
-        authConfig,
-      );
-
-      const ticketId = ticketResponse?.data?.ticket?.id;
-
-      if (!ticketId) {
-        return {
-          content: [{ type: "text", text: "Failed to create support ticket." }],
-          isError: true,
-        };
-      }
-
-      const payload = {
-        requester_id: requesterId,
-        subject: subject,
-        description: description,
-        thread_id: session_id,
-        store_code: store_code,
-        ticket_id: ticketId,
-        attachments: safeImages,
-      };
-
-      callBackendAPI("POST", `/support/tickets/`, payload);
-
-      // Success Response
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Support ticket #${ticketId} created successfully. Our team will contact you soon.`,
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error creating support ticket: ${error.message}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-// ######### 11. Cancel Order #########
+// ######### 10. Cancel Order #########
 server.tool(
   "cancel_order",
   `Cancel a Shopify order by order number.
@@ -1242,7 +1070,7 @@ server.tool(
     }
   },
 );
-// ######### 12. Modify Order #########
+// ######### 11. Modify Order #########
 server.tool(
   "modify_order",
   `Modify an existing Shopify order using the 3-step Order Edit API
@@ -1387,7 +1215,7 @@ server.tool(
   },
 );
 
-// ######### 11. Order Transactions #########
+// ######### 12. Order Transactions #########
 server.tool(
   "get_order_transactions",
   `Fetch payment transactions for a specific order.
