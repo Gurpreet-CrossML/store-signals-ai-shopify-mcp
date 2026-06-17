@@ -97,9 +97,18 @@ const storeMetadataQuery = `query {
 
 // GraphQL query to fetch related products based on a given product ID.
 const relatedProductsQuery = `query getRecommendations($productId: ID!) {
-    productRecommendations(productId: $productId) {
-        id
+  productRecommendations(productId: $productId) {
+    id
+    title
+    category {
+      name
     }
+    priceRange {
+      minVariantPrice { amount currencyCode }
+    }
+    availableForSale
+    description
+  }
 }`;
 
 // GraphQL query to fetch a single product by its ID, including detailed information such as images, price range, and variants.

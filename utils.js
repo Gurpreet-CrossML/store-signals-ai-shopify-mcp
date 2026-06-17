@@ -236,8 +236,8 @@ const getVariantDiscount = (variant) => {
 // Utility function to format products data received from Shopify API, and also log product view events to the backend for analytics.
 const formatProducts = (
   products,
-  session_id,
-  store_code,
+  session_id = null,
+  store_code = null,
   full_details = false,
 ) => {
   try {
@@ -246,15 +246,17 @@ const formatProducts = (
       const productName = node.title;
       const productCategory = node?.category?.name;
 
-      // Log product view event to backend for analytics
-      callBackendAPI("POST", "/chat/bot-events/", {
-        thread_id: session_id,
-        event_type: "view_product",
-        store_code: store_code,
-        product_id: productId,
-        product_name: productName,
-        category: productCategory || "",
-      });
+      if (session_id && store_code){
+        // Log product view event to backend for analytics
+        callBackendAPI("POST", "/chat/bot-events/", {
+          thread_id: session_id,
+          event_type: "view_product",
+          store_code: store_code,
+          product_id: productId,
+          product_name: productName,
+          category: productCategory || "",
+        });
+      }
 
       const baseProduct = {
         id: productId,

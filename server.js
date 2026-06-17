@@ -12,6 +12,7 @@ const {
   productByIdQuery,
   productSortQuery,
   discountQuery,
+  relatedProductsQuery,
 } = require("./graphql_queries");
 const {
   MCP_NAME,
@@ -1123,6 +1124,7 @@ server.tool(
     }
   },
 );
+
 // ######### 11. Cancel Order #########
 server.tool(
   "cancel_order",
@@ -1242,6 +1244,7 @@ server.tool(
     }
   },
 );
+
 // ######### 12. Modify Order #########
 server.tool(
   "modify_order",
@@ -1387,7 +1390,7 @@ server.tool(
   },
 );
 
-// ######### 11. Order Transactions #########
+// ######### 13. Order Transactions #########
 server.tool(
   "get_order_transactions",
   `Fetch payment transactions for a specific order.
@@ -1489,6 +1492,125 @@ server.tool(
       };
     }
   },
+);
+
+// ######### 14. Fetch Upselling Products by ID #########
+server.tool(
+  "get_upselling_products",
+  `Retrieve upsell, cross-sell, and related product recommendations for one or more Shopify products.
+
+Returns products recommended by Shopify's recommendation engine.
+Useful for bundle suggestions, cross-sells, upsells, and related product recommendations.
+
+For each input product:
+- Retrieves recommendations
+- Keeps up to 2 recommended products
+- Removes duplicate recommendations across all products
+
+Parameters:
+@param {string[]} product_ids Shopify product IDs. Accepts either:
+  - Numeric IDs: ["123", "456"]
+  - GIDs: ["gid://shopify/Product/123"]
+`,
+  {
+    product_ids: z
+      .array(z.string())
+      .min(1)
+      .describe(
+        "List of Shopify product IDs. Accepts numeric IDs or Shopify Product GIDs."
+      ),
+  },
+  async ({ product_ids }) => {
+    try {
+      const recommendationMap = new Map();
+
+      await Promise.all(
+        product_ids.map(async (productId) => {
+          try {
+            const cacheKey = `related:${productId}`;
+
+            let recommendations = null;
+
+            // Try cache first
+            const cached = await getCache(cacheKey);
+
+            if (cached?.products?.length) {
+              recommendations = cached.products;
+            } else {
+              const gid = productId.startsWith(
+                "gid://shopify/Product/"
+              )
+                ? productId
+                : `gid://shopify/Product/${productId}`;
+
+              const query = {
+                query: relatedProductsQuery,
+                variables: {
+                  productId: gid,
+                },
+              };
+
+              const response = await callShopifyApi(
+                "POST",
+                "",
+                query
+              );
+
+              const products = formatProducts(
+                (response?.data?.productRecommendations || [])
+                  .slice(0, 2)
+                  .map((node) => ({ node }))
+              );
+
+              recommendations = products;
+
+              if (products.length) {
+                await setCache(cacheKey, {
+                  products,
+                });
+              }
+            }
+
+            // Keep only first 2 recommendations per source product
+            recommendations.slice(0, 2).forEach((product) => {
+              recommendationMap.set(
+                product.id || product.product_id,
+                product
+              );
+            });
+          } catch (error) {
+            console.warn(
+              `Failed to get recommendations for ${productId}:`,
+              error?.message || error
+            );
+          }
+        })
+      );
+
+      const result = {
+        products: Array.from(recommendationMap.values()),
+      };
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching product recommendations: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
 );
 
 // ********************************** End of MCP Tools **********************************
