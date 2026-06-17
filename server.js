@@ -5,7 +5,6 @@ const {
 const { z } = require("zod");
 const express = require("express");
 const cors = require("cors");
-const axios = require("axios");
 const nodemailer = require("nodemailer");
 const {
   productSearchByQuery,
