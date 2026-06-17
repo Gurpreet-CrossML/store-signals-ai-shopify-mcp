@@ -279,12 +279,9 @@ const formatProducts = (
 
           return {
             variant_id: v.id.split("/").pop(),
-            title: v.title,
+            variant_name: v.title,
 
-            price: {
-              amount: `${getCurrencySymbol(v.priceV2?.currencyCode)}${v.priceV2?.amount || 0}`,
-              currency: v.priceV2?.currencyCode || null,
-            },
+            variant_price: `${getCurrencySymbol(v.priceV2?.currencyCode)}${v.priceV2?.amount || 0}`,
 
             compare_at_price: v.compareAtPriceV2?.amount
               ? `${getCurrencySymbol(v.compareAtPriceV2?.currencyCode)}${v.compareAtPriceV2.amount}`
@@ -1008,6 +1005,76 @@ class ShopifyOrderEditor {
   }
 }
 
+// Utility function to format order transactions received from Shopify API
+const formatOrderTransactions = (order, transactions) => {
+  const successfulTransactions = transactions.filter(
+    (t) => t.status === "success",
+  );
+
+  const authorizations = successfulTransactions.filter(
+    (t) => t.kind === "authorization",
+  );
+
+  const captures = successfulTransactions.filter((t) => t.kind === "capture");
+
+  const sales = successfulTransactions.filter((t) => t.kind === "sale");
+
+  const refunds = successfulTransactions.filter((t) => t.kind === "refund");
+
+  const voids = successfulTransactions.filter((t) => t.kind === "void");
+
+  const successfulPaymentCount = captures.length + sales.length;
+
+  const possibleDuplicateCharge = successfulPaymentCount > 1;
+
+  let billingAssessment = "No billing issues detected.";
+
+  if (possibleDuplicateCharge) {
+    billingAssessment =
+      "Multiple successful payment transactions detected. Further investigation may be required.";
+  } else if (authorizations.length > 0 && captures.length > 0) {
+    billingAssessment =
+      "A single payment authorization and capture were found. This is a normal payment flow and does not indicate a duplicate charge.";
+  } else if (refunds.length > 0) {
+    billingAssessment = "A refund transaction was found for this order.";
+  }
+
+  return {
+    order_id: order.order_number,
+
+    financial_status: order.financial_status,
+
+    payment_gateway: transactions[0]?.gateway || null,
+
+    total_amount: order.current_total_price,
+
+    currency: order.currency,
+
+    transaction_summary: {
+      authorizations: authorizations.length,
+      captures: captures.length,
+      sales: sales.length,
+      refunds: refunds.length,
+      voids: voids.length,
+    },
+
+    possible_duplicate_charge: possibleDuplicateCharge,
+
+    billing_assessment: billingAssessment,
+
+    transactions: transactions.map((t) => ({
+      id: t.id,
+      kind: t.kind,
+      status: t.status,
+      amount: t.amount,
+      currency: t.currency,
+      gateway: t.gateway,
+      processed_at: t.processed_at,
+      parent_id: t.parent_id,
+    })),
+  };
+};
+
 // Export environment variables and utility functions
 module.exports = {
   // envs
@@ -1040,4 +1107,5 @@ module.exports = {
   formatDiscounts,
   formatOrder,
   ShopifyOrderEditor,
+  formatOrderTransactions,
 };
