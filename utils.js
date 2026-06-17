@@ -767,18 +767,17 @@ const getReturnStatus = (o) => {
 };
 
 const getProductImageById = async (id) => {
-  try{
+  try {
     const gQuery = `query getProductById() {
     product(id: ${id}) {
         images(first: 1) { edges { node { url altText } } }
-}`
+}`;
     const response = await callShopifyApi("POST", "", gQuery);
     return response?.data?.product?.images?.edges?.[0]?.node?.url || "";
-  }
-  catch(error){
+  } catch (error) {
     console.log("Product image fetching error:", error);
   }
-}
+};
 
 // Utility function to format order details received from Shopify API, including calculating cancel and return eligibility based on order status and timestamps. This can be used to provide customers with clear information about their orders and their options for cancellation or returns.
 const formatOrder = async (o) => {
@@ -825,15 +824,17 @@ const formatOrder = async (o) => {
     is_returnable: returnStatus.allowed,
     return_message: returnStatus.reason || "Eligible for return",
 
-    items: await Promise.all(o.line_items.map(async(item) => ({
-      line_item_id: item.id,
-      product_id: item.product_id,
-      variant_id: item.variant_id,
-      name: item.name,
-      image: await getProductImageById(item.product_id),
-      quantity: item.quantity,
-      price: `${getCurrencySymbol(o.presentment_currency)}${item.price || 0}`,
-    }))),
+    items: await Promise.all(
+      o.line_items.map(async (item) => ({
+        line_item_id: item.id,
+        product_id: item.product_id,
+        variant_id: item.variant_id,
+        name: item.name,
+        image: await getProductImageById(item.product_id),
+        quantity: item.quantity,
+        price: `${getCurrencySymbol(o.presentment_currency)}${item.price || 0}`,
+      })),
+    ),
   };
 
   return formattedOrder;
