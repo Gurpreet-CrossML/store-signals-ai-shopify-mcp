@@ -1515,11 +1515,13 @@ server.tool(
     email: z.string().email().describe("Customer email address"),
     order_id: z.string().describe("Short order number (e.g. '1026')"),
     session_id: z.string().describe("Session identifier"),
-    customer_id: z.string().describe("Customer ID (optional, pass empty string if unknown)"),
+    customer_id: z
+      .string()
+      .describe("Customer ID (optional, pass empty string if unknown)"),
   },
   async ({ email, order_id, session_id, customer_id = "" }) => {
     try {
-      //1. Email verification (skipped when customer_id is known) 
+      //1. Email verification (skipped when customer_id is known)
       if (!customer_id) {
         const verificationStatus = await callBackendAPI(
           "POST",

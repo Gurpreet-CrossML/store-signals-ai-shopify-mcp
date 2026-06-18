@@ -1064,12 +1064,15 @@ const determineRefundStatus = (gqlOrder) => {
   const refunds = gqlOrder.refunds || [];
   if (refunds.length === 0) return "NOT_REFUNDED";
 
-  const transactions = gqlOrder.transactions || [];  // ← top-level now
+  const transactions = gqlOrder.transactions || []; // ← top-level now
 
-  if (transactions.some((tx) => tx.status === "FAILURE")) return "REFUND_FAILED";
-  if (transactions.some((tx) => tx.status === "PENDING")) return "REFUND_PENDING";
+  if (transactions.some((tx) => tx.status === "FAILURE"))
+    return "REFUND_FAILED";
+  if (transactions.some((tx) => tx.status === "PENDING"))
+    return "REFUND_PENDING";
   if (gqlOrder.displayFinancialStatus === "REFUNDED") return "FULLY_REFUNDED";
-  if (gqlOrder.displayFinancialStatus === "PARTIALLY_REFUNDED") return "PARTIALLY_REFUNDED";
+  if (gqlOrder.displayFinancialStatus === "PARTIALLY_REFUNDED")
+    return "PARTIALLY_REFUNDED";
 
   return "PARTIALLY_REFUNDED";
 };
@@ -1078,7 +1081,7 @@ const formatRefundStatus = (restOrder, gqlOrder) => {
   const refunds = gqlOrder.refunds || [];
   const lastRefund = refunds.length > 0 ? refunds[refunds.length - 1] : null;
   const status = determineRefundStatus(gqlOrder);
- 
+
   return {
     order_id: restOrder.order_number,
     shopify_order_id: restOrder.id,
