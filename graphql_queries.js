@@ -153,6 +153,7 @@ const productSortQuery = `query getProducts(
   }
 }`;
 
+// GraphQL query to fetch available discount and offers
 const discountQuery = `{
   discountNodes(first: 20) {
     edges {
@@ -342,6 +343,96 @@ const discountQuery = `{
     }
   }
 }`;
+
+// GraphQL query to fetch collection products
+const collectionProductsQuery = `query GetCollectionProducts($handle: String!) {
+  collectionByHandle(handle: $handle) {
+    products(first: 5) {
+      nodes {
+        id
+        title
+        handle
+        productType
+        category {
+          name
+        }
+        availableForSale
+        onlineStoreUrl
+        description
+        descriptionHtml
+
+        images(first: 5) {
+          edges {
+            node {
+              url
+              altText
+            }
+          }
+        }
+
+        priceRange {
+          minVariantPrice {
+            amount
+            currencyCode
+          }
+        }
+
+        variants(first: 20) {
+          edges {
+            node {
+              id
+              title
+              priceV2 {
+                amount
+                currencyCode
+              }
+              compareAtPriceV2 {
+                amount
+                currencyCode
+              }
+              availableForSale
+              quantityAvailable
+              currentlyNotInStock
+              selectedOptions {
+                name
+                value
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+// GraphQL query to fetch product's metadata
+const productMetadataQuery = `query GetProductMetadata($id: ID!) {
+  product(id: $id) {
+    id
+    title
+    priceRange {
+      minVariantPrice {
+        amount
+        currencyCode
+      }
+    }
+    availableForSale
+    description
+    productType
+    tags
+    collections(first: 20) {
+      nodes {
+        id
+        title
+        handle
+      }
+    }
+    category {
+      name
+    }
+  }
+}`;
+
 // Export the GraphQL query for use in other modules
 module.exports = {
   productSearchByQuery,
@@ -350,4 +441,6 @@ module.exports = {
   productByIdQuery,
   productSortQuery,
   discountQuery,
+  collectionProductsQuery,
+  productMetadataQuery,
 };

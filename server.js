@@ -12,6 +12,8 @@ const {
   productByIdQuery,
   productSortQuery,
   discountQuery,
+  collectionProductsQuery,
+  productMetadataQuery,
 } = require("./graphql_queries");
 const {
   MCP_NAME,
@@ -21,6 +23,7 @@ const {
   ZENDESK_USERNAME,
   ZENDESK_PASSWORD,
   ZENDESK_API_URL,
+  PRODUCT_LIMITS,
   callShopifyApi,
   callBackendAPI,
   formatProducts,
@@ -37,6 +40,9 @@ const {
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
+  normalizeProductGid,
+  fetchProductRecommendations,
+  getComplementaryProducts,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
@@ -1489,6 +1495,398 @@ server.tool(
       };
     }
   },
+);
+
+// ######### 14. Fetch Upselling Products by ID #########
+// server.tool(
+//   "get_upselling_products",
+//   `Retrieve upsell, cross-sell, and related product recommendations for one or more Shopify products.
+
+// Returns products recommended by Shopify's recommendation engine.
+// Useful for bundle suggestions, cross-sells, upsells, and related product recommendations.
+
+// For each input product:
+// - Retrieves recommendations
+// - Keeps up to 2 recommended products
+// - Removes duplicate recommendations across all products
+
+// Parameters:
+// @param {string[]} product_ids Shopify product IDs. Accepts either:
+//   - Numeric IDs: ["123", "456"]
+//   - GIDs: ["gid://shopify/Product/123"]
+// `,
+//   {
+//     product_ids: z
+//       .array(z.string())
+//       .min(1)
+//       .describe(
+//         "List of Shopify product IDs. Accepts numeric IDs or Shopify Product GIDs."
+//       ),
+//   },
+//   async ({ product_ids }) => {
+//     try {
+//       const candidateMap = new Map();
+//       let currentProduct = null;
+
+//       await Promise.all(
+//         product_ids.map(async (productId) => {
+//           try {
+//             const gid = normalizeProductGid(productId);
+
+//             // STEP 1: Get metadata
+//             const metadataResponse = await callShopifyApi(
+//               "POST",
+//               "",
+//               {
+//                 query: productMetadataQuery,
+//                 variables: {
+//                   id: gid,
+//                 },
+//               }
+//             );
+
+//             const product =
+//               metadataResponse?.data?.product;
+
+//             if (!product) return;
+
+//             currentProduct = {
+//               id: productId,
+//               name: product.title,
+//               category:
+//                 product.category?.name ||
+//                 null,
+//               description: product.description || null,
+//             };
+
+//             const currentProductId = productId;
+
+//             // -------------------------
+//             // COLLECTION PRODUCTS
+//             // -------------------------
+
+//             const collections =
+//               product.collections?.nodes || [];
+
+//             for (const collection of collections) {
+//               try {
+//                 const response =
+//                   await callShopifyApi("POST", "", {
+//                     query: collectionProductsQuery,
+//                     variables: {
+//                       handle: collection.handle,
+//                     },
+//                   });
+                
+
+//                 const products = formatProducts(
+//                   response?.data?.collectionByHandle?.products?.nodes?.map((node) => ({ node })) ||
+//                     []
+//                 );
+
+//                 products.forEach((item) => {
+//                   const id =
+//                     item.id || item.product_id;
+
+//                   if (
+//                     id &&
+//                     !String(id).includes(
+//                       currentProductId
+//                     )
+//                   ) {
+//                     candidateMap.set(id, item);
+//                   }
+//                 });
+//               } catch (e) {}
+//             }
+
+//             // -------------------------
+//             // PRODUCT TYPE PRODUCTS
+//             // -------------------------
+
+//             if (product.productType) {
+//               try {
+//                 const response =
+//                   await callShopifyApi("POST", "", {
+//                     query: productSearchByQuery,
+//                     variables: {
+//                       search: `product_type:'${product.productType}'`,
+//                     },
+//                   });
+
+//                 const products = formatProducts(
+//                   response?.data?.products?.edges || []
+//                 );
+
+//                 products.forEach((item) => {
+//                   const id =
+//                     item.id || item.product_id;
+
+//                   if (
+//                     id &&
+//                     !String(id).includes(
+//                       currentProductId
+//                     )
+//                   ) {
+//                     candidateMap.set(id, item);
+//                   }
+//                 });
+//               } catch (e) {}
+//             }
+
+//             // -------------------------
+//             // TAG PRODUCTS
+//             // -------------------------
+
+//             const usefulTags =
+//               (product.tags || []).filter(
+//                 (tag) =>
+//                   tag &&
+//                   tag.length > 2
+//               );
+
+//             await Promise.all(
+//               usefulTags.slice(0, 5).map(
+//                 async (tag) => {
+//                   try {
+//                     const response =
+//                       await callShopifyApi(
+//                         "POST",
+//                         "",
+//                         {
+//                           query:
+//                             productSearchByQuery,
+//                           variables: {
+//                             search: `tag:${tag}`,
+//                           },
+//                         }
+//                       );
+
+//                     const products =
+//                       formatProducts(
+//                         response?.data?.products
+//                           ?.edges || []
+//                       );
+
+//                     products.forEach((item) => {
+//                       const id =
+//                         item.id ||
+//                         item.product_id;
+
+//                       if (
+//                         id &&
+//                         !String(id).includes(
+//                           currentProductId
+//                         )
+//                       ) {
+//                         candidateMap.set(
+//                           id,
+//                           item
+//                         );
+//                       }
+//                     });
+//                   } catch (e) {}
+//                 }
+//               )
+//             );
+
+//           } catch (error) {
+//             console.warn(
+//               `Failed to get recommendations for ${productId}:`,
+//               error?.message || error
+//             );
+//           }
+//         })
+//       );
+
+//       // const currentProduct = currentProducts?.[0];
+
+//       const formattedProducts = Array.from(candidateMap.values())
+//         .map((product) => ({
+//           id: product.id || product.product_id,
+//           name: product.name || product.title,
+//           category:
+//             product.category?.name ||
+//             product.product_type ||
+//             product.productType ||
+//             null,
+//           price:
+//             product.price ||
+//             product.price_range?.min_price ||
+//             null,
+//           description: product.description || null,
+//         }))
+//         .filter((product) => {
+//           const category = product.category?.toLowerCase() || "";
+//           const name = product.name?.toLowerCase() || "";
+
+//           return (
+//             product.id !== currentProduct.id &&
+//             category !== currentProduct.category?.toLowerCase() &&
+//             !name.includes("laptop bag") &&
+//             !name.includes("backpack") &&
+//             !name.includes("briefcase")
+//           );
+//         });
+
+//       r = await getComplementaryProducts(currentProduct, formattedProducts)
+//       console.log(">>>>>>>>>>>", r);
+
+//       return {
+//         content: [
+//           {
+//             type: "text",
+//             text: JSON.stringify(
+//               {
+//                 products: Array.from(
+//                   candidateMap.values()
+//                 ).slice(0, 20),
+//               },
+//               null,
+//               2
+//             ),
+//           },
+//         ],
+//       };
+//     } catch (error) {
+//       return {
+//         content: [
+//           {
+//             type: "text",
+//             text: `Error fetching product recommendations: ${error.message}`,
+//           },
+//         ],
+//         isError: true,
+//       };
+//     }
+//   }
+// );
+server.tool(
+  "get_upselling_products",
+  `Retrieve upsell, cross-sell, and related product recommendations for one or more Shopify products.
+ 
+Returns products recommended by Shopify's recommendation engine.
+Useful for bundle suggestions, cross-sells, upsells, and related product recommendations.
+ 
+For each input product:
+- Retrieves recommendations from collections, product type, and tags
+- Filters out duplicates and excluded categories
+- Uses AI to rank complementary products
+- Returns top recommendations
+ 
+Parameters:
+@param {string[]} product_ids Shopify product IDs. Accepts either:
+  - Numeric IDs: ["123", "456"]
+  - GIDs: ["gid://shopify/Product/123"]`,
+  {
+    product_ids: z
+      .array(z.string())
+      .min(1)
+      .describe(
+        "List of Shopify product IDs. Accepts numeric IDs or Shopify Product GIDs."
+      ),
+  },
+  async ({ product_ids }) => {
+    try {
+      // Query functions passed as dependencies
+      const queries = {
+        productMetadataQuery,
+        collectionProductsQuery,
+        productSearchByQuery,
+        formatProducts,
+      };
+ 
+      // Fetch recommendations for all input products
+      const results = await Promise.all(
+        product_ids.map((id) =>
+          fetchProductRecommendations(id, callShopifyApi, queries)
+        )
+      );
+ 
+      // Merge all candidates (keeping first valid current product)
+      const allCandidates = new Map();
+      let currentProduct = null;
+ 
+      results.forEach(({ currentProduct: current, candidateMap }) => {
+        if (current && !currentProduct) {
+          currentProduct = current;
+        }
+        candidateMap.forEach((value, key) => {
+          allCandidates.set(key, value);
+        });
+      });
+ 
+      if (!currentProduct) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  error: "Failed to fetch any product metadata",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      // Filter and normalize products
+      // const filteredProducts = filterAndNormalizeProducts(
+      //   allCandidates,
+      //   currentProduct
+      // );
+      const candidateProducts = Array.from(allCandidates?.values()).slice(0, PRODUCT_LIMITS.MAX_CANDIDATES_RETURN);
+ 
+      // Use AI to rank complementary products
+      let recommendations = { product_ids: [] };
+      if (candidateProducts.length > 0) {
+        recommendations = await getComplementaryProducts(
+          currentProduct,
+          candidateProducts
+        );
+        console.log("AI-ranked recommendations:", recommendations);
+      }
+ 
+      // // Format final response
+      // const response = {
+      //   currentProduct,
+      //   recommendedProductIds: recommendations.product_ids,
+      //   recommendationReason: recommendations.reason || "",
+      //   totalCandidatesEvaluated: filteredProducts.length,
+      //   allCandidates: filteredProducts,
+      // };
+ 
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(recommendations, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("Error in get_upselling_products:", error);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                error: `Error fetching product recommendations: ${error.message}`,
+                products: [],
+              },
+              null,
+              2
+            ),
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
 );
 
 // ********************************** End of MCP Tools **********************************

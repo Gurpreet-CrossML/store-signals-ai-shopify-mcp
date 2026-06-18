@@ -4,8 +4,12 @@ const https = require("https");
 const {
   storeMetadataQuery,
   relatedProductsQuery,
+  productMetadataQuery,
+  collectionProductsQuery,
+  productSearchByQuery,
 } = require("./graphql_queries");
 const { getCache, setCache } = require("./cache");
+const { PRODUCT_LIMITS } = require("./constants")
 
 // Load environment variables from .env file
 dotenv.config();
@@ -133,6 +137,7 @@ const callShopifyApi = async (
 
 // Utility function to call the backend API
 const callBackendAPI = async (method, endpoint, data = {}) => {
+  // return;
   try {
     const url = `${BACKEND_API_URL}${endpoint}`;
 
@@ -1060,6 +1065,248 @@ const formatOrderTransactions = (order, transactions) => {
   };
 };
 
+// Convert Shopify numeric ID or GID to GID format
+function normalizeProductGid(productId) {
+  return productId.startsWith("gid://shopify/Product/")
+    ? productId
+    : `gid://shopify/Product/${productId}`;
+};
+
+// Fetch product metadata from Shopify
+const fetchProductMetadata = async (productId) => {
+  try {
+    const gid = normalizeProductGid(productId);
+    const response = await callShopifyApi("POST", "", {
+      query: productMetadataQuery,
+      variables: { id: gid },
+    });
+ 
+    return response?.data?.product;
+  } catch (error) {
+    console.warn(`Failed to fetch metadata for ${productId}:`, error.message);
+    return null;
+  }
+};
+
+// Fetch products from collection
+const fetchCollectionProducts = async (collection) => {
+  try {
+    const response = await callShopifyApi("POST", "", {
+      query: collectionProductsQuery,
+      variables: { handle: collection.handle },
+    });
+ 
+    return (
+      response?.data?.collectionByHandle?.products?.nodes?.map((node) => ({
+        node,
+      })) || []
+    );
+  } catch (error) {
+    console.warn(
+      `Failed to fetch collection ${collection.handle}:`,
+      error.message
+    );
+    return [];
+  }
+};
+
+// Add products to candidate map, avoiding duplicates
+const addCandidates = (candidateMap, products, currentProductId) => {
+  products.forEach((item) => {
+    const id = item?.id;
+    if (id && !String(id).includes(currentProductId)) {
+      candidateMap.set(id, item);
+    }
+  });
+};
+
+// Fetch products by search query (query, product type, tag, etc)
+const fetchProductsBySearch = async (searchQuery) => {
+  try {
+    const response = await callShopifyApi("POST", "", {
+      query: productSearchByQuery,
+      variables: { search: searchQuery },
+    });
+ 
+    return response?.data?.products?.edges || [];
+  } catch (error) {
+    console.warn(`Failed to search products (${searchQuery}):`, error.message);
+    return [];
+  }
+};
+
+// Fetch recommendations for a single product
+const fetchProductRecommendations = async (productId) => {
+  const candidateMap = new Map();
+ 
+  try {
+    // Fetch metadata
+    const product = await fetchProductMetadata(productId);
+ 
+    if (!product) {
+      console.warn(`No metadata found for product ${productId}`);
+      return { currentProduct: null, candidateMap };
+    }
+ 
+    // Normalize product
+    const currentProduct = {
+      id: product?.id,
+      name: product?.title,
+      price: `${getCurrencySymbol(product?.priceRange?.minVariantPrice?.currencyCode)}${product?.priceRange?.minVariantPrice?.amount}`,
+      available_for_sale: product?.availableForSale,
+      category: product?.category?.name,
+      description: product?.description,
+    };
+
+    const currentProductId = productId;
+ 
+    // ===== FETCH FROM COLLECTIONS =====
+    const collections = product.collections?.nodes || [];
+    for (const collection of collections) {
+      const products = await fetchCollectionProducts(collection);
+      const formatted = formatProducts(products);
+      addCandidates(candidateMap, formatted, currentProductId);
+    }
+ 
+    // ===== FETCH FROM PRODUCT TYPE =====
+    if (product.productType) {
+      const products = await fetchProductsBySearch(
+        `product_type:'${product.productType}'`,
+        productSearchByQuery
+      );
+      const formatted = formatProducts(products);
+      addCandidates(candidateMap, formatted, currentProductId);
+    }
+ 
+    // ===== FETCH FROM TAGS =====
+    const usefulTags = (product.tags || [])
+      .filter((tag) => tag && tag.length > 2)
+      .slice(0, PRODUCT_LIMITS.MAX_TAGS);
+ 
+    await Promise.all(
+      usefulTags.map(async (tag) => {
+        const products = await fetchProductsBySearch(
+          `tag:${tag}`,
+          callShopifyApi,
+          productSearchByQuery
+        );
+        const formatted = formatProducts(products);
+        addCandidates(candidateMap, formatted, currentProductId);
+      })
+    );
+ 
+    return { currentProduct, candidateMap };
+  } catch (error) {
+    console.error(`Error fetching recommendations for ${productId}:`, error);
+    return { currentProduct: null, candidateMap };
+  }
+}
+
+const getComplementaryProducts = async(
+  currentProduct,
+  candidateProducts,
+) => {
+  // Validate inputs
+  if (!currentProduct || !candidateProducts?.length) {
+    return { product_ids: [] };
+  }
+
+  const prompt = `You are an ecommerce recommendation engine specializing in complementary products.
+
+Current Product:
+${JSON.stringify(currentProduct, null, 2)}
+
+Candidate Products to Choose From:
+${JSON.stringify(candidateProducts, null, 2)}
+
+Task: Select up to ${PRODUCT_LIMITS.MAX_COMPLEMENTARY_PRODUCTS} products that complement the current product.
+
+Selection Rules:
+1. Only recommend products commonly used together with the current product
+2. Prioritize accessories, add-ons, bundles, and enhancement items
+3. Exclude direct substitutes or competitors
+4. Exclude near-identical or duplicate products
+5. Ensure diversity - no redundant recommendations
+
+If fewer than ${PRODUCT_LIMITS.MAX_COMPLEMENTARY_PRODUCTS} valid recommendations exist, return only the complementary ones.
+If no valid complementary products found, return an empty list.
+
+Return ONLY a valid JSON object with this exact structure:
+{
+  "product_ids": ["id1", "id2", ...],
+  "reason": "Brief explanation of why these products complement the current product"
+}`;
+
+  try {
+    const response = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: OPENAI_MODEL,
+        messages: [
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+        temperature: 0.2, // Lower temp for more deterministic results
+        max_tokens: 500,
+        response_format: {
+          type: "json_object",
+        },
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        timeout: 15000,
+      }
+    );
+
+    const content = response?.data?.choices?.[0]?.message?.content;
+
+    if (!content) {
+      console.error("Empty response from API");
+      return { product_ids: [] };
+    }
+
+    const parsed = JSON.parse(content);
+
+    // Validate response structure
+    if (!Array.isArray(parsed.product_ids)) {
+      console.error("Invalid response structure: product_ids is not an array");
+      return { product_ids: [] };
+    }
+
+    // Ensure max limit and valid IDs
+    const validIds = parsed.product_ids
+      .filter(id => typeof id === "string" && id.trim().length > 0)
+      .slice(0, PRODUCT_LIMITS.MAX_COMPLEMENTARY_PRODUCTS);
+
+    // Verify returned IDs exist in candidates
+    const candidateIds = new Set(
+      candidateProducts.map(p => p.id || p._id)
+    );
+    const filteredIds = validIds.filter(id => candidateIds.has(id));
+
+    return {
+      product_ids: filteredIds,
+      reason: parsed.reason || "Recommended based on compatibility",
+    };
+  } catch (error) {
+    console.error("Error fetching complementary products:", error.message);
+    
+    if (error.response?.status === 401) {
+      throw new Error("API authentication failed. Check your API key.");
+    }
+    if (error.code === "ECONNABORTED") {
+      throw new Error("Request timeout. Try again.");
+    }
+    
+    return { product_ids: [] };
+  }
+}
+
 // Export environment variables and utility functions
 module.exports = {
   // envs
@@ -1076,6 +1323,7 @@ module.exports = {
   ZENDESK_PASSWORD,
   OPENAI_API_KEY,
   OPENAI_MODEL,
+  PRODUCT_LIMITS,
   // helpers
   callShopifyApi,
   callBackendAPI,
@@ -1093,4 +1341,7 @@ module.exports = {
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
+  normalizeProductGid,
+  fetchProductRecommendations,
+  getComplementaryProducts,
 };
