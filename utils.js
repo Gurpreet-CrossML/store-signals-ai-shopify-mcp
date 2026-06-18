@@ -1204,5 +1204,5 @@ module.exports = {
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
-  searchProductsByNames
+  searchProductsByNames,
 };
