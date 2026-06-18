@@ -1066,33 +1066,35 @@ const searchProductsByNames = async (
   full_details = false,
 ) => {
   const results = [];
- 
+
   for (const name of product_names) {
     try {
       const cacheKey = `search:${name}:${full_details ? "full" : "brief"}`;
       const cached = await getCache(cacheKey);
- 
+
       if (cached) {
         logProductViewEvents(cached.products, session_id, store_code);
         results.push({
           product_name: name,
           product_detail:
-            cached.products.length > 0 ? cached.products[0] : "Product not found",
+            cached.products.length > 0
+              ? cached.products[0]
+              : "Product not found",
         });
         continue;
       }
- 
+
       const graphqlQuery = {
         query: productSearchByQuery,
         variables: {
           search: name,
         },
       };
- 
+
       const searchResponse = await callShopifyApi("POST", "", graphqlQuery);
- 
+
       let formattedProducts = [];
- 
+
       if (searchResponse?.data?.products?.edges?.length > 0) {
         formattedProducts = formatProducts(
           searchResponse.data.products.edges,
@@ -1101,13 +1103,15 @@ const searchProductsByNames = async (
           full_details,
         );
       }
- 
+
       const entry = {
         product_name: name,
         product_detail:
-          formattedProducts.length > 0 ? formattedProducts[0] : "Product not found",
+          formattedProducts.length > 0
+            ? formattedProducts[0]
+            : "Product not found",
       };
- 
+
       try {
         await setCache(cacheKey, { products: formattedProducts });
       } catch (e) {
@@ -1116,7 +1120,7 @@ const searchProductsByNames = async (
           e?.message || e,
         );
       }
- 
+
       results.push(entry);
     } catch (error) {
       console.error(
@@ -1129,7 +1133,7 @@ const searchProductsByNames = async (
       });
     }
   }
- 
+
   return results;
 };
 
