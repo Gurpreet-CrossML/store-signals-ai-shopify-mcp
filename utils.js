@@ -1060,6 +1060,116 @@ const formatOrderTransactions = (order, transactions) => {
   };
 };
 
+// Utility function to search for a list of products one by one by their names.
+// Accepts an array of product name strings and searches each sequentially against the Shopify catalog.
+// Returns an array of results — one entry per product name — each containing either the matched
+// product(s) or an indicator that no match was found.
+const searchProductsByNames = async (
+  product_names,
+  session_id,
+  store_code,
+  full_details = false,
+) => {
+  const results = [];
+
+  for (const name of product_names) {
+    try {
+      const cacheKey = `search:${name}:${full_details ? "full" : "brief"}`;
+      const cached = await getCache(cacheKey);
+
+      if (cached) {
+        logProductViewEvents(cached.products, session_id, store_code);
+        results.push({
+          query: name,
+          found: cached.products.length > 0,
+          products: cached.products,
+        });
+        continue;
+      }
+
+      const graphqlQuery = {
+        query: productSearchByQuery,
+        variables: {
+          search: name,
+        },
+      };
+
+      const searchResponse = await callShopifyApi("POST", "", graphqlQuery);
+
+      let formattedProducts = [];
+
+      if (searchResponse?.data?.products?.edges?.length > 0) {
+        formattedProducts = formatProducts(
+          searchResponse.data.products.edges,
+          session_id,
+          store_code,
+          full_details,
+        );
+      }
+
+      // If no direct match, fall back to extracted keyword search
+      if (formattedProducts.length === 0) {
+        console.log(
+          `No products found for "${name}", retrying with extracted keywords...`,
+        );
+
+        const keywords = await extractSearchTerms(name);
+
+        for (const keyword of keywords) {
+          const gQuery = {
+            query: productSearchByQuery,
+            variables: {
+              search: keyword,
+            },
+          };
+
+          const retryResponse = await callShopifyApi("POST", "", gQuery);
+
+          if (retryResponse?.data?.products?.edges?.length > 0) {
+            formattedProducts = formatProducts(
+              retryResponse.data.products.edges,
+              session_id,
+              store_code,
+              full_details,
+            );
+            break;
+          }
+        }
+      }
+
+      const entry = {
+        query: name,
+        found: formattedProducts.length > 0,
+        products: formattedProducts,
+      };
+
+      try {
+        await setCache(cacheKey, { products: formattedProducts });
+      } catch (e) {
+        console.warn(
+          `searchProductsByNames cache set failed for "${name}":`,
+          e?.message || e,
+        );
+      }
+
+      results.push(entry);
+    } catch (error) {
+      console.error(
+        `searchProductsByNames error for "${name}":`,
+        error.message,
+      );
+      results.push({
+        query: name,
+        found: false,
+        products: [],
+        error: error.message,
+      });
+    }
+  }
+
+  return results;
+};
+
 // Export environment variables and utility functions
 module.exports = {
   // envs
@@ -1093,4 +1203,5 @@ module.exports = {
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
+  searchProductsByNames
 };

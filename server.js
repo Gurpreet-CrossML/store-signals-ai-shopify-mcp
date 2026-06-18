@@ -37,6 +37,7 @@ const {
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
+  searchProductsByNames,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
@@ -1387,7 +1388,7 @@ server.tool(
   },
 );
 
-// ######### 11. Order Transactions #########
+// ######### 13. Order Transactions #########
 server.tool(
   "get_order_transactions",
   `Fetch payment transactions for a specific order.
@@ -1483,6 +1484,74 @@ server.tool(
           {
             type: "text",
             text: `Error fetching order transactions: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ######### 14. Search Products by Names (batch, one-by-one, Muti Product Search) #########
+server.tool(
+  "search_products_by_names",
+  `Search for multiple products one by one using an array of product names.
+  Each name is searched independently against the Shopify catalog and the results
+  are returned as an ordered array that mirrors the input list.
+
+  Use this when the user provides a list of specific product names they want to look up,
+  for example: ["Product 1", "Product 2", "Product 3"].
+
+  Each entry in the response includes:
+  - query: the original product name searched
+  - found: whether any matching products were discovered
+  - products: array of matched product objects (same shape as search_products)
+
+  Parameters:
+  @param {string[]} product_names: Array of product names to search for
+  @param {string}   session_id:    Session ID
+  @param {string}   store_code:    Store name or code
+  @param {boolean}  full_details:  Whether to return full product details including variants, images, and URLs. Defaults to false.
+  `,
+  {
+    product_names: z
+      .array(z.string().min(1))
+      .min(1)
+      .describe(
+        "Array of product names to search for, e.g. ['Product 1', 'Product 2'].",
+      ),
+    session_id: z.string().describe("Session ID"),
+    store_code: z.string().describe("Store name/code"),
+    full_details: z
+      .boolean()
+      .optional()
+      .describe(
+        "Whether to return full product details including variants, images, and URLs. Defaults to false.",
+      ),
+  },
+  async ({ product_names, session_id, store_code, full_details = false }) => {
+    try {
+      const results = await searchProductsByNames(
+        product_names,
+        session_id,
+        store_code,
+        full_details,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(results, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error searching products by names: ${error.message}`,
           },
         ],
         isError: true,
