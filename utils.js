@@ -1059,6 +1059,39 @@ const formatOrderTransactions = (order, transactions) => {
     })),
   };
 };
+// Utility function to determine refund status based on order's refunds and transactions. It checks the status of refunds and transactions to categorize the refund status into various states such as "NOT_REFUNDED", "REFUND_PENDING", "REFUND_FAILED", "PARTIALLY_REFUNDED", or "FULLY_REFUNDED".
+const determineRefundStatus = (gqlOrder) => {
+  const refunds = gqlOrder.refunds || [];
+  if (refunds.length === 0) return "NOT_REFUNDED";
+
+  const transactions = gqlOrder.transactions || [];  // ← top-level now
+
+  if (transactions.some((tx) => tx.status === "FAILURE")) return "REFUND_FAILED";
+  if (transactions.some((tx) => tx.status === "PENDING")) return "REFUND_PENDING";
+  if (gqlOrder.displayFinancialStatus === "REFUNDED") return "FULLY_REFUNDED";
+  if (gqlOrder.displayFinancialStatus === "PARTIALLY_REFUNDED") return "PARTIALLY_REFUNDED";
+
+  return "PARTIALLY_REFUNDED";
+};
+// Utility function to format refund status for an order by combining information from the REST API order data and the GraphQL API order data. It provides a comprehensive view of the refund status, financial status, and other relevant details related to refunds for the order.
+const formatRefundStatus = (restOrder, gqlOrder) => {
+  const refunds = gqlOrder.refunds || [];
+  const lastRefund = refunds.length > 0 ? refunds[refunds.length - 1] : null;
+  const status = determineRefundStatus(gqlOrder);
+ 
+  return {
+    order_id: restOrder.order_number,
+    shopify_order_id: restOrder.id,
+    email: restOrder.email,
+    refund_status: status,
+    financial_status: gqlOrder.displayFinancialStatus,
+    refundable: gqlOrder.refundable,
+    refund_count: refunds.length,
+    last_refund_date: lastRefund?.createdAt ?? null,
+    currency: restOrder.currency,
+    total: `${getCurrencySymbol(restOrder.presentment_currency)}${restOrder.total_price || 0}`,
+  };
+};
 
 // Export environment variables and utility functions
 module.exports = {
@@ -1093,4 +1126,5 @@ module.exports = {
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
+  formatRefundStatus,
 };

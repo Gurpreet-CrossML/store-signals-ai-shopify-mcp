@@ -342,6 +342,26 @@ const discountQuery = `{
     }
   }
 }`;
+const refundQuery = `
+  query GetOrderRefundStatus($id: ID!) {
+    order(id: $id) {
+      id
+      name
+      displayFinancialStatus
+      refundable
+      refunds(first: 20) {
+        id
+        createdAt
+      }
+      transactions(first: 20) {
+        id
+        kind
+        status
+      }
+    }
+  }
+`;
+
 // Export the GraphQL query for use in other modules
 module.exports = {
   productSearchByQuery,
@@ -350,4 +370,5 @@ module.exports = {
   productByIdQuery,
   productSortQuery,
   discountQuery,
+  refundQuery,
 };
