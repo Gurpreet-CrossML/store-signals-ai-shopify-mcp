@@ -984,6 +984,160 @@ class ShopifyOrderEditor {
   }
 }
 
+/**
+ * ShopifyExchangeManager – implements the Exchange API:
+ *   Step 1: fetch returnable fulfillments
+ *   Step 2: returnCreate (with exchange line items)
+ *   Step 3: returnProcess
+ */
+class ShopifyExchangeManager {
+  constructor() {
+    const baseUrl = SHOPIFY_BASE_URL || "";
+    this.shopDomain = baseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    this.accessToken = SHOPIFY_ACCESS_TOKEN;
+    this.apiVersion = process.env.SHOPIFY_API_VERSION || "2024-04";
+    this.graphqlEndpoint = `https://${this.shopDomain}/admin/api/${this.apiVersion}/graphql.json`;
+  }
+
+  // Low-level GraphQL caller
+  async _graphql(query, variables = {}) {
+    const response = await axios.post(
+      this.graphqlEndpoint,
+      { query, variables },
+      {
+        headers: {
+          "X-Shopify-Access-Token": this.accessToken,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    const { data, errors } = response.data;
+    if (errors?.length > 0) {
+      throw new Error(`GraphQL Errors: ${JSON.stringify(errors)}`);
+    }
+    return data;
+  }
+
+  // Step 1 – get returnable fulfillments for an order
+  async getReturnableFulfillments(orderId) {
+    const query = `
+      query GetReturnableFulfillments($orderId: ID!) {
+        returnableFulfillments(orderId: $orderId, first: 10) {
+          edges {
+            node {
+              id
+              fulfillment { id }
+              returnableFulfillmentLineItems(first: 10) {
+                edges {
+                  node {
+                    fulfillmentLineItem { id }
+                    quantity
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+    const data = await this._graphql(query, { orderId });
+    return data.returnableFulfillments.edges;
+  }
+
+  // Step 2 – create return with exchange items
+  async createReturnWithExchange(
+    returnableFulfillmentId,
+    returnLineItems,   // [{ fulfillmentLineItemId, quantity }]
+    exchangeLineItems  // [{ variantId, quantity }]
+  ) {
+    const mutation = `
+      mutation CreateReturnWithExchange($input: ReturnInput!) {
+        returnCreate(returnInput: $input) {
+          return { id, status }
+          userErrors { field message }
+        }
+      }
+    `;
+    const variables = {
+      input: {
+        returnableFulfillmentId,
+        returnLineItems: returnLineItems.map(item => ({
+          fulfillmentLineItemId: item.fulfillmentLineItemId,
+          quantity: item.quantity,
+        })),
+        exchangeLineItems: exchangeLineItems.map(item => ({
+          variantId: item.variantId,
+          quantity: item.quantity,
+        })),
+      },
+    };
+    const data = await this._graphql(mutation, variables);
+    const result = data.returnCreate;
+    if (result.userErrors?.length) {
+      throw new Error(`Return creation failed: ${result.userErrors[0].message}`);
+    }
+    return result.return;
+  }
+
+  // Step 3 – process the return to finalise exchange
+  async processReturn(returnId) {
+    const mutation = `
+      mutation ProcessReturn($returnId: ID!) {
+        returnProcess(returnId: $returnId) {
+          return { id, status }
+          userErrors { field message }
+        }
+      }
+    `;
+    const data = await this._graphql(mutation, { returnId });
+    const result = data.returnProcess;
+    if (result.userErrors?.length) {
+      throw new Error(`Return processing failed: ${result.userErrors[0].message}`);
+    }
+    return result.return;
+  }
+
+  // High-level orchestrator used by the MCP tool
+  async exchangeItems(
+    orderId,                  // full GID or numeric ID
+    returnItems,              // array of { fulfillmentLineItemId, quantity }
+    exchangeItems,            // array of { variantId, quantity }
+    options = {}
+  ) {
+    // Normalise order ID to GID
+    const gid = orderId.startsWith("gid://shopify/Order/")
+      ? orderId
+      : `gid://shopify/Order/${orderId}`;
+
+    // 1. Get returnable fulfillments – we'll take the first one
+    const edges = await this.getReturnableFulfillments(gid);
+    if (!edges.length) {
+      throw new Error("No returnable fulfillments found for this order.");
+    }
+    const returnableFulfillmentId = edges[0].node.id;
+
+    // 2. Validate that the requested return line items exist in the fulfillment
+    // (optional – you could skip and let Shopify return an error)
+
+    // 3. Create return with exchange
+    const createdReturn = await this.createReturnWithExchange(
+      returnableFulfillmentId,
+      returnItems,
+      exchangeItems
+    );
+
+    // 4. Process the return
+    const processedReturn = await this.processReturn(createdReturn.id);
+
+    return {
+      success: true,
+      returnId: processedReturn.id,
+      status: processedReturn.status,
+      message: "Exchange completed successfully.",
+    };
+  }
+}
+
 // Utility function to format order transactions received from Shopify API
 const formatOrderTransactions = (order, transactions) => {
   const successfulTransactions = transactions.filter(
@@ -1084,4 +1238,5 @@ module.exports = {
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
+  ShopifyExchangeManager,
 };

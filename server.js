@@ -33,6 +33,7 @@ const {
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
+  ShopifyExchangeManager,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
@@ -1316,6 +1317,138 @@ server.tool(
       };
     }
   },
+);
+
+// ######### 15. Exchange Items #########
+server.tool(
+  "exchange_items",
+  `Exchange products on a fulfilled order using Shopify's Exchange API.
+
+  This performs a full exchange: the returned items are marked as returned,
+  and the new items are added to a new fulfillment order.
+
+  Parameters:
+  @param {string}  order_id         Shopify Order ID (numeric or GID)
+  @param {array}   return_items     List of items being returned:
+      [ { fulfillment_line_item_id: string, quantity: number }, ... ]
+  @param {array}   exchange_items   List of new items to add:
+      [ { variant_id: string, quantity: number }, ... ]
+  @param {string}  [session_id]     Optional session ID for logging
+  @param {string}  [staff_note]     Internal note (default: "Exchange via MCP")
+  `,
+  {
+    order_id: z
+      .string()
+      .describe(
+        "Shopify Order ID (numeric or full GID). Example: '123456789' or 'gid://shopify/Order/123456789'"
+      ),
+    return_items: z
+      .array(
+        z.object({
+          fulfillment_line_item_id: z
+            .string()
+            .describe(
+              "FulfillmentLineItem GID, e.g. 'gid://shopify/FulfillmentLineItem/456'"
+            ),
+          quantity: z
+            .number()
+            .int()
+            .positive()
+            .describe("Quantity being returned"),
+        })
+      )
+      .min(1)
+      .describe("One or more line items to return."),
+    exchange_items: z
+      .array(
+        z.object({
+          variant_id: z
+            .string()
+            .describe(
+              "Product variant GID to add, e.g. 'gid://shopify/ProductVariant/987'"
+            ),
+          quantity: z
+            .number()
+            .int()
+            .positive()
+            .describe("Quantity to exchange"),
+        })
+      )
+      .min(1)
+      .describe("One or more new variants to add to the order."),
+    session_id: z.string().optional().describe("Session ID for logging."),
+    staff_note: z
+      .string()
+      .optional()
+      .describe("Internal staff note. Defaults to 'Exchange via MCP'."),
+  },
+  async ({
+    order_id,
+    return_items,
+    exchange_items,
+    session_id,
+    staff_note,
+  }) => {
+    try {
+      // Normalise IDs inside the arrays (accept both GID and numeric)
+      const normaliseGid = (id, type) => {
+        const prefix = `gid://shopify/${type}/`;
+        return id.startsWith(prefix) ? id : `${prefix}${id}`;
+      };
+
+      const normalisedReturnItems = return_items.map((item) => ({
+        fulfillmentLineItemId: normaliseGid(
+          item.fulfillment_line_item_id,
+          "FulfillmentLineItem"
+        ),
+        quantity: item.quantity,
+      }));
+
+      const normalisedExchangeItems = exchange_items.map((item) => ({
+        variantId: normaliseGid(item.variant_id, "ProductVariant"),
+        quantity: item.quantity,
+      }));
+
+      const exchangeManager = new ShopifyExchangeManager();
+      const result = await exchangeManager.exchangeItems(
+        order_id,
+        normalisedReturnItems,
+        normalisedExchangeItems,
+        { staffNote: staff_note || "Exchange via MCP" }
+      );
+
+      // Optionally log the event if session_id provided
+      if (session_id) {
+        await callBackendAPI("POST", "/chat/bot-events/", {
+          thread_id: session_id,
+          event_type: "exchange_items",
+          order_id: order_id,
+          return_items: JSON.stringify(return_items),
+          exchange_items: JSON.stringify(exchange_items),
+        }).catch(() => {});
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("exchange_items error:", error);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error performing exchange: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
 );
 
 // ********************************** End of MCP Tools **********************************

@@ -342,6 +342,65 @@ const discountQuery = `{
     }
   }
 }`;
+
+const returnableFulfillmentsQuery = `
+  query GetReturnableFulfillments($orderId: ID!) {
+    returnableFulfillments(orderId: $orderId, first: 10) {
+      edges {
+        node {
+          id
+          fulfillment {
+            id
+          }
+          returnableFulfillmentLineItems(first: 10) {
+            edges {
+              node {
+                fulfillmentLineItem {
+                  id
+                }
+                quantity
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+// Mutation to create a return with exchange line items.
+// Variables: $input: ReturnInput!
+const returnCreateMutation = `
+  mutation CreateReturnWithExchange($input: ReturnInput!) {
+    returnCreate(returnInput: $input) {
+      return {
+        id
+        status
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+// Mutation to process a return (finalise the exchange).
+// Variables: { returnId: ID! }
+const returnProcessMutation = `
+  mutation ProcessReturn($returnId: ID!) {
+    returnProcess(returnId: $returnId) {
+      return {
+        id
+        status
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
 // Export the GraphQL query for use in other modules
 module.exports = {
   productSearchByQuery,
@@ -350,4 +409,7 @@ module.exports = {
   productByIdQuery,
   productSortQuery,
   discountQuery,
+  returnableFulfillmentsQuery,
+  returnCreateMutation,
+  returnProcessMutation,
 };
