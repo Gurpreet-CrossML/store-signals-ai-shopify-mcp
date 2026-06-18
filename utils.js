@@ -19,9 +19,6 @@ const MCP_VERSION = process.env.MCP_VERSION;
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 const BACKEND_API_URL = process.env.BACKEND_API_URL;
-const ZENDESK_API_URL = process.env.ZENDESK_API_URL;
-const ZENDESK_USERNAME = process.env.ZENDESK_USERNAME;
-const ZENDESK_PASSWORD = process.env.ZENDESK_PASSWORD;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL;
 
@@ -34,9 +31,6 @@ const allEnvironmentVariables = {
   SMTP_USER,
   SMTP_PASS,
   BACKEND_API_URL,
-  ZENDESK_API_URL,
-  ZENDESK_USERNAME,
-  ZENDESK_PASSWORD,
   OPENAI_API_KEY,
   OPENAI_MODEL,
 };
@@ -1150,9 +1144,6 @@ module.exports = {
   SMTP_USER,
   SMTP_PASS,
   BACKEND_API_URL,
-  ZENDESK_API_URL,
-  ZENDESK_USERNAME,
-  ZENDESK_PASSWORD,
   OPENAI_API_KEY,
   OPENAI_MODEL,
   // helpers
