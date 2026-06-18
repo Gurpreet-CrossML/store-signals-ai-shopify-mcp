@@ -4,6 +4,7 @@ const https = require("https");
 const {
   storeMetadataQuery,
   relatedProductsQuery,
+  productSearchByQuery,
 } = require("./graphql_queries");
 const { getCache, setCache } = require("./cache");
 
