@@ -1217,7 +1217,7 @@ server.tool(
   },
 );
 
-// ######### 13. Order Transactions #########
+// ######### 12. Order Transactions #########
 server.tool(
   "get_order_transactions",
   `Fetch payment transactions for a specific order.
