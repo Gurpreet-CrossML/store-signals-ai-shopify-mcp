@@ -4,6 +4,7 @@ const https = require("https");
 const {
   storeMetadataQuery,
   relatedProductsQuery,
+  productSearchByQuery,
 } = require("./graphql_queries");
 const { getCache, setCache } = require("./cache");
 
@@ -1054,6 +1055,124 @@ const formatOrderTransactions = (order, transactions) => {
   };
 };
 
+// Utility function to search for a list of products one by one by their names.
+// Accepts an array of product name strings and searches each sequentially against the Shopify catalog.
+// Returns an array of results — one entry per product name — each containing either the matched
+// product(s) or an indicator that no match was found.
+const searchProductsByNames = async (
+  product_names,
+  session_id,
+  store_code,
+  full_details = false,
+) => {
+  const results = [];
+
+  for (const name of product_names) {
+    try {
+      const cacheKey = `search:${name}:${full_details ? "full" : "brief"}`;
+      const cached = await getCache(cacheKey);
+
+      if (cached) {
+        logProductViewEvents(cached.products, session_id, store_code);
+        results.push({
+          product_name: name,
+          product_detail:
+            cached.products.length > 0
+              ? cached.products[0]
+              : "Product not found",
+        });
+        continue;
+      }
+
+      const graphqlQuery = {
+        query: productSearchByQuery,
+        variables: {
+          search: name,
+        },
+      };
+
+      const searchResponse = await callShopifyApi("POST", "", graphqlQuery);
+
+      let formattedProducts = [];
+
+      if (searchResponse?.data?.products?.edges?.length > 0) {
+        formattedProducts = formatProducts(
+          searchResponse.data.products.edges,
+          session_id,
+          store_code,
+          full_details,
+        );
+      }
+
+      const entry = {
+        product_name: name,
+        product_detail:
+          formattedProducts.length > 0
+            ? formattedProducts[0]
+            : "Product not found",
+      };
+
+      try {
+        await setCache(cacheKey, { products: formattedProducts });
+      } catch (e) {
+        console.warn(
+          `searchProductsByNames cache set failed for "${name}":`,
+          e?.message || e,
+        );
+      }
+
+      results.push(entry);
+    } catch (error) {
+      console.error(
+        `searchProductsByNames error for "${name}":`,
+        error.message,
+      );
+      results.push({
+        product_name: name,
+        product_detail: "Product not found",
+      });
+    }
+  }
+
+  return results;
+};
+// Utility function to determine refund status based on order's refunds and transactions. It checks the status of refunds and transactions to categorize the refund status into various states such as "NOT_REFUNDED", "REFUND_PENDING", "REFUND_FAILED", "PARTIALLY_REFUNDED", or "FULLY_REFUNDED".
+const determineRefundStatus = (gqlOrder) => {
+  const refunds = gqlOrder.refunds || [];
+  if (refunds.length === 0) return "NOT_REFUNDED";
+
+  const transactions = gqlOrder.transactions || []; // ← top-level now
+
+  if (transactions.some((tx) => tx.status === "FAILURE"))
+    return "REFUND_FAILED";
+  if (transactions.some((tx) => tx.status === "PENDING"))
+    return "REFUND_PENDING";
+  if (gqlOrder.displayFinancialStatus === "REFUNDED") return "FULLY_REFUNDED";
+  if (gqlOrder.displayFinancialStatus === "PARTIALLY_REFUNDED")
+    return "PARTIALLY_REFUNDED";
+
+  return "PARTIALLY_REFUNDED";
+};
+// Utility function to format refund status for an order by combining information from the REST API order data and the GraphQL API order data. It provides a comprehensive view of the refund status, financial status, and other relevant details related to refunds for the order.
+const formatRefundStatus = (restOrder, gqlOrder) => {
+  const refunds = gqlOrder.refunds || [];
+  const lastRefund = refunds.length > 0 ? refunds[refunds.length - 1] : null;
+  const status = determineRefundStatus(gqlOrder);
+
+  return {
+    order_id: restOrder.order_number,
+    shopify_order_id: restOrder.id,
+    email: restOrder.email,
+    refund_status: status,
+    financial_status: gqlOrder.displayFinancialStatus,
+    refundable: gqlOrder.refundable,
+    refund_count: refunds.length,
+    last_refund_date: lastRefund?.createdAt ?? null,
+    currency: restOrder.currency,
+    total: `${getCurrencySymbol(restOrder.presentment_currency)}${restOrder.total_price || 0}`,
+  };
+};
+
 // Export environment variables and utility functions
 module.exports = {
   // envs
@@ -1084,4 +1203,6 @@ module.exports = {
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
+  searchProductsByNames,
+  formatRefundStatus,
 };
