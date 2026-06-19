@@ -4,6 +4,7 @@ const https = require("https");
 const {
   storeMetadataQuery,
   relatedProductsQuery,
+  productSearchByQuery,
 } = require("./graphql_queries");
 const { getCache, setCache } = require("./cache");
 
@@ -18,9 +19,6 @@ const MCP_VERSION = process.env.MCP_VERSION;
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 const BACKEND_API_URL = process.env.BACKEND_API_URL;
-const ZENDESK_API_URL = process.env.ZENDESK_API_URL;
-const ZENDESK_USERNAME = process.env.ZENDESK_USERNAME;
-const ZENDESK_PASSWORD = process.env.ZENDESK_PASSWORD;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL;
 
@@ -33,9 +31,6 @@ const allEnvironmentVariables = {
   SMTP_USER,
   SMTP_PASS,
   BACKEND_API_URL,
-  ZENDESK_API_URL,
-  ZENDESK_USERNAME,
-  ZENDESK_PASSWORD,
   OPENAI_API_KEY,
   OPENAI_MODEL,
 };
@@ -1059,6 +1054,88 @@ const formatOrderTransactions = (order, transactions) => {
     })),
   };
 };
+
+// Utility function to search for a list of products one by one by their names.
+// Accepts an array of product name strings and searches each sequentially against the Shopify catalog.
+// Returns an array of results — one entry per product name — each containing either the matched
+// product(s) or an indicator that no match was found.
+const searchProductsByNames = async (
+  product_names,
+  session_id,
+  store_code,
+  full_details = false,
+) => {
+  const results = [];
+
+  for (const name of product_names) {
+    try {
+      const cacheKey = `search:${name}:${full_details ? "full" : "brief"}`;
+      const cached = await getCache(cacheKey);
+
+      if (cached) {
+        logProductViewEvents(cached.products, session_id, store_code);
+        results.push({
+          product_name: name,
+          product_detail:
+            cached.products.length > 0
+              ? cached.products[0]
+              : "Product not found",
+        });
+        continue;
+      }
+
+      const graphqlQuery = {
+        query: productSearchByQuery,
+        variables: {
+          search: name,
+        },
+      };
+
+      const searchResponse = await callShopifyApi("POST", "", graphqlQuery);
+
+      let formattedProducts = [];
+
+      if (searchResponse?.data?.products?.edges?.length > 0) {
+        formattedProducts = formatProducts(
+          searchResponse.data.products.edges,
+          session_id,
+          store_code,
+          full_details,
+        );
+      }
+
+      const entry = {
+        product_name: name,
+        product_detail:
+          formattedProducts.length > 0
+            ? formattedProducts[0]
+            : "Product not found",
+      };
+
+      try {
+        await setCache(cacheKey, { products: formattedProducts });
+      } catch (e) {
+        console.warn(
+          `searchProductsByNames cache set failed for "${name}":`,
+          e?.message || e,
+        );
+      }
+
+      results.push(entry);
+    } catch (error) {
+      console.error(
+        `searchProductsByNames error for "${name}":`,
+        error.message,
+      );
+      results.push({
+        product_name: name,
+        product_detail: "Product not found",
+      });
+    }
+  }
+
+  return results;
+};
 // Utility function to determine refund status based on order's refunds and transactions. It checks the status of refunds and transactions to categorize the refund status into various states such as "NOT_REFUNDED", "REFUND_PENDING", "REFUND_FAILED", "PARTIALLY_REFUNDED", or "FULLY_REFUNDED".
 const determineRefundStatus = (gqlOrder) => {
   const refunds = gqlOrder.refunds || [];
@@ -1107,9 +1184,6 @@ module.exports = {
   SMTP_USER,
   SMTP_PASS,
   BACKEND_API_URL,
-  ZENDESK_API_URL,
-  ZENDESK_USERNAME,
-  ZENDESK_PASSWORD,
   OPENAI_API_KEY,
   OPENAI_MODEL,
   // helpers
@@ -1129,5 +1203,6 @@ module.exports = {
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
+  searchProductsByNames,
   formatRefundStatus,
 };
