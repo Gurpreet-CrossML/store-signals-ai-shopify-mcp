@@ -833,7 +833,7 @@ class ShopifyOrderEditor {
     const baseUrl = SHOPIFY_BASE_URL || "";
     this.shopDomain = baseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
     this.accessToken = SHOPIFY_ACCESS_TOKEN;
-    this.apiVersion = process.env.SHOPIFY_API_VERSION || "2024-04";
+    this.apiVersion = process.env.SHOPIFY_API_VERSION || "2025-04";
     this.graphqlEndpoint = `https://${this.shopDomain}/admin/api/${this.apiVersion}/graphql.json`;
   }
 
@@ -995,12 +995,13 @@ class ShopifyExchangeManager {
     const baseUrl = SHOPIFY_BASE_URL || "";
     this.shopDomain = baseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
     this.accessToken = SHOPIFY_ACCESS_TOKEN;
-    this.apiVersion = process.env.SHOPIFY_API_VERSION || "2024-04";
+    this.apiVersion = process.env.SHOPIFY_API_VERSION || "2025-04"; // Use latest
     this.graphqlEndpoint = `https://${this.shopDomain}/admin/api/${this.apiVersion}/graphql.json`;
   }
-
-  // Low-level GraphQL caller
+ 
   async _graphql(query, variables = {}) {
+    console.log("GraphQL Query:", query);
+    console.log("GraphQL Variables:", JSON.stringify(variables, null, 2));
     const response = await axios.post(
       this.graphqlEndpoint,
       { query, variables },
@@ -1017,8 +1018,7 @@ class ShopifyExchangeManager {
     }
     return data;
   }
-
-  // Step 1 – get returnable fulfillments for an order
+ 
   async getReturnableFulfillments(orderId) {
     const query = `
       query GetReturnableFulfillments($orderId: ID!) {
@@ -1043,34 +1043,44 @@ class ShopifyExchangeManager {
     const data = await this._graphql(query, { orderId });
     return data.returnableFulfillments.edges;
   }
-
-  // Step 2 – create return with exchange items
+ 
   async createReturnWithExchange(
+    orderId,
     returnableFulfillmentId,
-    returnLineItems,   // [{ fulfillmentLineItemId, quantity }]
-    exchangeLineItems  // [{ variantId, quantity }]
+    returnLineItems,   // each: { fulfillmentLineItemId, quantity, returnReason? }
+    exchangeLineItems  // each: { variantId, quantity }
   ) {
     const mutation = `
       mutation CreateReturnWithExchange($input: ReturnInput!) {
         returnCreate(returnInput: $input) {
-          return { id, status }
+          return { id status }
           userErrors { field message }
         }
       }
     `;
+ 
+    // returnableFulfillmentId is only used to find the correct fulfillment (Step 1).
+    // It must NOT be passed into the mutation — ReturnLineItemInput only accepts:
+    // fulfillmentLineItemId, quantity, returnReason
+    const returnItemsWithReason = returnLineItems.map(item => ({
+      fulfillmentLineItemId: item.fulfillmentLineItemId,
+      quantity: item.quantity,
+      returnReason: item.returnReason || "DEFECTIVE",
+    }));
+ 
     const variables = {
       input: {
-        returnableFulfillmentId,
-        returnLineItems: returnLineItems.map(item => ({
-          fulfillmentLineItemId: item.fulfillmentLineItemId,
-          quantity: item.quantity,
-        })),
+        orderId: orderId,
+        returnLineItems: returnItemsWithReason,
         exchangeLineItems: exchangeLineItems.map(item => ({
           variantId: item.variantId,
           quantity: item.quantity,
         })),
       },
     };
+ 
+    console.log("Mutation variables:", JSON.stringify(variables, null, 2));
+ 
     const data = await this._graphql(mutation, variables);
     const result = data.returnCreate;
     if (result.userErrors?.length) {
@@ -1078,8 +1088,7 @@ class ShopifyExchangeManager {
     }
     return result.return;
   }
-
-  // Step 3 – process the return to finalise exchange
+ 
   async processReturn(returnId) {
     const mutation = `
       mutation ProcessReturn($returnId: ID!) {
@@ -1096,39 +1105,82 @@ class ShopifyExchangeManager {
     }
     return result.return;
   }
-
-  // High-level orchestrator used by the MCP tool
+ 
   async exchangeItems(
-    orderId,                  // full GID or numeric ID
-    returnItems,              // array of { fulfillmentLineItemId, quantity }
-    exchangeItems,            // array of { variantId, quantity }
+    orderId,
+    returnItems,              // [{ fulfillmentLineItemId, quantity, returnReason? }]
+    exchangeItems,            // [{ variantId, quantity }]
     options = {}
   ) {
-    // Normalise order ID to GID
     const gid = orderId.startsWith("gid://shopify/Order/")
       ? orderId
       : `gid://shopify/Order/${orderId}`;
-
-    // 1. Get returnable fulfillments – we'll take the first one
+ 
+    // Step 1: Get returnable fulfillments
     const edges = await this.getReturnableFulfillments(gid);
     if (!edges.length) {
       throw new Error("No returnable fulfillments found for this order.");
     }
+ 
+    console.log("Returnable fulfillments:", JSON.stringify(edges, null, 2));
+ 
+    // Build a flat map of all returnable fulfillment line items from ALL fulfillments:
+    // key = numeric ID suffix (e.g. "17435978530882"), value = the GID Shopify returned
+    const returnableLineItemMap = {};
+    for (const edge of edges) {
+      const lineItems = edge.node.returnableFulfillmentLineItems?.edges || [];
+      for (const li of lineItems) {
+        const gidFull = li.node.fulfillmentLineItem.id;
+        // index by the numeric suffix so we can match regardless of prefix
+        const numericId = gidFull.split("/").pop();
+        returnableLineItemMap[numericId] = gidFull;
+        // also index by full GID in case caller already passes the full GID
+        returnableLineItemMap[gidFull] = gidFull;
+      }
+    }
+ 
+    console.log("Returnable line item map:", JSON.stringify(returnableLineItemMap, null, 2));
+ 
+    // Step 2: Resolve each return item's fulfillmentLineItemId to what Shopify returned
+    const returnLineItems = returnItems.map(item => {
+      const raw = item.fulfillmentLineItemId;
+      const numericId = raw.split("/").pop();
+ 
+      // Look up in the map — prefer exact match, then numeric suffix match
+      const resolvedId =
+        returnableLineItemMap[raw] ||
+        returnableLineItemMap[numericId];
+ 
+      if (!resolvedId) {
+        throw new Error(
+          `FulfillmentLineItem "${raw}" is not returnable for this order. ` +
+          `Returnable IDs: ${Object.values(returnableLineItemMap).join(", ")}`
+        );
+      }
+ 
+      console.log(`Resolved fulfillmentLineItemId: ${raw} → ${resolvedId}`);
+ 
+      return {
+        fulfillmentLineItemId: resolvedId,
+        quantity: item.quantity,
+        returnReason: item.returnReason || "DEFECTIVE",
+      };
+    });
+ 
+    // Step 3: Create return with exchange
     const returnableFulfillmentId = edges[0].node.id;
-
-    // 2. Validate that the requested return line items exist in the fulfillment
-    // (optional – you could skip and let Shopify return an error)
-
-    // 3. Create return with exchange
+    console.log(`Using returnableFulfillmentId: ${returnableFulfillmentId}`);
+ 
     const createdReturn = await this.createReturnWithExchange(
+      gid,
       returnableFulfillmentId,
-      returnItems,
+      returnLineItems,
       exchangeItems
     );
-
-    // 4. Process the return
+ 
+    // Step 4: Process the return
     const processedReturn = await this.processReturn(createdReturn.id);
-
+ 
     return {
       success: true,
       returnId: processedReturn.id,

@@ -1451,6 +1451,170 @@ server.tool(
   }
 );
 
+
+
+server.tool(
+  "get_fulfillment_line_item_id",
+  `Get the fulfillment line item ID for a specific line item in an order.
+  
+  This is required before using exchange_items because the Exchange API needs
+  fulfillment_line_item_id (not line_item_id).
+  
+  Parameters:
+  @param {string}  order_id     Shopify Order ID (numeric or GID)
+  @param {string}  line_item_id Shopify Line Item ID (numeric or GID)
+  `,
+  {
+    order_id: z.string().describe("Shopify Order ID (numeric or GID)"),
+    line_item_id: z.string().describe("Shopify Line Item ID (numeric or GID)"),
+  },
+  async ({ order_id, line_item_id }) => {
+    try {
+      // Normalize to GIDs
+      const orderGid = order_id.startsWith("gid://shopify/Order/")
+        ? order_id
+        : `gid://shopify/Order/${order_id}`;
+      
+      const lineItemGid = line_item_id.startsWith("gid://shopify/LineItem/")
+        ? line_item_id
+        : `gid://shopify/LineItem/${line_item_id}`;
+
+      console.log(`Looking for fulfillment line item for order: ${orderGid}, line item: ${lineItemGid}`);
+
+      // GraphQL Query using Admin API
+      const query = `
+        query GetFulfillmentLineItems($orderId: ID!) {
+          order(id: $orderId) {
+            id
+            fulfillments(first: 10) {
+              edges {
+                node {
+                  id
+                  fulfillmentLineItems(first: 10) {
+                    edges {
+                      node {
+                        id
+                        quantity
+                        lineItem {
+                          id
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `;
+
+      // IMPORTANT: Pass true as the 4th argument to use Admin API
+      const result = await callShopifyApi("POST", "", {
+        query,
+        variables: { orderId: orderGid }
+      }, true);  // <-- FIX: isAdmin = true
+
+      console.log("GraphQL Response:", JSON.stringify(result, null, 2));
+
+      // Check if order exists
+      if (!result?.data?.order) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error: "Order not found",
+              status: "not_found"
+            }, null, 2)
+          }],
+          isError: true
+        };
+      }
+
+      // Check if order has fulfillments
+      const fulfillments = result.data.order.fulfillments?.edges || [];
+      
+      if (fulfillments.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error: "Order has no fulfillments. Order must be fulfilled first.",
+              status: "not_found",
+              order_fulfillment_status: "no_fulfillments"
+            }, null, 2)
+          }],
+          isError: true
+        };
+      }
+
+      // Search through all fulfillments and their line items
+      let foundFulfillmentLineItem = null;
+      
+      for (const fulfillment of fulfillments) {
+        const items = fulfillment.node.fulfillmentLineItems?.edges || [];
+        
+        for (const item of items) {
+          const currentLineItemId = item.node.lineItem.id;
+          console.log(`Checking: ${currentLineItemId} against ${lineItemGid}`);
+          
+          if (currentLineItemId === lineItemGid) {
+            foundFulfillmentLineItem = {
+              fulfillment_line_item_id: item.node.id,
+              line_item_id: line_item_id,
+              quantity: item.node.quantity,
+              fulfillment_id: fulfillment.node.id,
+              status: "found"
+            };
+            break;
+          }
+        }
+        
+        if (foundFulfillmentLineItem) break;
+      }
+
+      if (!foundFulfillmentLineItem) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error: "No fulfillment found for this line item. Order may not be fulfilled.",
+              status: "not_found",
+              available_fulfillments: fulfillments.map(f => ({
+                fulfillment_id: f.node.id,
+                line_items: f.node.fulfillmentLineItems?.edges?.map(i => ({
+                  line_item_id: i.node.lineItem.id,
+                  fulfillment_line_item_id: i.node.id
+                })) || []
+              }))
+            }, null, 2)
+          }],
+          isError: true
+        };
+      }
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(foundFulfillmentLineItem, null, 2)
+        }]
+      };
+
+    } catch (error) {
+      console.error("Error in get_fulfillment_line_item_id:", error);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            error: `Error fetching fulfillment line item ID: ${error.message}`,
+            status: "error"
+          }, null, 2)
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
 // ********************************** End of MCP Tools **********************************
 
 // Start the server
