@@ -4,6 +4,7 @@ const https = require("https");
 const {
   storeMetadataQuery,
   relatedProductsQuery,
+  productSearchByQuery,
 } = require("./graphql_queries");
 const { getCache, setCache } = require("./cache");
 
@@ -780,6 +781,23 @@ const formatOrder = (o) => {
       ? "shipped"
       : "not_shipped";
 
+  // Build a lookup: line_item_id (numeric) -> { fulfillment_line_item_id, fulfillment_id }
+  // The Shopify REST API returns fulfillments with their own line_items array.
+  // Each entry in fulfillment.line_items has the same numeric id as the top-level
+  // line_items entry — this numeric id can be used as fulfillment_line_item_id
+  // in the Exchange API (ShopifyExchangeManager resolves it via GraphQL returnableFulfillments).
+  const fulfillmentLineItemMap = {};
+  for (const f of fulfillments) {
+    if ((f.status || "").toLowerCase() === "cancelled") continue;
+    for (const fli of (f.line_items || [])) {
+      fulfillmentLineItemMap[fli.id] = {
+        fulfillment_line_item_id: fli.id,
+        fulfillment_id: f.id,
+        fulfillment_status: f.status,
+      };
+    }
+  }
+
   const formattedOrder = {
     order_id: o.order_number,
     shopify_order_id: o.id,
@@ -805,14 +823,23 @@ const formatOrder = (o) => {
     is_returnable: returnStatus.allowed,
     return_message: returnStatus.reason || "Eligible for return",
 
-    items: o.line_items.map((item) => ({
-      line_item_id: item.id,
-      product_id: item.product_id,
-      variant_id: item.variant_id,
-      name: item.name,
-      quantity: item.quantity,
-      price: `${getCurrencySymbol(o.presentment_currency)}${item.price || 0}`,
-    })),
+    items: o.line_items.map((item) => {
+      const fliInfo = fulfillmentLineItemMap[item.id] || {};
+      return {
+        line_item_id: item.id,
+        // fulfillment_line_item_id: numeric ID used by Exchange API.
+        // Pass this as fulfillment_line_item_id in exchange_items return_items.
+        fulfillment_line_item_id: fliInfo.fulfillment_line_item_id ?? null,
+        fulfillment_id: fliInfo.fulfillment_id ?? null,
+        product_id: item.product_id,
+        // variant_id: pass this as variant_id in exchange_items exchange_items.
+        variant_id: item.variant_id,
+        name: item.name,
+        quantity: item.quantity,
+        fulfillment_status: item.fulfillment_status,
+        price: `${getCurrencySymbol(o.presentment_currency)}${item.price || 0}`,
+      };
+    }),
   };
 
   return formattedOrder;
@@ -833,7 +860,7 @@ class ShopifyOrderEditor {
     const baseUrl = SHOPIFY_BASE_URL || "";
     this.shopDomain = baseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
     this.accessToken = SHOPIFY_ACCESS_TOKEN;
-    this.apiVersion = process.env.SHOPIFY_API_VERSION || "2025-04";
+    this.apiVersion = process.env.SHOPIFY_API_VERSION || "2024-04";
     this.graphqlEndpoint = `https://${this.shopDomain}/admin/api/${this.apiVersion}/graphql.json`;
   }
 
@@ -998,7 +1025,7 @@ class ShopifyExchangeManager {
     this.apiVersion = process.env.SHOPIFY_API_VERSION || "2025-04"; // Use latest
     this.graphqlEndpoint = `https://${this.shopDomain}/admin/api/${this.apiVersion}/graphql.json`;
   }
- 
+
   async _graphql(query, variables = {}) {
     console.log("GraphQL Query:", query);
     console.log("GraphQL Variables:", JSON.stringify(variables, null, 2));
@@ -1018,7 +1045,7 @@ class ShopifyExchangeManager {
     }
     return data;
   }
- 
+
   async getReturnableFulfillments(orderId) {
     const query = `
       query GetReturnableFulfillments($orderId: ID!) {
@@ -1030,7 +1057,10 @@ class ShopifyExchangeManager {
               returnableFulfillmentLineItems(first: 10) {
                 edges {
                   node {
-                    fulfillmentLineItem { id }
+                    fulfillmentLineItem {
+                      id
+                      lineItem { id }
+                    }
                     quantity
                   }
                 }
@@ -1043,7 +1073,7 @@ class ShopifyExchangeManager {
     const data = await this._graphql(query, { orderId });
     return data.returnableFulfillments.edges;
   }
- 
+
   async createReturnWithExchange(
     orderId,
     returnableFulfillmentId,
@@ -1058,7 +1088,7 @@ class ShopifyExchangeManager {
         }
       }
     `;
- 
+
     // returnableFulfillmentId is only used to find the correct fulfillment (Step 1).
     // It must NOT be passed into the mutation — ReturnLineItemInput only accepts:
     // fulfillmentLineItemId, quantity, returnReason
@@ -1067,7 +1097,7 @@ class ShopifyExchangeManager {
       quantity: item.quantity,
       returnReason: item.returnReason || "DEFECTIVE",
     }));
- 
+
     const variables = {
       input: {
         orderId: orderId,
@@ -1078,9 +1108,9 @@ class ShopifyExchangeManager {
         })),
       },
     };
- 
+
     console.log("Mutation variables:", JSON.stringify(variables, null, 2));
- 
+
     const data = await this._graphql(mutation, variables);
     const result = data.returnCreate;
     if (result.userErrors?.length) {
@@ -1088,24 +1118,25 @@ class ShopifyExchangeManager {
     }
     return result.return;
   }
- 
+
   async processReturn(returnId) {
+    // In Shopify API 2025-04+, returnProcess requires an `input` object, not a bare returnId argument.
     const mutation = `
-      mutation ProcessReturn($returnId: ID!) {
-        returnProcess(returnId: $returnId) {
-          return { id, status }
+      mutation ProcessReturn($input: ReturnProcessInput!) {
+        returnProcess(input: $input) {
+          return { id status }
           userErrors { field message }
         }
       }
     `;
-    const data = await this._graphql(mutation, { returnId });
+    const data = await this._graphql(mutation, { input: { id: returnId } });
     const result = data.returnProcess;
     if (result.userErrors?.length) {
       throw new Error(`Return processing failed: ${result.userErrors[0].message}`);
     }
     return result.return;
   }
- 
+
   async exchangeItems(
     orderId,
     returnItems,              // [{ fulfillmentLineItemId, quantity, returnReason? }]
@@ -1115,72 +1146,92 @@ class ShopifyExchangeManager {
     const gid = orderId.startsWith("gid://shopify/Order/")
       ? orderId
       : `gid://shopify/Order/${orderId}`;
- 
+
     // Step 1: Get returnable fulfillments
     const edges = await this.getReturnableFulfillments(gid);
     if (!edges.length) {
       throw new Error("No returnable fulfillments found for this order.");
     }
- 
+
     console.log("Returnable fulfillments:", JSON.stringify(edges, null, 2));
- 
-    // Build a flat map of all returnable fulfillment line items from ALL fulfillments:
-    // key = numeric ID suffix (e.g. "17435978530882"), value = the GID Shopify returned
+
+    // Build a flat map of all returnable FulfillmentLineItem GIDs.
+    // Keys (all mapped to the full FulfillmentLineItem GID):
+    //   1. The full FulfillmentLineItem GID itself (exact match)
+    //   2. The numeric suffix of FulfillmentLineItem GID
+    //   3. The full LineItem GID (so REST line_item_id can be passed as GID)
+    //   4. The numeric suffix of LineItem GID (so REST line_item_id numeric can be passed directly)
     const returnableLineItemMap = {};
     for (const edge of edges) {
       const lineItems = edge.node.returnableFulfillmentLineItems?.edges || [];
       for (const li of lineItems) {
-        const gidFull = li.node.fulfillmentLineItem.id;
-        // index by the numeric suffix so we can match regardless of prefix
-        const numericId = gidFull.split("/").pop();
-        returnableLineItemMap[numericId] = gidFull;
-        // also index by full GID in case caller already passes the full GID
-        returnableLineItemMap[gidFull] = gidFull;
+        const fliGid = li.node.fulfillmentLineItem.id;
+        const fliNumeric = fliGid.split("/").pop();
+        // Map by FulfillmentLineItem GID and its numeric part
+        returnableLineItemMap[fliGid] = fliGid;
+        returnableLineItemMap[fliNumeric] = fliGid;
+        // Also map by the underlying LineItem GID and its numeric part
+        // so callers can pass the REST API line_item_id directly
+        const lineItemGid = li.node.fulfillmentLineItem.lineItem?.id;
+        if (lineItemGid) {
+          const lineItemNumeric = lineItemGid.split("/").pop();
+          returnableLineItemMap[lineItemGid] = fliGid;
+          returnableLineItemMap[lineItemNumeric] = fliGid;
+        }
       }
     }
- 
+
     console.log("Returnable line item map:", JSON.stringify(returnableLineItemMap, null, 2));
- 
-    // Step 2: Resolve each return item's fulfillmentLineItemId to what Shopify returned
+
+    // Step 2: Resolve each caller-supplied fulfillmentLineItemId.
+    //
+    // The caller may pass either:
+    //   (a) a FulfillmentLineItem GID from get_fulfillment_line_item_id  ← preferred
+    //   (b) a LineItem GID / numeric id from the order payload            ← legacy
+    //
+    // Strategy:
+    //   1. Try exact GID match in the returnable map.
+    //   2. Try numeric suffix match in the returnable map.
+    //   3. If still unresolved, throw a clear user-facing error.
     const returnLineItems = returnItems.map(item => {
       const raw = item.fulfillmentLineItemId;
       const numericId = raw.split("/").pop();
- 
-      // Look up in the map — prefer exact match, then numeric suffix match
+
       const resolvedId =
-        returnableLineItemMap[raw] ||
-        returnableLineItemMap[numericId];
- 
+        returnableLineItemMap[raw] ||       // exact GID match
+        returnableLineItemMap[numericId];   // numeric suffix match
+
       if (!resolvedId) {
+        const returnableIds = [...new Set(Object.values(returnableLineItemMap))];
         throw new Error(
           `FulfillmentLineItem "${raw}" is not returnable for this order. ` +
-          `Returnable IDs: ${Object.values(returnableLineItemMap).join(", ")}`
+          `Returnable IDs: ${returnableIds.join(", ")}`
         );
       }
- 
+
       console.log(`Resolved fulfillmentLineItemId: ${raw} → ${resolvedId}`);
- 
+
       return {
         fulfillmentLineItemId: resolvedId,
         quantity: item.quantity,
-        returnReason: item.returnReason || "DEFECTIVE",
+        returnReason: item.returnReason || "UNKNOWN",
       };
     });
- 
+
     // Step 3: Create return with exchange
     const returnableFulfillmentId = edges[0].node.id;
     console.log(`Using returnableFulfillmentId: ${returnableFulfillmentId}`);
- 
+
     const createdReturn = await this.createReturnWithExchange(
       gid,
       returnableFulfillmentId,
       returnLineItems,
       exchangeItems
     );
- 
+
     // Step 4: Process the return
     const processedReturn = await this.processReturn(createdReturn.id);
- 
+
     return {
       success: true,
       returnId: processedReturn.id,
@@ -1260,6 +1311,124 @@ const formatOrderTransactions = (order, transactions) => {
   };
 };
 
+// Utility function to search for a list of products one by one by their names.
+// Accepts an array of product name strings and searches each sequentially against the Shopify catalog.
+// Returns an array of results — one entry per product name — each containing either the matched
+// product(s) or an indicator that no match was found.
+const searchProductsByNames = async (
+  product_names,
+  session_id,
+  store_code,
+  full_details = false,
+) => {
+  const results = [];
+
+  for (const name of product_names) {
+    try {
+      const cacheKey = `search:${name}:${full_details ? "full" : "brief"}`;
+      const cached = await getCache(cacheKey);
+
+      if (cached) {
+        logProductViewEvents(cached.products, session_id, store_code);
+        results.push({
+          product_name: name,
+          product_detail:
+            cached.products.length > 0
+              ? cached.products[0]
+              : "Product not found",
+        });
+        continue;
+      }
+
+      const graphqlQuery = {
+        query: productSearchByQuery,
+        variables: {
+          search: name,
+        },
+      };
+
+      const searchResponse = await callShopifyApi("POST", "", graphqlQuery);
+
+      let formattedProducts = [];
+
+      if (searchResponse?.data?.products?.edges?.length > 0) {
+        formattedProducts = formatProducts(
+          searchResponse.data.products.edges,
+          session_id,
+          store_code,
+          full_details,
+        );
+      }
+
+      const entry = {
+        product_name: name,
+        product_detail:
+          formattedProducts.length > 0
+            ? formattedProducts[0]
+            : "Product not found",
+      };
+
+      try {
+        await setCache(cacheKey, { products: formattedProducts });
+      } catch (e) {
+        console.warn(
+          `searchProductsByNames cache set failed for "${name}":`,
+          e?.message || e,
+        );
+      }
+
+      results.push(entry);
+    } catch (error) {
+      console.error(
+        `searchProductsByNames error for "${name}":`,
+        error.message,
+      );
+      results.push({
+        product_name: name,
+        product_detail: "Product not found",
+      });
+    }
+  }
+
+  return results;
+};
+// Utility function to determine refund status based on order's refunds and transactions. It checks the status of refunds and transactions to categorize the refund status into various states such as "NOT_REFUNDED", "REFUND_PENDING", "REFUND_FAILED", "PARTIALLY_REFUNDED", or "FULLY_REFUNDED".
+const determineRefundStatus = (gqlOrder) => {
+  const refunds = gqlOrder.refunds || [];
+  if (refunds.length === 0) return "NOT_REFUNDED";
+
+  const transactions = gqlOrder.transactions || []; // ← top-level now
+
+  if (transactions.some((tx) => tx.status === "FAILURE"))
+    return "REFUND_FAILED";
+  if (transactions.some((tx) => tx.status === "PENDING"))
+    return "REFUND_PENDING";
+  if (gqlOrder.displayFinancialStatus === "REFUNDED") return "FULLY_REFUNDED";
+  if (gqlOrder.displayFinancialStatus === "PARTIALLY_REFUNDED")
+    return "PARTIALLY_REFUNDED";
+
+  return "PARTIALLY_REFUNDED";
+};
+// Utility function to format refund status for an order by combining information from the REST API order data and the GraphQL API order data. It provides a comprehensive view of the refund status, financial status, and other relevant details related to refunds for the order.
+const formatRefundStatus = (restOrder, gqlOrder) => {
+  const refunds = gqlOrder.refunds || [];
+  const lastRefund = refunds.length > 0 ? refunds[refunds.length - 1] : null;
+  const status = determineRefundStatus(gqlOrder);
+
+  return {
+    order_id: restOrder.order_number,
+    shopify_order_id: restOrder.id,
+    email: restOrder.email,
+    refund_status: status,
+    financial_status: gqlOrder.displayFinancialStatus,
+    refundable: gqlOrder.refundable,
+    refund_count: refunds.length,
+    last_refund_date: lastRefund?.createdAt ?? null,
+    currency: restOrder.currency,
+    total: `${getCurrencySymbol(restOrder.presentment_currency)}${restOrder.total_price || 0}`,
+  };
+};
+
 // Export environment variables and utility functions
 module.exports = {
   // envs
@@ -1290,5 +1459,7 @@ module.exports = {
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
+  searchProductsByNames,
+  formatRefundStatus,
   ShopifyExchangeManager,
 };

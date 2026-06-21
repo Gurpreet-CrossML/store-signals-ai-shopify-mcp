@@ -11,6 +11,7 @@ const {
   productByIdQuery,
   productSortQuery,
   discountQuery,
+  refundQuery,
 } = require("./graphql_queries");
 const {
   MCP_NAME,
@@ -33,6 +34,8 @@ const {
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
+  searchProductsByNames,
+  formatRefundStatus,
   ShopifyExchangeManager,
 } = require("./utils");
 
@@ -250,7 +253,7 @@ server.tool(
       .min(1)
       .describe(
         "One or more product IDs. Accepts plain numeric IDs ('123456789') " +
-          "or full GIDs ('gid://shopify/Product/123456789').",
+        "or full GIDs ('gid://shopify/Product/123456789').",
       ),
     session_id: z.string().describe("Session ID"),
     store_code: z.string().describe("Store name/code"),
@@ -312,11 +315,11 @@ server.tool(
 
       const formattedFetched = fetchedResults.length
         ? formatProducts(
-            fetchedResults.map((node) => ({ node })),
-            session_id,
-            store_code,
-            true,
-          )
+          fetchedResults.map((node) => ({ node })),
+          session_id,
+          store_code,
+          true,
+        )
         : [];
 
       // cache fetched products
@@ -1092,7 +1095,7 @@ server.tool(
       .string()
       .describe(
         "Shopify Order ID (long ID). Accepts plain numeric ID ('18693365366829') " +
-          "or full GID ('gid://shopify/Order/18693365366829'). DO NOT PASS SHORT ORDER ID like '1012'.",
+        "or full GID ('gid://shopify/Order/18693365366829'). DO NOT PASS SHORT ORDER ID like '1012'.",
       ),
     changes: z
       .array(
@@ -1318,6 +1321,615 @@ server.tool(
     }
   },
 );
+// ######### 13. Get Order Refund Status #########
+
+server.tool(
+  "get_refund_status",
+  `Fetch the refund status of a specific order by order number and customer email.
+
+  Returns one of the following statuses:
+    - NOT_REFUNDED       : No refunds exist on this order
+    - FULLY_REFUNDED     : Order has been fully refunded
+    - PARTIALLY_REFUNDED : Order has been partially refunded
+    - REFUND_PENDING     : A refund is initiated but not yet settled
+    - REFUND_FAILED      : A refund transaction failed
+
+  Parameters:
+  @param {string} email       - Customer email associated with the order
+  @param {string} order_id    - Short order number (e.g. "1026")
+  @param {string} session_id  - Session identifier
+  @param {string} customer_id - Customer ID (optional; skips email verification if provided)
+  `,
+  {
+    email: z.string().email().describe("Customer email address"),
+    order_id: z.string().describe("Short order number (e.g. '1026')"),
+    session_id: z.string().describe("Session identifier"),
+    customer_id: z
+      .string()
+      .describe("Customer ID (optional, pass empty string if unknown)"),
+  },
+  async ({ email, order_id, session_id, customer_id = "" }) => {
+    try {
+      //1. Email verification (skipped when customer_id is known)
+      if (!customer_id) {
+        const verificationStatus = await callBackendAPI(
+          "POST",
+          "/chat/email/verify-status/",
+          { thread_id: session_id, email },
+        );
+
+        if (!verificationStatus?.is_verified) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Please verify your email before accessing refund information.",
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+
+      //2. Find the order via REST (same pattern as get_order_detail)
+      const ordersResponse = await callShopifyApi(
+        "GET",
+        `/admin/api/2024-04/orders.json?email=${encodeURIComponent(email)}&status=any`,
+      );
+
+      if (!ordersResponse || !Array.isArray(ordersResponse.orders)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "We couldn't find any orders associated with this email.",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const restOrder = ordersResponse.orders.find(
+        (o) => String(o.order_number) === String(order_id),
+      );
+
+      if (!restOrder) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `We couldn't locate order #${order_id}. Please verify the order number and try again.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+      const shopifyOrderGid = `gid://shopify/Order/${restOrder.id}`;
+
+      const graphqlResponse = await callShopifyApi(
+        "POST",
+        "",
+        { query: refundQuery, variables: { id: shopifyOrderGid } },
+        true, // isAdmin = true → uses /admin/api/2025-10/graphql.json
+      );
+
+      const gqlOrder = graphqlResponse?.data?.order;
+
+      if (!gqlOrder) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Unable to retrieve refund details for order #${order_id}. Please try again later.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // 4. Format and return
+      const payload = formatRefundStatus(restOrder, gqlOrder);
+
+      console.log(
+        `get_refund_status: order_id=${order_id} | status=${payload.refund_status} | session=${session_id}`,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(payload, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("get_refund_status error:", error.message);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching refund status: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ######### 14. Search Products by Names (batch, one-by-one, Muti Product Search) #########
+server.tool(
+  "search_products_by_names",
+  `Search for multiple products one by one using an array of product names.
+  Each name is searched independently against the Shopify catalog and the results
+  are returned as an ordered array that mirrors the input list.
+
+  Use this when the user provides a list of specific product names they want to look up,
+  for example: ["Product 1", "Product 2", "Product 3"].
+
+  Each entry in the response includes:
+  - query: the original product name searched
+  - found: whether any matching products were discovered
+  - products: array of matched product objects (same shape as search_products)
+
+  Parameters:
+  @param {string[]} product_names: Array of product names to search for
+  @param {string}   session_id:    Session ID
+  @param {string}   store_code:    Store name or code
+  @param {boolean}  full_details:  Whether to return full product details including variants, images, and URLs. Defaults to false.
+  `,
+  {
+    product_names: z
+      .array(z.string().min(1))
+      .min(1)
+      .describe(
+        "Array of product names to search for, e.g. ['Product 1', 'Product 2'].",
+      ),
+    session_id: z.string().describe("Session ID"),
+    store_code: z.string().describe("Store name/code"),
+    full_details: z
+      .boolean()
+      .optional()
+      .describe(
+        "Whether to return full product details including variants, images, and URLs. Defaults to false.",
+      ),
+  },
+  async ({ product_names, session_id, store_code, full_details = false }) => {
+    try {
+      const results = await searchProductsByNames(
+        product_names,
+        session_id,
+        store_code,
+        full_details,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(results, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error searching products by names: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ######### 13. Get Order Refund Status #########
+server.tool(
+  "get_refund_status",
+  `Fetch the refund status of a specific order by order number and customer email.
+
+  Returns one of the following statuses:
+    - NOT_REFUNDED       : No refunds exist on this order
+    - FULLY_REFUNDED     : Order has been fully refunded
+    - PARTIALLY_REFUNDED : Order has been partially refunded
+    - REFUND_PENDING     : A refund is initiated but not yet settled
+    - REFUND_FAILED      : A refund transaction failed
+
+  Parameters:
+  @param {string} email       - Customer email associated with the order
+  @param {string} order_id    - Short order number (e.g. "1026")
+  @param {string} session_id  - Session identifier
+  @param {string} customer_id - Customer ID (optional; skips email verification if provided)
+  `,
+  {
+    email: z.string().email().describe("Customer email address"),
+    order_id: z.string().describe("Short order number (e.g. '1026')"),
+    session_id: z.string().describe("Session identifier"),
+    customer_id: z
+      .string()
+      .describe("Customer ID (optional, pass empty string if unknown)"),
+  },
+  async ({ email, order_id, session_id, customer_id = "" }) => {
+    try {
+      //1. Email verification (skipped when customer_id is known)
+      if (!customer_id) {
+        const verificationStatus = await callBackendAPI(
+          "POST",
+          "/chat/email/verify-status/",
+          { thread_id: session_id, email },
+        );
+
+        if (!verificationStatus?.is_verified) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Please verify your email before accessing refund information.",
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+
+      //2. Find the order via REST (same pattern as get_order_detail)
+      const ordersResponse = await callShopifyApi(
+        "GET",
+        `/admin/api/2024-04/orders.json?email=${encodeURIComponent(email)}&status=any`,
+      );
+
+      if (!ordersResponse || !Array.isArray(ordersResponse.orders)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "We couldn't find any orders associated with this email.",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const restOrder = ordersResponse.orders.find(
+        (o) => String(o.order_number) === String(order_id),
+      );
+
+      if (!restOrder) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `We couldn't locate order #${order_id}. Please verify the order number and try again.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+      const shopifyOrderGid = `gid://shopify/Order/${restOrder.id}`;
+
+      const graphqlResponse = await callShopifyApi(
+        "POST",
+        "",
+        { query: refundQuery, variables: { id: shopifyOrderGid } },
+        true, // isAdmin = true → uses /admin/api/2025-10/graphql.json
+      );
+
+      const gqlOrder = graphqlResponse?.data?.order;
+
+      if (!gqlOrder) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Unable to retrieve refund details for order #${order_id}. Please try again later.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // 4. Format and return
+      const payload = formatRefundStatus(restOrder, gqlOrder);
+
+      console.log(
+        `get_refund_status: order_id=${order_id} | status=${payload.refund_status} | session=${session_id}`,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(payload, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("get_refund_status error:", error.message);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching refund status: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ######### 14. Search Products by Names (batch, one-by-one, Muti Product Search) #########
+server.tool(
+  "search_products_by_names",
+  `Search for multiple products one by one using an array of product names.
+  Each name is searched independently against the Shopify catalog and the results
+  are returned as an ordered array that mirrors the input list.
+
+  Use this when the user provides a list of specific product names they want to look up,
+  for example: ["Product 1", "Product 2", "Product 3"].
+
+  Each entry in the response includes:
+  - query: the original product name searched
+  - found: whether any matching products were discovered
+  - products: array of matched product objects (same shape as search_products)
+
+  Parameters:
+  @param {string[]} product_names: Array of product names to search for
+  @param {string}   session_id:    Session ID
+  @param {string}   store_code:    Store name or code
+  @param {boolean}  full_details:  Whether to return full product details including variants, images, and URLs. Defaults to false.
+  `,
+  {
+    product_names: z
+      .array(z.string().min(1))
+      .min(1)
+      .describe(
+        "Array of product names to search for, e.g. ['Product 1', 'Product 2'].",
+      ),
+    session_id: z.string().describe("Session ID"),
+    store_code: z.string().describe("Store name/code"),
+    full_details: z
+      .boolean()
+      .optional()
+      .describe(
+        "Whether to return full product details including variants, images, and URLs. Defaults to false.",
+      ),
+  },
+  async ({ product_names, session_id, store_code, full_details = false }) => {
+    try {
+      const results = await searchProductsByNames(
+        product_names,
+        session_id,
+        store_code,
+        full_details,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(results, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error searching products by names: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ######### 13. Get Order Refund Status #########
+server.tool(
+  "get_refund_status",
+  `Fetch the refund status of a specific order by order number and customer email.
+
+  Returns one of the following statuses:
+    - NOT_REFUNDED       : No refunds exist on this order
+    - FULLY_REFUNDED     : Order has been fully refunded
+    - PARTIALLY_REFUNDED : Order has been partially refunded
+    - REFUND_PENDING     : A refund is initiated but not yet settled
+    - REFUND_FAILED      : A refund transaction failed
+
+  Parameters:
+  @param {string} email       - Customer email associated with the order
+  @param {string} order_id    - Short order number (e.g. "1026")
+  @param {string} session_id  - Session identifier
+  @param {string} customer_id - Customer ID (optional; skips email verification if provided)
+  `,
+  {
+    email: z.string().email().describe("Customer email address"),
+    order_id: z.string().describe("Short order number (e.g. '1026')"),
+    session_id: z.string().describe("Session identifier"),
+    customer_id: z
+      .string()
+      .describe("Customer ID (optional, pass empty string if unknown)"),
+  },
+  async ({ email, order_id, session_id, customer_id = "" }) => {
+    try {
+      //1. Email verification (skipped when customer_id is known)
+      if (!customer_id) {
+        const verificationStatus = await callBackendAPI(
+          "POST",
+          "/chat/email/verify-status/",
+          { thread_id: session_id, email },
+        );
+
+        if (!verificationStatus?.is_verified) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Please verify your email before accessing refund information.",
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+
+      //2. Find the order via REST (same pattern as get_order_detail)
+      const ordersResponse = await callShopifyApi(
+        "GET",
+        `/admin/api/2024-04/orders.json?email=${encodeURIComponent(email)}&status=any`,
+      );
+
+      if (!ordersResponse || !Array.isArray(ordersResponse.orders)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "We couldn't find any orders associated with this email.",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const restOrder = ordersResponse.orders.find(
+        (o) => String(o.order_number) === String(order_id),
+      );
+
+      if (!restOrder) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `We couldn't locate order #${order_id}. Please verify the order number and try again.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+      const shopifyOrderGid = `gid://shopify/Order/${restOrder.id}`;
+
+      const graphqlResponse = await callShopifyApi(
+        "POST",
+        "",
+        { query: refundQuery, variables: { id: shopifyOrderGid } },
+        true, // isAdmin = true → uses /admin/api/2025-10/graphql.json
+      );
+
+      const gqlOrder = graphqlResponse?.data?.order;
+
+      if (!gqlOrder) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Unable to retrieve refund details for order #${order_id}. Please try again later.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // 4. Format and return
+      const payload = formatRefundStatus(restOrder, gqlOrder);
+
+      console.log(
+        `get_refund_status: order_id=${order_id} | status=${payload.refund_status} | session=${session_id}`,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(payload, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("get_refund_status error:", error.message);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching refund status: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ######### 14. Search Products by Names (batch, one-by-one, Muti Product Search) #########
+server.tool(
+  "search_products_by_names",
+  `Search for multiple products one by one using an array of product names.
+  Each name is searched independently against the Shopify catalog and the results
+  are returned as an ordered array that mirrors the input list.
+
+  Use this when the user provides a list of specific product names they want to look up,
+  for example: ["Product 1", "Product 2", "Product 3"].
+
+  Each entry in the response includes:
+  - query: the original product name searched
+  - found: whether any matching products were discovered
+  - products: array of matched product objects (same shape as search_products)
+
+  Parameters:
+  @param {string[]} product_names: Array of product names to search for
+  @param {string}   session_id:    Session ID
+  @param {string}   store_code:    Store name or code
+  @param {boolean}  full_details:  Whether to return full product details including variants, images, and URLs. Defaults to false.
+  `,
+  {
+    product_names: z
+      .array(z.string().min(1))
+      .min(1)
+      .describe(
+        "Array of product names to search for, e.g. ['Product 1', 'Product 2'].",
+      ),
+    session_id: z.string().describe("Session ID"),
+    store_code: z.string().describe("Store name/code"),
+    full_details: z
+      .boolean()
+      .optional()
+      .describe(
+        "Whether to return full product details including variants, images, and URLs. Defaults to false.",
+      ),
+  },
+  async ({ product_names, session_id, store_code, full_details = false }) => {
+    try {
+      const results = await searchProductsByNames(
+        product_names,
+        session_id,
+        store_code,
+        full_details,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(results, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error searching products by names: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
 
 // ######### 15. Exchange Items #########
 server.tool(
@@ -1348,13 +1960,33 @@ server.tool(
           fulfillment_line_item_id: z
             .string()
             .describe(
-              "FulfillmentLineItem GID, e.g. 'gid://shopify/FulfillmentLineItem/456'"
+              "FulfillmentLineItem GID returned by get_fulfillment_line_item_id, " +
+              "e.g. 'gid://shopify/FulfillmentLineItem/456'"
             ),
           quantity: z
             .number()
             .int()
             .positive()
             .describe("Quantity being returned"),
+          returnReason: z
+            .enum([
+              "SIZE_TOO_SMALL",
+              "SIZE_TOO_LARGE",
+              "COLOR",
+              "STYLE",
+              "WRONG_ITEM",
+              "UNWANTED",
+              "DEFECTIVE",
+              "NOT_AS_DESCRIBED",
+              "OTHER",
+              "UNKNOWN",
+            ])
+            .optional()
+            .describe(
+              "Shopify return reason. Defaults to 'UNKNOWN' if omitted. " +
+              "Use SIZE_TOO_SMALL / SIZE_TOO_LARGE for size issues, COLOR for wrong color, " +
+              "STYLE for wrong variant, WRONG_ITEM for wrong product, UNWANTED for change of mind."
+            ),
         })
       )
       .min(1)
@@ -1402,6 +2034,7 @@ server.tool(
           "FulfillmentLineItem"
         ),
         quantity: item.quantity,
+        returnReason: item.returnReason || "UNKNOWN",
       }));
 
       const normalisedExchangeItems = exchange_items.map((item) => ({
@@ -1425,7 +2058,7 @@ server.tool(
           order_id: order_id,
           return_items: JSON.stringify(return_items),
           exchange_items: JSON.stringify(exchange_items),
-        }).catch(() => {});
+        }).catch(() => { });
       }
 
       return {
@@ -1452,7 +2085,7 @@ server.tool(
 );
 
 
-
+// ######### 14. Get Fulfillment Line Item ID #########
 server.tool(
   "get_fulfillment_line_item_id",
   `Get the fulfillment line item ID for a specific line item in an order.
@@ -1474,7 +2107,7 @@ server.tool(
       const orderGid = order_id.startsWith("gid://shopify/Order/")
         ? order_id
         : `gid://shopify/Order/${order_id}`;
-      
+
       const lineItemGid = line_item_id.startsWith("gid://shopify/LineItem/")
         ? line_item_id
         : `gid://shopify/LineItem/${line_item_id}`;
@@ -1532,7 +2165,7 @@ server.tool(
 
       // Check if order has fulfillments
       const fulfillments = result.data.order.fulfillments?.edges || [];
-      
+
       if (fulfillments.length === 0) {
         return {
           content: [{
@@ -1549,14 +2182,14 @@ server.tool(
 
       // Search through all fulfillments and their line items
       let foundFulfillmentLineItem = null;
-      
+
       for (const fulfillment of fulfillments) {
         const items = fulfillment.node.fulfillmentLineItems?.edges || [];
-        
+
         for (const item of items) {
           const currentLineItemId = item.node.lineItem.id;
           console.log(`Checking: ${currentLineItemId} against ${lineItemGid}`);
-          
+
           if (currentLineItemId === lineItemGid) {
             foundFulfillmentLineItem = {
               fulfillment_line_item_id: item.node.id,
@@ -1568,7 +2201,7 @@ server.tool(
             break;
           }
         }
-        
+
         if (foundFulfillmentLineItem) break;
       }
 
