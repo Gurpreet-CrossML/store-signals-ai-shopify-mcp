@@ -66,8 +66,8 @@ class SemanticCache {
       "filter_by_",
     ];
 
-    const isExactMatch = exactMatchPrefixes.some((prefix) =>
-      query.startsWith(prefix) || query.includes(prefix),
+    const isExactMatch = exactMatchPrefixes.some(
+      (prefix) => query.startsWith(prefix) || query.includes(prefix),
     );
 
     if (isExactMatch) {

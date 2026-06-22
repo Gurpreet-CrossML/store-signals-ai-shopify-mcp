@@ -1089,7 +1089,7 @@ const searchProductsByNames = async (
         variables: {
           search: name,
           sortKey: "RELEVANCE",
-          reverse: false
+          reverse: false,
         },
       };
 
