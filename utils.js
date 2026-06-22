@@ -1429,6 +1429,235 @@ const formatRefundStatus = (restOrder, gqlOrder) => {
   };
 };
 
+// Fetch and parse the store's exchange/refund policy to determine if a given
+// order is still within the allowed exchange window.
+//
+// Parameters:
+//   fulfillment_created_at  {string}   – ISO-8601 timestamp from
+//                                        fulfillments[0].created_at (NOT order.created_at).
+//                                        This is the date the order was actually
+//                                        shipped/fulfilled — the exchange window
+//                                        starts from this date.
+//   product_tags            {string[]} – tags on the item being exchanged (used to
+//                                        detect non-returnable items)
+//
+// Returns:
+//   { eligible: boolean, days_allowed: number, days_since_fulfillment: number, reason: string }
+const getExchangePolicyEligibility = async (
+  fulfillment_created_at,
+  product_tags = [],
+) => {
+  const POLICY_CACHE_KEY = "store_exchange_policy_parsed";
+
+  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  console.log("[ExchangePolicy] Starting policy eligibility check");
+  console.log("[ExchangePolicy] fulfillment_created_at (raw input):", fulfillment_created_at);
+  console.log("[ExchangePolicy] product_tags:", product_tags);
+
+  // Step 1: fetch & cache the parsed policy
+  let parsedPolicy = await getCache(POLICY_CACHE_KEY);
+
+  if (parsedPolicy) {
+    console.log("[ExchangePolicy] ✓ Loaded parsed policy from cache:", JSON.stringify(parsedPolicy));
+  } else {
+    console.log("[ExchangePolicy] Cache miss — fetching policy from Shopify Storefront API...");
+
+    try {
+      const shopDomain = (SHOPIFY_BASE_URL || "")
+        .replace(/^https?:\/\//, "")
+        .replace(/\/$/, "");
+      const storefrontToken = SHOPIFY_STOREFRONT_API_TOKEN;
+      const apiVersion = process.env.SHOPIFY_API_VERSION || "2025-04";
+
+      const policyUrl = `https://${shopDomain}/api/${apiVersion}/graphql.json`;
+      console.log("[ExchangePolicy] Fetching from:", policyUrl);
+
+      const policyResponse = await axios.post(
+        policyUrl,
+        {
+          query: `query {
+            shop {
+              refundPolicy { title body }
+            }
+          }`,
+        },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Storefront-Access-Token": storefrontToken,
+          },
+          timeout: 10000,
+        },
+      );
+
+      const policyBody =
+        policyResponse?.data?.data?.shop?.refundPolicy?.body || "";
+
+      console.log("[ExchangePolicy] Raw policy body length:", policyBody.length, "chars");
+
+      if (!policyBody) {
+        console.warn("[ExchangePolicy] ⚠ Policy body is empty — skipping check, allowing exchange");
+        return { eligible: true, days_allowed: null, days_since_fulfillment: 0, reason: "Policy unavailable — proceeding" };
+      }
+
+      // Step 2: use OpenAI to extract key exchange rules from the HTML
+      console.log("[ExchangePolicy] Sending policy to OpenAI for parsing...");
+
+      const prompt = `You are a policy parser. Extract exchange rules from this store policy HTML and return ONLY a compact JSON object (no markdown, no explanation).
+
+Return this exact shape:
+{
+  "exchange_window_days": <number, the maximum days after delivery/fulfillment within which exchange is allowed>,
+  "non_exchangeable_keywords": [<lowercase keywords that identify non-returnable product types, e.g. "cream", "serum", "sunscreen">],
+  "same_product_only": <boolean, true if exchange is limited to a different variant of the same product>
+}
+
+Policy HTML:
+${policyBody.slice(0, 6000)}`;
+
+      const aiResponse = await axios.post(
+        "https://api.openai.com/v1/chat/completions",
+        {
+          model: OPENAI_MODEL,
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0,
+          max_tokens: 300,
+        },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+          },
+          timeout: 12000,
+        },
+      );
+
+      const raw = aiResponse?.data?.choices?.[0]?.message?.content?.trim() || "{}";
+      const cleaned = raw.replace(/```json|```/g, "").trim();
+      parsedPolicy = JSON.parse(cleaned);
+
+      console.log("[ExchangePolicy] ✓ OpenAI parsed policy:", JSON.stringify(parsedPolicy));
+
+    } catch (err) {
+      console.error("[ExchangePolicy] ✗ Policy parse failed:", err?.message);
+      return { eligible: true, days_allowed: null, days_since_fulfillment: 0, reason: "Policy check skipped due to error" };
+    }
+
+    // Cache the parsed policy for 30 minutes
+    try {
+      await setCache(POLICY_CACHE_KEY, parsedPolicy);
+      console.log("[ExchangePolicy] ✓ Parsed policy saved to cache");
+    } catch (_) { }
+  }
+
+  const daysAllowed = parsedPolicy?.exchange_window_days;
+  const nonExchangeableKeywords = (parsedPolicy?.non_exchangeable_keywords ?? []).map(
+    (k) => k.toLowerCase(),
+  );
+
+  console.log("[ExchangePolicy] exchange_window_days from policy:", daysAllowed);
+  console.log("[ExchangePolicy] non_exchangeable_keywords from policy:", nonExchangeableKeywords);
+
+  // Step 3: check if the item's tags mark it as non-exchangeable
+  const tagList = product_tags.map((t) => t.toLowerCase());
+  console.log("[ExchangePolicy] product tag list (normalised):", tagList);
+
+  const blockedByTag = nonExchangeableKeywords.some(
+    (kw) =>
+      tagList.some((tag) => tag.includes(kw)) ||
+      kw === "final sale" ||
+      kw === "non-returnable",
+  );
+
+  console.log("[ExchangePolicy] blocked by tag/keyword?", blockedByTag);
+
+  if (blockedByTag) {
+    console.log("[ExchangePolicy] ✗ INELIGIBLE — item is non-exchangeable (consumable/final-sale tag)");
+    return {
+      eligible: false,
+      days_allowed: daysAllowed,
+      days_since_fulfillment: null,
+      reason:
+        "This item is non-exchangeable under the store policy (e.g. hygiene/consumable product or marked Final Sale).",
+    };
+  }
+
+  // Step 4: check the exchange window using fulfillment date
+  if (daysAllowed == null) {
+    console.log("[ExchangePolicy] ⚠ No exchange_window_days found in policy — proceeding to Shopify");
+    return {
+      eligible: true,
+      days_allowed: null,
+      days_since_fulfillment: null,
+      reason: "No exact exchange window found in policy — proceeding to Shopify.",
+    };
+  }
+
+  // Parse the fulfillment date (NOT the order creation date)
+  const fulfillmentDate = new Date(fulfillment_created_at);
+  const now = new Date();
+
+  console.log("[ExchangePolicy] fulfillment_created_at parsed :", fulfillmentDate.toISOString());
+  console.log("[ExchangePolicy] current date/time (UTC)       :", now.toISOString());
+
+  if (isNaN(fulfillmentDate.getTime())) {
+    console.warn("[ExchangePolicy] ⚠ Could not parse fulfillment_created_at:", fulfillment_created_at, "— allowing exchange");
+    return {
+      eligible: true,
+      days_allowed: daysAllowed,
+      days_since_fulfillment: null,
+      reason: "Could not parse fulfillment date",
+    };
+  }
+
+  const msSinceFulfillment = now - fulfillmentDate;
+  const daysSinceFulfillment = msSinceFulfillment / (1000 * 60 * 60 * 24);
+  const daysSinceFloor = Math.floor(daysSinceFulfillment);
+
+  console.log("[ExchangePolicy] ms since fulfillment         :", msSinceFulfillment);
+  console.log("[ExchangePolicy] days since fulfillment (raw) :", daysSinceFulfillment.toFixed(4));
+  console.log("[ExchangePolicy] days since fulfillment (floor):", daysSinceFloor);
+  console.log("[ExchangePolicy] policy allows exchange within :", daysAllowed, "day(s)");
+  console.log(
+    "[ExchangePolicy] deadline (fulfillment + window)  :",
+    new Date(fulfillmentDate.getTime() + daysAllowed * 24 * 60 * 60 * 1000).toISOString()
+  );
+  console.log(
+    "[ExchangePolicy] within window?                   :",
+    daysSinceFulfillment <= daysAllowed ? "YES ✓" : "NO ✗"
+  );
+
+  if (daysSinceFulfillment > daysAllowed) {
+    console.log(
+      `[ExchangePolicy] ✗ INELIGIBLE — ${daysSinceFloor} day(s) since fulfillment, ` +
+      `but policy only allows ${daysAllowed} day(s)`
+    );
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    return {
+      eligible: false,
+      days_allowed: daysAllowed,
+      days_since_fulfillment: daysSinceFloor,
+      reason: `Exchange window has expired. The policy allows exchanges within ${daysAllowed} day(s) of fulfillment. Your order was fulfilled ${daysSinceFloor} day(s) ago.`,
+    };
+  }
+
+  const daysRemaining = daysAllowed - daysSinceFloor;
+  console.log(
+    `[ExchangePolicy] ✓ ELIGIBLE — ${daysSinceFloor} day(s) since fulfillment, ` +
+    `within ${daysAllowed}-day window. ${daysRemaining} day(s) remaining.`
+  );
+  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+  return {
+    eligible: true,
+    days_allowed: daysAllowed,
+    days_since_fulfillment: daysSinceFloor,
+    days_remaining: daysRemaining,
+    reason: `Order is within the ${daysAllowed}-day exchange window (fulfilled ${daysSinceFloor} day(s) ago, ${daysRemaining} day(s) remaining).`,
+  };
+};
+
+
 // Export environment variables and utility functions
 module.exports = {
   // envs
@@ -1462,4 +1691,5 @@ module.exports = {
   searchProductsByNames,
   formatRefundStatus,
   ShopifyExchangeManager,
+  getExchangePolicyEligibility,
 };

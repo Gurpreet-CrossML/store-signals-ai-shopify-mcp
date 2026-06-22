@@ -37,6 +37,7 @@ const {
   searchProductsByNames,
   formatRefundStatus,
   ShopifyExchangeManager,
+  getExchangePolicyEligibility,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
@@ -1530,23 +1531,38 @@ server.tool(
   "exchange_items",
   `Exchange products on a fulfilled order using Shopify's Exchange API.
 
-  This performs a full exchange: the returned items are marked as returned,
-  and the new items are added to a new fulfillment order.
+  IMPORTANT: Before processing the exchange this tool automatically checks the
+  store's return/exchange policy (fetched live from the Storefront API and
+  parsed with AI). If the order is outside the exchange window, or the item is
+  marked non-exchangeable (e.g. hygiene / Final-Sale products), the exchange
+  will be declined with a clear reason — no Shopify API call is made.
 
   Parameters:
-  @param {string}  order_id         Shopify Order ID (numeric or GID)
-  @param {array}   return_items     List of items being returned:
-      [ { fulfillment_line_item_id: string, quantity: number }, ... ]
-  @param {array}   exchange_items   List of new items to add:
-      [ { variant_id: string, quantity: number }, ... ]
-  @param {string}  [session_id]     Optional session ID for logging
-  @param {string}  [staff_note]     Internal note (default: "Exchange via MCP")
+  @param {string}  order_id              Shopify Order ID (numeric or GID)
+  @param {string}  order_created_at      ISO-8601 timestamp from order.created_at
+                                         (e.g. "2026-06-22T02:52:51-04:00")
+  @param {array}   return_items          List of items being returned:
+      [ { fulfillment_line_item_id, quantity, returnReason? }, ... ]
+  @param {array}   exchange_items        List of new items to add:
+      [ { variant_id, quantity }, ... ]
+  @param {string[]} [product_tags]       Tags from the order line item (optional).
+                                         Used to detect non-returnable products
+                                         (e.g. ["serum", "final-sale"]).
+  @param {string}  [session_id]          Optional session ID for logging
+  @param {string}  [staff_note]          Internal note (default: "Exchange via MCP")
   `,
   {
     order_id: z
       .string()
       .describe(
         "Shopify Order ID (numeric or full GID). Example: '123456789' or 'gid://shopify/Order/123456789'"
+      ),
+    fulfillment_created_at: z
+      .string()
+      .describe(
+        "ISO-8601 created_at timestamp from fulfillments[0].created_at in the order response " +
+        "(e.g. '2026-06-22T02:53:43-04:00'). This is the date the order was actually " +
+        "shipped/fulfilled — the exchange window is calculated from this date, NOT from order.created_at."
       ),
     return_items: z
       .array(
@@ -1602,6 +1618,14 @@ server.tool(
       )
       .min(1)
       .describe("One or more new variants to add to the order."),
+    product_tags: z
+      .array(z.string())
+      .optional()
+      .default([])
+      .describe(
+        "Tags from the order line item being exchanged (optional). " +
+        "Used to detect non-returnable / Final-Sale products per store policy."
+      ),
     session_id: z.string().optional().describe("Session ID for logging."),
     staff_note: z
       .string()
@@ -1610,12 +1634,53 @@ server.tool(
   },
   async ({
     order_id,
+    fulfillment_created_at,
     return_items,
     exchange_items,
+    product_tags = [],
     session_id,
     staff_note,
   }) => {
     try {
+      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      console.log("[exchange_items] Tool invoked");
+      console.log("[exchange_items] order_id              :", order_id);
+      console.log("[exchange_items] fulfillment_created_at:", fulfillment_created_at);
+      console.log("[exchange_items] product_tags          :", product_tags);
+      console.log("[exchange_items] return_items          :", JSON.stringify(return_items));
+      console.log("[exchange_items] exchange_items        :", JSON.stringify(exchange_items));
+
+      // ── Step 1: policy eligibility check ────────────────────────────────────
+      const policyCheck = await getExchangePolicyEligibility(
+        fulfillment_created_at,
+        product_tags,
+      );
+
+      console.log("[exchange_items] Policy check result:", JSON.stringify(policyCheck));
+
+      if (!policyCheck.eligible) {
+        console.log("[exchange_items] ✗ Exchange blocked by policy:", policyCheck.reason);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                eligible: false,
+                reason: policyCheck.reason,
+                days_allowed: policyCheck.days_allowed,
+                days_since_fulfillment: policyCheck.days_since_fulfillment,
+                suggestion:
+                  "Please contact our support team if you believe this is an error.",
+              }, null, 2),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      console.log("[exchange_items] ✓ Policy check passed — proceeding with exchange");
+
+      // ── Step 2: normalise IDs and process exchange ───────────────────────
       // Normalise IDs inside the arrays (accept both GID and numeric)
       const normaliseGid = (id, type) => {
         const prefix = `gid://shopify/${type}/`;
@@ -1677,7 +1742,6 @@ server.tool(
     }
   }
 );
-
 
 // ********************************** End of MCP Tools **********************************
 
