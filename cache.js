@@ -63,10 +63,11 @@ class SemanticCache {
       "get_products_sorted:",
       "store_metadata",
       "available_discounts",
+      "filter_by_",
     ];
 
-    const isExactMatch = exactMatchPrefixes.some((prefix) =>
-      query.startsWith(prefix),
+    const isExactMatch = exactMatchPrefixes.some(
+      (prefix) => query.startsWith(prefix) || query.includes(prefix),
     );
 
     if (isExactMatch) {
