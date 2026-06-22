@@ -128,7 +128,7 @@ server.tool(
         reverse = true;
       }
 
-      const filterKey = searchQuery !== query ? `filter_by_${searchQuery}:${sort_by_price}` : "";
+      const filterKey = (searchQuery !== query || sort_by_price) ? `filter_by_${searchQuery}:${sort_by_price}` : "";
       const cacheKey = `search:${query}:${filterKey}:${full_details ? "full" : "brief"}`;
       const cached = await getCache(cacheKey);
       if (cached) {
