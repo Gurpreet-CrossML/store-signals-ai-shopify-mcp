@@ -2,8 +2,8 @@
 // - Variables: { search: String! }
 // - Returns: up to `first: 5` matching products with selected fields,
 //   including images, price range, and up to 20 variants per product.
-const productSearchByQuery = `query getProducts($search: String!) {
-  products(first: 5, query: $search) {
+const productSearchByQuery = `query getProducts($search: String!, $sortKey: ProductSortKeys!, $reverse: Boolean!) {
+  products(first: 5, query: $search, sortKey:$sortKey, reverse:$reverse) {
     edges {
       node {
         id

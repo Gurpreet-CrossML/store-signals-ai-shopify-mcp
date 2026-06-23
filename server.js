@@ -65,7 +65,7 @@ const transporter = nodemailer.createTransport({
 // ######### 1. Search Products #########
 server.tool(
   "search_products",
-  `Search for products based on the user's query. 
+  `Search for products based on the user's query with advanced filtering and sorting options.
   Returns a list of products with their details, including name, price, stock status, and image URL.
 
   Parameters:
@@ -73,6 +73,9 @@ server.tool(
   @param {string} session_id: Session ID
   @param {string} store_code: Store name or code
   @param {boolean} full_details: 
+  @param {number} min_price: Minimum price filter (optional)
+  @param {number} max_price: Maximum price filter (optional)
+  @param {string} sort_by_price: Sort order by price - "asc" (cheapest first) or "desc" (most expensive first) (optional)
   `,
   {
     query: z
@@ -86,10 +89,58 @@ server.tool(
       .describe(
         "Whether to return full product details including variants, images, and URLs. Defaults to false.",
       ),
+    min_price: z
+      .string()
+      .optional()
+      .describe("Minimum price filter (e.g., 100 for products above $100)"),
+    max_price: z
+      .string()
+      .optional()
+      .describe("Maximum price filter (e.g., 500 for products under $500)"),
+    sort_by_price: z
+      .enum(["asc", "desc"])
+      .optional()
+      .describe(
+        'Sort order by price: "asc" for cheapest first, "desc" for most expensive first',
+      ),
   },
-  async ({ query, session_id, store_code, full_details = false }) => {
+  async ({
+    query,
+    session_id,
+    store_code,
+    full_details = false,
+    min_price = null,
+    max_price = null,
+    sort_by_price = null,
+  }) => {
     try {
-      const cacheKey = `search:${query}:${full_details ? "full" : "brief"}`;
+      let searchQuery = query;
+
+      if (min_price) {
+        searchQuery += ` variants.price:>=${min_price}`;
+      }
+
+      if (max_price) {
+        searchQuery += ` variants.price:<=${max_price}`;
+      }
+
+      let sortKey = "RELEVANCE";
+      let reverse = false;
+
+      if (sort_by_price === "asc") {
+        sortKey = "PRICE";
+      }
+
+      if (sort_by_price === "desc") {
+        sortKey = "PRICE";
+        reverse = true;
+      }
+
+      const filterKey =
+        searchQuery !== query || sort_by_price
+          ? `filter_by_${searchQuery}:${sort_by_price}`
+          : "";
+      const cacheKey = `search:${query}:${filterKey}:${full_details ? "full" : "brief"}`;
       const cached = await getCache(cacheKey);
       if (cached) {
         logProductViewEvents(cached.products, session_id, store_code);
@@ -106,7 +157,9 @@ server.tool(
       const graphqlQuery = {
         query: productSearchByQuery,
         variables: {
-          search: query,
+          search: searchQuery,
+          sortKey: sortKey,
+          reverse: reverse,
         },
       };
 
@@ -146,10 +199,22 @@ server.tool(
         );
 
         for (let q of keywords) {
+          let searchQuery = q;
+
+          if (min_price) {
+            searchQuery += ` variants.price:>=${min_price}`;
+          }
+
+          if (max_price) {
+            searchQuery += ` variants.price:<=${max_price}`;
+          }
+
           const gQuery = {
             query: productSearchByQuery,
             variables: {
-              search: q,
+              search: searchQuery,
+              sortKey: sortKey,
+              reverse: reverse,
             },
           };
 
