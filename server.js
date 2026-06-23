@@ -42,7 +42,10 @@ const {
 
 const { getCache, setCache } = require("./cache");
 
-// Initialize the MCP server
+// Factory — creates a fresh McpServer instance per HTTP request.
+// A singleton cannot be shared across concurrent stateless HTTP connections;
+// each connection must own its transport, so we create a new server each time.
+const createMcpServer = () => {
 const server = new McpServer({
   name: MCP_NAME,
   version: MCP_VERSION,
@@ -1742,7 +1745,83 @@ server.tool(
   }
 );
 
+// ######### 16. Check Exchange Policy Eligibility #########
+server.tool(
+  "check_exchange_eligibility",
+  `Check if an order item is eligible for exchange based on the store's return/exchange policy.
+
+  Checks two things:
+  1. Exchange window  — is the item within the allowed exchange window (e.g. 7 days from fulfillment)?
+  2. Product type     — is the productType eligible for exchange (not a consumable / non-returnable)?
+
+  When to call:
+  - Right after get_order_detail (pass fulfillment_created_at, leave product_type = ""):
+      → detects an expired exchange window BEFORE searching for a replacement.
+  - Right after search_products (pass fulfillment_created_at + productType from the search result):
+      → confirms both window eligibility AND product-type eligibility.
+
+  Returns: { eligible, days_allowed, days_since_fulfillment, days_remaining, reason }
+  If eligible is false, surface the reason to the customer and DO NOT proceed with exchange_items.
+  `,
+  {
+    fulfillment_created_at: z
+      .string()
+      .describe(
+        "ISO-8601 created_at from fulfillments[0].created_at in the order response " +
+        "(e.g. '2026-06-22T02:53:43-04:00'). The exchange window is measured from this date."
+      ),
+    product_type: z
+      .string()
+      .optional()
+      .default("")
+      .describe(
+        "productType of the item being exchanged (e.g. 'Laptop Bags'). " +
+        "Pass empty string '' when only checking the time window (product type not yet known)."
+      ),
+  },
+  async ({ fulfillment_created_at, product_type = "" }) => {
+    try {
+      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      console.log("[check_exchange_eligibility] Tool invoked");
+      console.log("[check_exchange_eligibility] fulfillment_created_at:", fulfillment_created_at);
+      console.log("[check_exchange_eligibility] product_type          :", product_type || "(not provided — window check only)");
+
+      const result = await getExchangePolicyEligibility(fulfillment_created_at, product_type);
+
+      console.log("[check_exchange_eligibility] Eligibility result:", JSON.stringify(result));
+      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("[check_exchange_eligibility] Error:", error.message);
+      // Fail open — let exchange_items perform its own check
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              eligible: true,
+              reason: "Policy check could not be completed — proceeding with exchange",
+              error: error.message,
+            }, null, 2),
+          },
+        ],
+      };
+    }
+  }
+);
+
 // ********************************** End of MCP Tools **********************************
+
+  return server;
+}; // end createMcpServer
 
 // Start the server
 const app = express();
@@ -1757,14 +1836,16 @@ app.use(
   }),
 );
 
-// Handle incoming MCP requests at the /mcp endpoint, connecting them to the MCP server transport layer. This allows the server to process JSON-RPC requests sent to /mcp and route them to the appropriate tools defined in the MCP server.
+// Handle incoming MCP requests at the /mcp endpoint.
+// A fresh McpServer is created per request so concurrent stateless
+// HTTP sessions each own their transport without conflict.
 app.post("/mcp", async (req, res) => {
+  const server = createMcpServer();
   try {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
     res.on("close", () => {
-      console.log("Request closed");
       transport.close();
       server.close();
     });

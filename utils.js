@@ -1152,16 +1152,28 @@ class ShopifyExchangeManager {
     exchangeItems,            // [{ variantId, quantity }]
     options = {}
   ) {
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log("[ShopifyExchangeManager.exchangeItems] Starting exchange");
+    console.log("[ShopifyExchangeManager.exchangeItems] orderId      :", orderId);
+    console.log("[ShopifyExchangeManager.exchangeItems] returnItems  :", JSON.stringify(returnItems));
+    console.log("[ShopifyExchangeManager.exchangeItems] exchangeItems:", JSON.stringify(exchangeItems));
+    console.log("[ShopifyExchangeManager.exchangeItems] options      :", JSON.stringify(options));
+
     const gid = orderId.startsWith("gid://shopify/Order/")
       ? orderId
       : `gid://shopify/Order/${orderId}`;
 
+    console.log("[ShopifyExchangeManager.exchangeItems] Normalised GID:", gid);
+
     // Step 1: Get returnable fulfillments
+    console.log("[ShopifyExchangeManager.exchangeItems] Step 1 — fetching returnable fulfillments...");
     const edges = await this.getReturnableFulfillments(gid);
     if (!edges.length) {
+      console.error("[ShopifyExchangeManager.exchangeItems] ✗ No returnable fulfillments found");
       throw new Error("No returnable fulfillments found for this order.");
     }
 
+    console.log("[ShopifyExchangeManager.exchangeItems] ✓ Returnable fulfillments count:", edges.length);
     console.log("Returnable fulfillments:", JSON.stringify(edges, null, 2));
 
     // Build a flat map of all returnable FulfillmentLineItem GIDs.
@@ -1190,7 +1202,8 @@ class ShopifyExchangeManager {
       }
     }
 
-    console.log("Returnable line item map:", JSON.stringify(returnableLineItemMap, null, 2));
+    console.log("[ShopifyExchangeManager.exchangeItems] Returnable line item map:", JSON.stringify(returnableLineItemMap, null, 2));
+    console.log("[ShopifyExchangeManager.exchangeItems] Total returnable FLI keys:", Object.keys(returnableLineItemMap).length);
 
     // Step 2: Resolve each caller-supplied fulfillmentLineItemId.
     //
@@ -1229,7 +1242,10 @@ class ShopifyExchangeManager {
 
     // Step 3: Create return with exchange
     const returnableFulfillmentId = edges[0].node.id;
-    console.log(`Using returnableFulfillmentId: ${returnableFulfillmentId}`);
+    console.log("[ShopifyExchangeManager.exchangeItems] Step 3 — creating return with exchange");
+    console.log(`[ShopifyExchangeManager.exchangeItems] Using returnableFulfillmentId: ${returnableFulfillmentId}`);
+    console.log("[ShopifyExchangeManager.exchangeItems] Resolved returnLineItems:", JSON.stringify(returnLineItems));
+    console.log("[ShopifyExchangeManager.exchangeItems] Exchange items:", JSON.stringify(exchangeItems));
 
     const createdReturn = await this.createReturnWithExchange(
       gid,
@@ -1238,8 +1254,15 @@ class ShopifyExchangeManager {
       exchangeItems
     );
 
+    console.log("[ShopifyExchangeManager.exchangeItems] ✓ Return created:", JSON.stringify(createdReturn));
+
     // Step 4: Process the return
+    console.log("[ShopifyExchangeManager.exchangeItems] Step 4 — processing return:", createdReturn.id);
     const processedReturn = await this.processReturn(createdReturn.id);
+
+    console.log("[ShopifyExchangeManager.exchangeItems] ✓ Exchange fully completed");
+    console.log("[ShopifyExchangeManager.exchangeItems] Return ID:", processedReturn.id, "Status:", processedReturn.status);
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     return {
       success: true,
