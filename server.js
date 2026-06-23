@@ -1137,7 +1137,248 @@ server.tool(
     }
   },
 );
-// ######### 11. Modify Order #########
+
+// ######### 11. Update Shipping Address #########
+//
+// Required by WF-015 (shipping_address_update workflow) for both the guest
+// and logged-in address agents. Shopify replaces shipping_address wholesale
+// on update, so this tool requires a COMPLETE address every time -- it does
+// not merge partial fields. The calling agent must build the full address
+// object first (reusing unchanged fields from get_order_detail's existing
+// address, overlaying whatever the customer changed) before calling this.
+//
+// Eligibility (shipment/fulfillment status) is re-checked here server-side,
+// not just trusted from an earlier agent-side check -- this is what guards
+// against the race condition where an order ships between the agent's
+// eligibility check and this call (WF-015 <address_update_flow> error
+// branch 1).
+server.tool(
+  "update_shipping_address",
+  `Update the shipping address on an order that has not yet shipped.
+
+  Shopify replaces the order's shipping_address object wholesale on update,
+  so this tool requires a COMPLETE address every time -- it will not merge
+  partial fields with the existing address. The caller (agent) must build
+  the full address object first (reusing unchanged fields from
+  get_order_detail's existing address, overlaying the fields the customer
+  changed) before calling this tool.
+
+  This tool will refuse the update (isError: true, reason: "ORDER_NOT_ELIGIBLE")
+  if the order is already cancelled or its shipment status is one of:
+  shipped, delivered, fulfilled, partially_fulfilled, out_for_delivery.
+  This guards against the race condition where an order ships between the
+  agent's eligibility check and the actual address update call.
+
+  Parameters:
+  @param {string} order_id     - Short order number (e.g. "1026")
+  @param {string} email        - Customer email associated with the order
+  @param {string} session_id   - Session identifier
+  @param {string} customer_id  - Customer ID (optional; skips email verification if provided)
+  @param {object} address      - Complete new shipping address (all fields required)
+  `,
+  {
+    order_id: z.string().describe("Short order number (e.g. '1026')"),
+    email: z.string().email().describe("Customer email address"),
+    session_id: z.string().describe("Session identifier"),
+    customer_id: z
+      .string()
+      .describe("Customer ID (optional, pass empty string if unknown)"),
+    address: z
+      .object({
+        first_name: z.string().min(1).describe("Recipient first name"),
+        last_name: z.string().min(1).describe("Recipient last name"),
+        address1: z.string().min(1).describe("Street address, line 1"),
+        address2: z
+          .string()
+          .optional()
+          .default("")
+          .describe("Apartment/unit/suite, line 2 (optional)"),
+        city: z.string().min(1).describe("City"),
+        province: z.string().optional().default("").describe("State/province"),
+        zip: z.string().min(1).describe("Postal/zip code"),
+        country: z.string().min(1).describe("Country name or ISO code"),
+        phone: z.string().min(1).describe("Contact phone number"),
+      })
+      .describe(
+        "Complete shipping address object. All required fields must be " +
+          "present -- this replaces the order's address wholesale, it does " +
+          "not patch individual fields.",
+      ),
+  },
+  async ({ order_id, email, session_id, customer_id = "", address }) => {
+    try {
+      // 1. Email verification (skipped when customer_id is already known),
+      //    same pattern as get_order_detail / get_refund_status.
+      if (!customer_id) {
+        const verificationStatus = await callBackendAPI(
+          "POST",
+          "/chat/email/verify-status/",
+          { thread_id: session_id, email },
+        );
+
+        if (!verificationStatus?.is_verified) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Please verify your email before updating shipping details.",
+              },
+            ],
+            isError: true,
+            reason: "NOT_VERIFIED",
+          };
+        }
+      }
+
+      // 2. Locate the order via REST (same pattern as get_order_detail).
+      const ordersResponse = await callShopifyApi(
+        "GET",
+        `/admin/api/2024-04/orders.json?email=${encodeURIComponent(email)}&status=any`,
+      );
+
+      if (!ordersResponse || !Array.isArray(ordersResponse.orders)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "We couldn't find any orders associated with this email.",
+            },
+          ],
+          isError: true,
+          reason: "ORDER_NOT_FOUND",
+        };
+      }
+
+      const restOrder = ordersResponse.orders.find(
+        (o) => String(o.order_number) === String(order_id),
+      );
+
+      if (!restOrder) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `We couldn't locate order #${order_id}. Please verify the order number and try again.`,
+            },
+          ],
+          isError: true,
+          reason: "ORDER_NOT_FOUND",
+        };
+      }
+
+      // 3. Re-check eligibility server-side -- authoritative guard against
+      //    the race condition (order ships between eligibility check and
+      //    this call).
+      const formatted = formatOrder(restOrder);
+
+      const INELIGIBLE_STATUSES = [
+        "shipped",
+        "delivered",
+        "fulfilled",
+        "partially_fulfilled",
+        "out_for_delivery",
+      ];
+
+      if (
+        restOrder.cancelled_at ||
+        INELIGIBLE_STATUSES.includes(
+          (formatted.shipment_status || "").toLowerCase(),
+        )
+      ) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Order #${order_id} can no longer have its shipping address changed directly -- it is already ${
+                restOrder.cancelled_at ? "cancelled" : formatted.shipment_status
+              }.`,
+            },
+          ],
+          isError: true,
+          reason: "ORDER_NOT_ELIGIBLE",
+          shipment_status: formatted.shipment_status,
+        };
+      }
+
+      // 4. Build the full shipping_address payload. Shopify's order PUT
+      //    replaces shipping_address wholesale -- always send every field.
+      const shippingAddressPayload = {
+        first_name: address.first_name,
+        last_name: address.last_name,
+        address1: address.address1,
+        address2: address.address2 || "",
+        city: address.city,
+        province: address.province || "",
+        zip: address.zip,
+        country: address.country,
+        phone: address.phone,
+      };
+
+      // 5. Apply the update.
+      const updateResponse = await callShopifyApi(
+        "PUT",
+        `/admin/api/2024-04/orders/${restOrder.id}.json`,
+        {
+          order: {
+            id: restOrder.id,
+            shipping_address: shippingAddressPayload,
+          },
+        },
+      );
+
+      if (!updateResponse?.order) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Failed to update the shipping address. Please try again.",
+            },
+          ],
+          isError: true,
+          reason: "UPDATE_FAILED",
+        };
+      }
+
+      const updatedOrder = updateResponse.order;
+
+      console.log(
+        `update_shipping_address: success | order_id=${updatedOrder.order_number} | email=${email} | session=${session_id}`,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                order_id: updatedOrder.order_number,
+                shipping_address: updatedOrder.shipping_address,
+                message: `The shipping address for order #${order_id} has been updated. A confirmation email will be sent.`,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("update_shipping_address error:", error.message);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error updating shipping address: ${error.message}`,
+          },
+        ],
+        isError: true,
+        reason: "UNEXPECTED_ERROR",
+      };
+    }
+  },
+);
+
+// ######### 12. Modify Order #########
 server.tool(
   "modify_order",
   `Modify an existing Shopify order using the 3-step Order Edit API
@@ -1282,7 +1523,7 @@ server.tool(
   },
 );
 
-// ######### 12. Order Transactions #########
+// ######### 13. Order Transactions #########
 server.tool(
   "get_order_transactions",
   `Fetch payment transactions for a specific order.
@@ -1385,7 +1626,7 @@ server.tool(
     }
   },
 );
-// ######### 13. Get Order Refund Status #########
+// ######### 14. Get Order Refund Status #########
 
 server.tool(
   "get_refund_status",
@@ -1521,7 +1762,7 @@ server.tool(
   },
 );
 
-// ######### 14. Search Products by Names (batch, one-by-one, Muti Product Search) #########
+// ######### 15. Search Products by Names (batch, one-by-one, Muti Product Search) #########
 server.tool(
   "search_products_by_names",
   `Search for multiple products one by one using an array of product names.
