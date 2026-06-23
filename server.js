@@ -1194,11 +1194,7 @@ server.tool(
           .default("")
           .describe("Apartment/unit/suite, line 2 (optional)"),
         city: z.string().min(1).describe("City"),
-        province: z
-          .string()
-          .optional()
-          .default("")
-          .describe("State/province"),
+        province: z.string().optional().default("").describe("State/province"),
         zip: z.string().min(1).describe("Postal/zip code"),
         country: z.string().min(1).describe("Country name or ISO code"),
         phone: z.string().min(1).describe("Contact phone number"),
@@ -1294,9 +1290,7 @@ server.tool(
             {
               type: "text",
               text: `Order #${order_id} can no longer have its shipping address changed directly -- it is already ${
-                restOrder.cancelled_at
-                  ? "cancelled"
-                  : formatted.shipment_status
+                restOrder.cancelled_at ? "cancelled" : formatted.shipment_status
               }.`,
             },
           ],
