@@ -874,7 +874,7 @@ server.tool(
     email: z.string().describe("Order email (e.g. 'test@example.com')"),
     order_id: z.string().describe("Order ID (e.g. '1026')"),
     session_id: z.string().describe("Session identifier"),
-    customer_id: z.string().describe("Customer ID"),
+    customer_id: z.coerce.string().describe("Customer ID — always passed as a string even if it looks like a number"),
   },
   async ({ email, order_id, session_id, customer_id = "" }) => {
     if (!customer_id) {
@@ -1238,7 +1238,7 @@ server.tool(
     email: z.string().describe("Order email"),
     order_id: z.string().describe("Order ID"),
     session_id: z.string().describe("Session identifier"),
-    customer_id: z.string().describe("Customer ID"),
+    customer_id: z.coerce.string().describe("Customer ID — always passed as a string even if it looks like a number"),
   },
   async ({ email, order_id, session_id, customer_id = "" }) => {
     try {
@@ -1559,6 +1559,8 @@ server.tool(
       ),
     fulfillment_created_at: z
       .string()
+      .optional()
+      .nullable()
       .describe(
         "ISO-8601 created_at timestamp from fulfillments[0].created_at in the order response " +
         "(e.g. '2026-06-22T02:53:43-04:00'). This is the date the order was actually " +
@@ -1618,13 +1620,13 @@ server.tool(
       )
       .min(1)
       .describe("One or more new variants to add to the order."),
-    product_tags: z
-      .array(z.string())
+    product_type: z
+      .string()
       .optional()
-      .default([])
+      .default("")
       .describe(
-        "Tags from the order line item being exchanged (optional). " +
-        "Used to detect non-returnable / Final-Sale products per store policy."
+        "productType of the item being exchanged (e.g. 'Laptop Bags'). " +
+        "Used to detect consumable/non-returnable product types. Pass empty string if unknown."
       ),
     session_id: z.string().optional().describe("Session ID for logging."),
     staff_note: z
@@ -1637,7 +1639,7 @@ server.tool(
     fulfillment_created_at,
     return_items,
     exchange_items,
-    product_tags = [],
+    product_type = "",
     session_id,
     staff_note,
   }) => {
@@ -1646,20 +1648,19 @@ server.tool(
       console.log("[exchange_items] Tool invoked");
       console.log("[exchange_items] order_id              :", order_id);
       console.log("[exchange_items] fulfillment_created_at:", fulfillment_created_at);
-      console.log("[exchange_items] product_tags          :", product_tags);
+      console.log("[exchange_items] product_type          :", product_type || "(not provided)");
       console.log("[exchange_items] return_items          :", JSON.stringify(return_items));
       console.log("[exchange_items] exchange_items        :", JSON.stringify(exchange_items));
 
       // ── Step 1: policy eligibility check ────────────────────────────────────
       const policyCheck = await getExchangePolicyEligibility(
         fulfillment_created_at,
-        product_tags,
+        product_type,
       );
 
-      console.log("[exchange_items] Policy check result:", JSON.stringify(policyCheck));
+      console.log("exchange_items policy check:", policyCheck);
 
       if (!policyCheck.eligible) {
-        console.log("[exchange_items] ✗ Exchange blocked by policy:", policyCheck.reason);
         return {
           content: [
             {
@@ -1668,7 +1669,7 @@ server.tool(
                 eligible: false,
                 reason: policyCheck.reason,
                 days_allowed: policyCheck.days_allowed,
-                days_since_fulfillment: policyCheck.days_since_fulfillment,
+                days_since_order: policyCheck.days_since_order,
                 suggestion:
                   "Please contact our support team if you believe this is an error.",
               }, null, 2),
@@ -1677,8 +1678,6 @@ server.tool(
           isError: true,
         };
       }
-
-      console.log("[exchange_items] ✓ Policy check passed — proceeding with exchange");
 
       // ── Step 2: normalise IDs and process exchange ───────────────────────
       // Normalise IDs inside the arrays (accept both GID and numeric)
