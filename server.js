@@ -1655,6 +1655,32 @@ server.tool(
       console.log("[exchange_items] return_items          :", JSON.stringify(return_items));
       console.log("[exchange_items] exchange_items        :", JSON.stringify(exchange_items));
 
+      // ── Guard: detect order NUMBER passed instead of shopify ORDER ID ────────
+      // shopify_order_id is always a large number (> 1,000,000,000).
+      // A small number like 1074 is the human-readable order_number — it won't
+      // resolve to a valid Shopify GID and will cause "no returnable fulfillments".
+      const numericOrderId = parseInt(String(order_id).replace(/\D/g, ""), 10);
+      if (!isNaN(numericOrderId) && numericOrderId < 1_000_000) {
+        const errMsg =
+          `order_id "${order_id}" looks like an order number, not a Shopify order ID. ` +
+          `Use the "shopify_order_id" field from get_order_detail (a large number like 7116424446018), ` +
+          `not the "order_number" field (e.g. 1074).`;
+        console.error("[exchange_items] ✗ WRONG order_id —", errMsg);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ error: errMsg }) }],
+          isError: true,
+        };
+      }
+
+      // ── Guard: warn if fulfillment_created_at is missing ────────────────────
+      if (!fulfillment_created_at) {
+        console.warn(
+          "[exchange_items] ⚠ fulfillment_created_at is missing. " +
+          "Pass the 'fulfillment_created_at' field from get_order_detail. " +
+          "Policy window check will be skipped (fail-open)."
+        );
+      }
+
       // ── Step 1: policy eligibility check ────────────────────────────────────
       const policyCheck = await getExchangePolicyEligibility(
         fulfillment_created_at,

@@ -804,16 +804,17 @@ const formatOrder = (o) => {
   const topLevelFulfillmentCreatedAt = firstActiveFulfillment?.created_at || null;
 
   const formattedOrder = {
-    order_id: o.order_number,
+    // order_number is the human-readable number shown to customers (e.g. 1074).
+    // USE shopify_order_id (the large numeric ID) for ALL Shopify API / exchange_items calls.
+    order_number: o.order_number,
     shopify_order_id: o.id,
     email: o.email,
     financial_status: o.financial_status,
     fulfillment_status: o.fulfillment_status,
     shipment_status: shipmentStatus,
     created_at: o.created_at,
-    // fulfillment_created_at: when the order was actually shipped.
-    // ALWAYS use this (not created_at) as the fulfillment_created_at argument
-    // when calling exchange_items — the exchange window is measured from this date.
+    // ⚠ USE THIS — NOT created_at — as the fulfillment_created_at argument for exchange_items.
+    // The exchange window is measured from the shipment date, not the order placement date.
     fulfillment_created_at: topLevelFulfillmentCreatedAt,
     cancelled_at: o.cancelled_at,
     cancel_reason: o.cancel_reason,
