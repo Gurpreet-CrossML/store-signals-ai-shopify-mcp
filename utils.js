@@ -11,6 +11,8 @@ const { getCache, setCache } = require("./cache");
 // Load environment variables from .env file
 dotenv.config();
 
+require('newrelic');
+
 const SHOPIFY_BASE_URL = process.env.SHOPIFY_BASE_URL;
 const SHOPIFY_STOREFRONT_API_TOKEN = process.env.SHOPIFY_STOREFRONT_API_TOKEN;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
@@ -120,7 +122,7 @@ const callShopifyApi = async (
   } catch (error) {
     console.error(
       "Shopify API Error:",
-      error?.response?.data || error.message || error?.errors,
+      error?.response?.data || error?.message || error?.errors || error,
     );
     throw error;
   }
