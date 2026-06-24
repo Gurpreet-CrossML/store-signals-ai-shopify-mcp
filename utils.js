@@ -1760,6 +1760,7 @@ const getExchangePolicyEligibility = async (
 
       try {
         await setCache(POLICY_CACHE_KEY, parsedPolicy);
+        // eslint-disable-next-line no-empty, no-unused-vars
       } catch (_) {}
     } catch (err) {
       console.error(
