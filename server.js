@@ -70,15 +70,18 @@ const createMcpServer = () => {
   // ######### 1. Search Products #########
   server.tool(
     "search_products",
-    `Search for products based on the user's query. 
-  Returns a list of products with their details, including name, price, stock status, and image URL.
+    `Search for products based on the user's query with advanced filtering and sorting options.
+    Returns a list of products with their details, including name, price, stock status, and image URL.
 
-  Parameters:
-  @param {string} query: The search query (product name, description, etc.)
-  @param {string} session_id: Session ID
-  @param {string} store_code: Store name or code
-  @param {boolean} full_details: 
-  `,
+    Parameters:
+    @param {string} query: The search query (product name, description, etc.)
+    @param {string} session_id: Session ID
+    @param {string} store_code: Store name or code
+    @param {boolean} full_details:
+    @param {number} min_price: Minimum price filter (optional)
+    @param {number} max_price: Maximum price filter (optional)
+    @param {string} sort_by_price: Sort order by price - "asc" (cheapest first) or "desc" (most expensive first) (optional)
+    `,
     {
       query: z
         .string()
@@ -91,10 +94,58 @@ const createMcpServer = () => {
         .describe(
           "Whether to return full product details including variants, images, and URLs. Defaults to false.",
         ),
+      min_price: z
+        .string()
+        .optional()
+        .describe("Minimum price filter (e.g., 100 for products above $100)"),
+      max_price: z
+        .string()
+        .optional()
+        .describe("Maximum price filter (e.g., 500 for products under $500)"),
+      sort_by_price: z
+        .enum(["asc", "desc"])
+        .optional()
+        .describe(
+          'Sort order by price: "asc" for cheapest first, "desc" for most expensive first',
+        ),
     },
-    async ({ query, session_id, store_code, full_details = false }) => {
+    async ({
+      query,
+      session_id,
+      store_code,
+      full_details = false,
+      min_price = null,
+      max_price = null,
+      sort_by_price = null,
+    }) => {
       try {
-        const cacheKey = `search:${query}:${full_details ? "full" : "brief"}`;
+        let searchQuery = query;
+
+        if (min_price) {
+          searchQuery += ` variants.price:>=${min_price}`;
+        }
+
+        if (max_price) {
+          searchQuery += ` variants.price:<=${max_price}`;
+        }
+
+        let sortKey = "RELEVANCE";
+        let reverse = false;
+
+        if (sort_by_price === "asc") {
+          sortKey = "PRICE";
+        }
+
+        if (sort_by_price === "desc") {
+          sortKey = "PRICE";
+          reverse = true;
+        }
+
+        const filterKey =
+          searchQuery !== query || sort_by_price
+            ? `filter_by_${searchQuery}:${sort_by_price}`
+            : "";
+        const cacheKey = `search:${query}:${filterKey}:${full_details ? "full" : "brief"}`;
         const cached = await getCache(cacheKey);
         if (cached) {
           logProductViewEvents(cached.products, session_id, store_code);
@@ -111,7 +162,9 @@ const createMcpServer = () => {
         const graphqlQuery = {
           query: productSearchByQuery,
           variables: {
-            search: query,
+            search: searchQuery,
+            sortKey: sortKey,
+            reverse: reverse,
           },
         };
 
@@ -151,10 +204,22 @@ const createMcpServer = () => {
           );
 
           for (let q of keywords) {
+            let searchQuery = q;
+
+            if (min_price) {
+              searchQuery += ` variants.price:>=${min_price}`;
+            }
+
+            if (max_price) {
+              searchQuery += ` variants.price:<=${max_price}`;
+            }
+
             const gQuery = {
               query: productSearchByQuery,
               variables: {
-                search: q,
+                search: searchQuery,
+                sortKey: sortKey,
+                reverse: reverse,
               },
             };
 
@@ -236,21 +301,21 @@ const createMcpServer = () => {
       }
     },
   );
-
+  
   // ######### 2. Fetch Products by IDs #########
   server.tool(
     "get_products_by_ids",
     `Fetch one or more products by their Shopify product IDs.
-  Returns the same shape as search_products.
+    Returns the same shape as search_products.
 
-  Use this when you already have product IDs (e.g. from a previous search,
-  a cart payload, or user-supplied links) and need full product details.
+    Use this when you already have product IDs (e.g. from a previous search,
+    a cart payload, or user-supplied links) and need full product details.
 
-  Parameters:
-  @param {string[]} product_ids  One or more numeric or GID product IDs
-  @param {string}   session_id   Session ID
-  @param {string}   store_code   Store name or code
-  `,
+    Parameters:
+    @param {string[]} product_ids  One or more numeric or GID product IDs
+    @param {string}   session_id   Session ID
+    @param {string}   store_code   Store name or code
+    `,
     {
       product_ids: z
         .array(z.string())
@@ -379,11 +444,11 @@ const createMcpServer = () => {
     "get_products_sorted",
     `Fetch up to 5 products, sorted by Shopify sort options. Supported sort keys: relevance, price_asc, price_desc, newest, best_selling.
 
-  Parameters:
-  @param {string} session_id: Session ID
-  @param {string} store_code: Store name or code
-  @param {string} [sort_key]: Sort key. Supported values: relevance, price_asc, price_desc, newest, best_selling, featured.
-  `,
+    Parameters:
+    @param {string} session_id: Session ID
+    @param {string} store_code: Store name or code
+    @param {string} [sort_key]: Sort key. Supported values: relevance, price_asc, price_desc, newest, best_selling, featured.
+    `,
     {
       session_id: z.string().describe("Session ID"),
       store_code: z.string().describe("Store name/code"),
@@ -975,6 +1040,7 @@ const createMcpServer = () => {
       }
     },
   );
+
   // ######### 10. Cancel Order #########
   server.tool(
     "cancel_order",
@@ -1582,7 +1648,6 @@ const createMcpServer = () => {
         ),
       fulfillment_created_at: z
         .string()
-        // .nullable()
         .describe(
           "ISO-8601 created_at timestamp from fulfillments[0].created_at in the order response " +
             "(e.g. '2026-06-22T02:53:43-04:00'). This is the date the order was actually " +
