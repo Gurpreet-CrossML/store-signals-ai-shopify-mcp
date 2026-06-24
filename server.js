@@ -301,7 +301,7 @@ const createMcpServer = () => {
       }
     },
   );
-  
+
   // ######### 2. Fetch Products by IDs #########
   server.tool(
     "get_products_by_ids",
