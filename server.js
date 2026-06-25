@@ -1727,7 +1727,6 @@ const createMcpServer = () => {
       exchange_items,
       product_type,
       session_id,
-      staff_note,
     }) => {
       try {
         // ── Guard: detect order NUMBER passed instead of shopify ORDER ID ────────
