@@ -19,6 +19,7 @@ const MCP_VERSION = process.env.MCP_VERSION;
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 const BACKEND_API_URL = process.env.BACKEND_API_URL;
+const WIDGET_KEY = process.env.WIDGET_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL;
 
@@ -31,6 +32,7 @@ const allEnvironmentVariables = {
   SMTP_USER,
   SMTP_PASS,
   BACKEND_API_URL,
+  WIDGET_KEY,
   OPENAI_API_KEY,
   OPENAI_MODEL,
 };
@@ -136,6 +138,9 @@ const callBackendAPI = async (method, endpoint, data = {}) => {
     const config = {
       method,
       url,
+      headers: {
+        "X-Widget-Key": WIDGET_KEY,
+      },
       timeout: 15000,
       data: data,
     };
@@ -1186,6 +1191,7 @@ module.exports = {
   SMTP_USER,
   SMTP_PASS,
   BACKEND_API_URL,
+  WIDGET_KEY,
   OPENAI_API_KEY,
   OPENAI_MODEL,
   // helpers
