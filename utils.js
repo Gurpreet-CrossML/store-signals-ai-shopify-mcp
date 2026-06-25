@@ -1157,7 +1157,6 @@ class ShopifyExchangeManager {
     orderId,
     returnItems, // [{ fulfillmentLineItemId, quantity, returnReason? }]
     exchangeItems, // [{ variantId, quantity }]
-    options = {},
   ) {
     const gid = orderId.startsWith("gid://shopify/Order/")
       ? orderId
@@ -1654,7 +1653,9 @@ ${policyBody.slice(0, 4000)}`;
 
       try {
         await setCache(POLICY_CACHE_KEY, parsedPolicy);
-      } catch (_) {}
+      } catch (cacheErr) {
+        console.warn("[ExchangePolicy] Cache set failed:", cacheErr?.message);
+      }
     } catch (err) {
       console.error(
         "[ExchangePolicy] ✗ Policy fetch/parse failed:",
@@ -1699,9 +1700,6 @@ ${policyBody.slice(0, 4000)}`;
   const daysSince = (now - fulfillmentDate) / (1000 * 60 * 60 * 24);
   const daysSinceFloor = Math.floor(daysSince);
   const daysRemaining = Math.max(0, daysAllowed - daysSinceFloor);
-  const deadline = new Date(
-    fulfillmentDate.getTime() + daysAllowed * 24 * 60 * 60 * 1000,
-  );
 
   if (daysSince > daysAllowed) {
     return {

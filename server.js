@@ -1816,7 +1816,6 @@ const createMcpServer = () => {
           order_id,
           normalisedReturnItems,
           normalisedExchangeItems,
-          { staffNote: staff_note || "Exchange via MCP" },
         );
 
         // Optionally log the event if session_id provided
