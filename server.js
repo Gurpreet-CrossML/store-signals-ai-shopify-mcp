@@ -1730,6 +1730,10 @@ const createMcpServer = () => {
       staff_note,
     }) => {
       try {
+        // ── Guard: detect order NUMBER passed instead of shopify ORDER ID ────────
+        // shopify_order_id is always a large number (> 1,000,000,000).
+        // A small number like 1074 is the human-readable order_number — it won't
+        // resolve to a valid Shopify GID and will cause "no returnable fulfillments".
         const numericOrderId = parseInt(
           String(order_id).replace(/\D/g, ""),
           10,
@@ -1762,8 +1766,6 @@ const createMcpServer = () => {
           fulfillment_created_at,
           product_type,
         );
-
-        console.log("exchange_items policy check:", policyCheck);
 
         if (!policyCheck.eligible) {
           return {
@@ -1885,6 +1887,11 @@ const createMcpServer = () => {
     },
     async ({ fulfillment_created_at, product_type = "" }) => {
       try {
+        const result = await getExchangePolicyEligibility(
+          fulfillment_created_at,
+          product_type,
+        );
+
         return {
           content: [
             {

@@ -379,24 +379,24 @@ const extractSearchTerms = async (query) => {
 
     const prompt = `You are an eCommerce search query generator.
 
-	    Given a user query and store catalog metadata, generate 3-4 short search queries to find relevant products.
+    Given a user query and store catalog metadata, generate 3-4 short search queries to find relevant products.
 
-	    Rules:
-	    - Each query should contain a maximum of 2 words and can also be a single-word query.
-	    - Queries must look like real ecommerce catalog searches
-	    - Use catalog metadata to pick accurate product type terms
-	    - Never use conversational language
-	    - Return ONLY a JSON array of strings, nothing else
+    Rules:
+    - Each query should contain a maximum of 2 words and can also be a single-word query.
+    - Queries must look like real ecommerce catalog searches
+    - Use catalog metadata to pick accurate product type terms
+    - Never use conversational language
+    - Return ONLY a JSON array of strings, nothing else
 
-	    Store Catalog Metadata:
-	    - Product Types: ${metadata.types.filter(Boolean).join(", ") || "N/A"}
-	    - Collections: ${metadata.collections.filter(Boolean).join(", ") || "N/A"}
-	    - Categories: ${metadata.categories.filter(Boolean).join(", ") || "N/A"}
-	    - Tags: ${metadata.tags.filter(Boolean).slice(0, 50).join(", ") || "N/A"}
+    Store Catalog Metadata:
+    - Product Types: ${metadata.types.filter(Boolean).join(", ") || "N/A"}
+    - Collections: ${metadata.collections.filter(Boolean).join(", ") || "N/A"}
+    - Categories: ${metadata.categories.filter(Boolean).join(", ") || "N/A"}
+    - Tags: ${metadata.tags.filter(Boolean).slice(0, 50).join(", ") || "N/A"}
 
-	    User Query: "${query}"
+    User Query: "${query}"
 
-	    Return format: ["query1", "query2", "query3"]`;
+    Return format: ["query1", "query2", "query3"]`;
 
     const response = await axios.post(
       "https://api.openai.com/v1/chat/completions",
@@ -897,11 +897,11 @@ class ShopifyOrderEditor {
   async beginOrderEdit(orderId) {
     const data = await this._graphql(
       `mutation BeginOrderEdit($orderId: ID!) {
-		orderEditBegin(id: $orderId) {
-		  calculatedOrder { id }
-		  userErrors { field message }
-		}
-	      }`,
+        orderEditBegin(id: $orderId) {
+          calculatedOrder { id }
+          userErrors { field message }
+        }
+      }`,
       { orderId },
     );
     return data.orderEditBegin;
@@ -911,11 +911,11 @@ class ShopifyOrderEditor {
   async addVariant(calculatedOrderId, variantId, quantity, locationId = null) {
     const data = await this._graphql(
       `mutation AddVariant($id: ID!, $variantId: ID!, $quantity: Int!, $locationId: ID) {
-		orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity, locationId: $locationId) {
-		  calculatedOrder { id }
-		  userErrors { field message }
-		}
-	      }`,
+        orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity, locationId: $locationId) {
+          calculatedOrder { id }
+          userErrors { field message }
+        }
+      }`,
       { id: calculatedOrderId, variantId, quantity, locationId },
     );
     return data.orderEditAddVariant;
@@ -925,11 +925,11 @@ class ShopifyOrderEditor {
   async setQuantity(calculatedOrderId, lineItemId, quantity) {
     const data = await this._graphql(
       `mutation SetQuantity($id: ID!, $lineItemId: ID!, $quantity: Int!) {
-		orderEditSetQuantity(id: $id, lineItemId: $lineItemId, quantity: $quantity) {
-		  calculatedOrder { id }
-		  userErrors { field message }
-		}
-	      }`,
+        orderEditSetQuantity(id: $id, lineItemId: $lineItemId, quantity: $quantity) {
+          calculatedOrder { id }
+          userErrors { field message }
+        }
+      }`,
       { id: calculatedOrderId, lineItemId, quantity },
     );
     return data.orderEditSetQuantity;
@@ -948,11 +948,11 @@ class ShopifyOrderEditor {
   ) {
     const data = await this._graphql(
       `mutation CommitOrderEdit($id: ID!, $notifyCustomer: Boolean, $staffNote: String) {
-		orderEditCommit(id: $id, notifyCustomer: $notifyCustomer, staffNote: $staffNote) {
-		  order { id name totalPriceSet { shopMoney { amount currencyCode } } }
-		  userErrors { field message }
-		}
-	      }`,
+        orderEditCommit(id: $id, notifyCustomer: $notifyCustomer, staffNote: $staffNote) {
+          order { id name totalPriceSet { shopMoney { amount currencyCode } } }
+          userErrors { field message }
+        }
+      }`,
       { id: calculatedOrderId, notifyCustomer, staffNote },
     );
     return data.orderEditCommit;
@@ -1059,28 +1059,28 @@ class ShopifyExchangeManager {
 
   async getReturnableFulfillments(orderId) {
     const query = `
-	      query GetReturnableFulfillments($orderId: ID!) {
-		returnableFulfillments(orderId: $orderId, first: 10) {
-		  edges {
-		    node {
-		      id
-		      fulfillment { id }
-		      returnableFulfillmentLineItems(first: 10) {
-		        edges {
-		          node {
-		            fulfillmentLineItem {
-		              id
-		              lineItem { id }
-		            }
-		            quantity
-		          }
-		        }
-		      }
-		    }
-		  }
-		}
-	      }
-	    `;
+      query GetReturnableFulfillments($orderId: ID!) {
+        returnableFulfillments(orderId: $orderId, first: 10) {
+          edges {
+            node {
+              id
+              fulfillment { id }
+              returnableFulfillmentLineItems(first: 10) {
+                edges {
+                  node {
+                    fulfillmentLineItem {
+                      id
+                      lineItem { id }
+                    }
+                    quantity
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
     const data = await this._graphql(query, { orderId });
     return data.returnableFulfillments.edges;
   }
@@ -1092,13 +1092,13 @@ class ShopifyExchangeManager {
     exchangeLineItems, // each: { variantId, quantity }
   ) {
     const mutation = `
-	      mutation CreateReturnWithExchange($input: ReturnInput!) {
-		returnCreate(returnInput: $input) {
-		  return { id status }
-		  userErrors { field message }
-		}
-	      }
-	    `;
+      mutation CreateReturnWithExchange($input: ReturnInput!) {
+        returnCreate(returnInput: $input) {
+          return { id status }
+          userErrors { field message }
+        }
+      }
+    `;
 
     // returnableFulfillmentId is only used to find the correct fulfillment (Step 1).
     // It must NOT be passed into the mutation — ReturnLineItemInput only accepts:
@@ -1134,13 +1134,13 @@ class ShopifyExchangeManager {
 
   async processReturn(returnId) {
     const mutation = `
-	      mutation ProcessReturn($input: ReturnProcessInput!) {
-		returnProcess(input: $input) {
-		  return { id status }
-		  userErrors { field message }
-		} 
-	      }
-	    `;
+      mutation ProcessReturn($input: ReturnProcessInput!) {
+        returnProcess(input: $input) {
+          return { id status }
+          userErrors { field message }
+        } 
+      }
+    `;
     console.log("[processReturn] Processing return ID:", returnId);
     const data = await this._graphql(mutation, { input: { returnId } });
     const result = data.returnProcess;
@@ -1162,6 +1162,8 @@ class ShopifyExchangeManager {
     const gid = orderId.startsWith("gid://shopify/Order/")
       ? orderId
       : `gid://shopify/Order/${orderId}`;
+
+    // Step 1: Get returnable fulfillments
     const edges = await this.getReturnableFulfillments(gid);
     if (!edges.length) {
       console.error(
@@ -1169,6 +1171,7 @@ class ShopifyExchangeManager {
       );
       throw new Error("No returnable fulfillments found for this order.");
     }
+
     // Build a flat map of all returnable FulfillmentLineItem GIDs.
     // Keys (all mapped to the full FulfillmentLineItem GID):
     //   1. The full FulfillmentLineItem GID itself (exact match)
@@ -1232,13 +1235,17 @@ class ShopifyExchangeManager {
 
     // Step 3: Create return with exchange
     const returnableFulfillmentId = edges[0].node.id;
-
     const createdReturn = await this.createReturnWithExchange(
       gid,
       returnableFulfillmentId,
       returnLineItems,
       exchangeItems,
     );
+
+    // Step 4: Process the return
+    // Note: We skip processReturn here. Processing the return (restocking items, etc.)
+    // should happen when the warehouse physically receives the return.
+    // The returnCreate mutation already creates the return and exchange order.
 
     return {
       success: true,
@@ -1575,15 +1582,7 @@ const getExchangePolicyEligibility = async (
   // Step 2: Fetch exchange window days from the store policy.
   let parsedPolicy = await getCache(POLICY_CACHE_KEY);
 
-  if (parsedPolicy) {
-    console.log(
-      "[ExchangePolicy] ✓ Policy loaded from cache:",
-      JSON.stringify(parsedPolicy),
-    );
-  } else {
-    console.log(
-      "[ExchangePolicy] Cache miss — fetching policy from Shopify...",
-    );
+  if (!parsedPolicy) {
     try {
       const shopDomain = (SHOPIFY_BASE_URL || "")
         .replace(/^https?:\/\//, "")
@@ -1604,11 +1603,6 @@ const getExchangePolicyEligibility = async (
 
       const policyBody =
         policyResponse?.data?.data?.shop?.refundPolicy?.body || "";
-      console.log(
-        "[ExchangePolicy] Policy body length:",
-        policyBody.length,
-        "chars",
-      );
 
       if (!policyBody) {
         console.warn(
@@ -1629,13 +1623,13 @@ const getExchangePolicyEligibility = async (
       // Consumable detection is handled by the hardcoded CONSUMABLE_PRODUCT_TYPES list above.
       const prompt = `You are a policy parser. From this store policy HTML extract ONLY the exchange/return window in days (maximum days after delivery within which a customer can request an exchange or return).
 
-	Return ONLY a compact JSON object, no markdown, no explanation:
-	{ "exchange_window_days": <integer> }
+Return ONLY a compact JSON object, no markdown, no explanation:
+{ "exchange_window_days": <integer> }
 
-	If no specific window is mentioned, return: { "exchange_window_days": null }
+If no specific window is mentioned, return: { "exchange_window_days": null }
 
-	Policy HTML:
-	${policyBody.slice(0, 4000)}`;
+Policy HTML:
+${policyBody.slice(0, 4000)}`;
 
       const aiResponse = await axios.post(
         "https://api.openai.com/v1/chat/completions",
@@ -1660,7 +1654,6 @@ const getExchangePolicyEligibility = async (
 
       try {
         await setCache(POLICY_CACHE_KEY, parsedPolicy);
-        // eslint-disable-next-line no-empty, no-unused-vars
       } catch (_) {}
     } catch (err) {
       console.error(
