@@ -1730,30 +1730,6 @@ const createMcpServer = () => {
       staff_note,
     }) => {
       try {
-        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        console.log("[exchange_items] Tool invoked");
-        console.log("[exchange_items] order_id              :", order_id);
-        console.log(
-          "[exchange_items] fulfillment_created_at:",
-          fulfillment_created_at,
-        );
-        console.log(
-          "[exchange_items] product_type          :",
-          product_type || "(not provided)",
-        );
-        console.log(
-          "[exchange_items] return_items          :",
-          JSON.stringify(return_items),
-        );
-        console.log(
-          "[exchange_items] exchange_items        :",
-          JSON.stringify(exchange_items),
-        );
-
-        // ── Guard: detect order NUMBER passed instead of shopify ORDER ID ────────
-        // shopify_order_id is always a large number (> 1,000,000,000).
-        // A small number like 1074 is the human-readable order_number — it won't
-        // resolve to a valid Shopify GID and will cause "no returnable fulfillments".
         const numericOrderId = parseInt(
           String(order_id).replace(/\D/g, ""),
           10,
@@ -1909,28 +1885,6 @@ const createMcpServer = () => {
     },
     async ({ fulfillment_created_at, product_type = "" }) => {
       try {
-        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        console.log("[check_exchange_eligibility] Tool invoked");
-        console.log(
-          "[check_exchange_eligibility] fulfillment_created_at:",
-          fulfillment_created_at,
-        );
-        console.log(
-          "[check_exchange_eligibility] product_type          :",
-          product_type || "(not provided — window check only)",
-        );
-
-        const result = await getExchangePolicyEligibility(
-          fulfillment_created_at,
-          product_type,
-        );
-
-        console.log(
-          "[check_exchange_eligibility] Eligibility result:",
-          JSON.stringify(result),
-        );
-        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
         return {
           content: [
             {

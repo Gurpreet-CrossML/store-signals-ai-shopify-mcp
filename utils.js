@@ -1159,35 +1159,9 @@ class ShopifyExchangeManager {
     exchangeItems, // [{ variantId, quantity }]
     options = {},
   ) {
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("[ShopifyExchangeManager.exchangeItems] Starting exchange");
-    console.log(
-      "[ShopifyExchangeManager.exchangeItems] orderId      :",
-      orderId,
-    );
-    console.log(
-      "[ShopifyExchangeManager.exchangeItems] returnItems  :",
-      JSON.stringify(returnItems),
-    );
-    console.log(
-      "[ShopifyExchangeManager.exchangeItems] exchangeItems:",
-      JSON.stringify(exchangeItems),
-    );
-    console.log(
-      "[ShopifyExchangeManager.exchangeItems] options      :",
-      JSON.stringify(options),
-    );
-
     const gid = orderId.startsWith("gid://shopify/Order/")
       ? orderId
       : `gid://shopify/Order/${orderId}`;
-
-    console.log("[ShopifyExchangeManager.exchangeItems] Normalised GID:", gid);
-
-    // Step 1: Get returnable fulfillments
-    console.log(
-      "[ShopifyExchangeManager.exchangeItems] Step 1 — fetching returnable fulfillments...",
-    );
     const edges = await this.getReturnableFulfillments(gid);
     if (!edges.length) {
       console.error(
@@ -1195,13 +1169,6 @@ class ShopifyExchangeManager {
       );
       throw new Error("No returnable fulfillments found for this order.");
     }
-
-    console.log(
-      "[ShopifyExchangeManager.exchangeItems] ✓ Returnable fulfillments count:",
-      edges.length,
-    );
-    console.log("Returnable fulfillments:", JSON.stringify(edges, null, 2));
-
     // Build a flat map of all returnable FulfillmentLineItem GIDs.
     // Keys (all mapped to the full FulfillmentLineItem GID):
     //   1. The full FulfillmentLineItem GID itself (exact match)
@@ -1227,15 +1194,6 @@ class ShopifyExchangeManager {
         }
       }
     }
-
-    console.log(
-      "[ShopifyExchangeManager.exchangeItems] Returnable line item map:",
-      JSON.stringify(returnableLineItemMap, null, 2),
-    );
-    console.log(
-      "[ShopifyExchangeManager.exchangeItems] Total returnable FLI keys:",
-      Object.keys(returnableLineItemMap).length,
-    );
 
     // Step 2: Resolve each caller-supplied fulfillmentLineItemId.
     //
@@ -1265,8 +1223,6 @@ class ShopifyExchangeManager {
         );
       }
 
-      console.log(`Resolved fulfillmentLineItemId: ${raw} → ${resolvedId}`);
-
       return {
         fulfillmentLineItemId: resolvedId,
         quantity: item.quantity,
@@ -1276,20 +1232,6 @@ class ShopifyExchangeManager {
 
     // Step 3: Create return with exchange
     const returnableFulfillmentId = edges[0].node.id;
-    console.log(
-      "[ShopifyExchangeManager.exchangeItems] Step 3 — creating return with exchange",
-    );
-    console.log(
-      `[ShopifyExchangeManager.exchangeItems] Using returnableFulfillmentId: ${returnableFulfillmentId}`,
-    );
-    console.log(
-      "[ShopifyExchangeManager.exchangeItems] Resolved returnLineItems:",
-      JSON.stringify(returnLineItems),
-    );
-    console.log(
-      "[ShopifyExchangeManager.exchangeItems] Exchange items:",
-      JSON.stringify(exchangeItems),
-    );
 
     const createdReturn = await this.createReturnWithExchange(
       gid,
@@ -1297,27 +1239,6 @@ class ShopifyExchangeManager {
       returnLineItems,
       exchangeItems,
     );
-
-    console.log(
-      "[ShopifyExchangeManager.exchangeItems] ✓ Return created:",
-      JSON.stringify(createdReturn),
-    );
-
-    // Step 4: Process the return
-    // Note: We skip processReturn here. Processing the return (restocking items, etc.)
-    // should happen when the warehouse physically receives the return.
-    // The returnCreate mutation already creates the return and exchange order.
-
-    console.log(
-      "[ShopifyExchangeManager.exchangeItems] ✓ Exchange fully created (OPEN)",
-    );
-    console.log(
-      "[ShopifyExchangeManager.exchangeItems] Return ID:",
-      createdReturn.id,
-      "Status:",
-      createdReturn.status,
-    );
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     return {
       success: true,
@@ -1639,27 +1560,10 @@ const getExchangePolicyEligibility = async (
 ) => {
   const POLICY_CACHE_KEY = "store_exchange_policy_parsed";
 
-  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-  console.log("[ExchangePolicy] Starting eligibility check");
-  console.log(
-    "[ExchangePolicy] fulfillment_created_at:",
-    fulfillment_created_at,
-  );
-  console.log(
-    "[ExchangePolicy] product_type          :",
-    product_type || "(not provided)",
-  );
-
   // Step 1: Check consumable type FIRST — no API call needed.
   const consumable = isConsumableProductType(product_type);
-  console.log("[ExchangePolicy] is consumable product?", consumable);
 
   if (consumable) {
-    console.log(
-      "[ExchangePolicy] ✗ INELIGIBLE — consumable product type:",
-      product_type,
-    );
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     return {
       eligible: false,
       days_allowed: null,
@@ -1753,10 +1657,6 @@ const getExchangePolicyEligibility = async (
       const raw =
         aiResponse?.data?.choices?.[0]?.message?.content?.trim() || "{}";
       parsedPolicy = JSON.parse(raw.replace(/```json|```/g, "").trim());
-      console.log(
-        "[ExchangePolicy] ✓ OpenAI parsed policy:",
-        JSON.stringify(parsedPolicy),
-      );
 
       try {
         await setCache(POLICY_CACHE_KEY, parsedPolicy);
@@ -1777,11 +1677,8 @@ const getExchangePolicyEligibility = async (
   }
 
   const daysAllowed = parsedPolicy?.exchange_window_days ?? null;
-  console.log("[ExchangePolicy] exchange_window_days:", daysAllowed);
 
   if (daysAllowed == null) {
-    console.log("[ExchangePolicy] ⚠ No window in policy — allowing exchange");
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     return {
       eligible: true,
       days_allowed: null,
@@ -1798,7 +1695,6 @@ const getExchangePolicyEligibility = async (
     console.warn(
       "[ExchangePolicy] ⚠ Could not parse fulfillment_created_at — allowing exchange",
     );
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     return {
       eligible: true,
       days_allowed: daysAllowed,
@@ -1814,25 +1710,7 @@ const getExchangePolicyEligibility = async (
     fulfillmentDate.getTime() + daysAllowed * 24 * 60 * 60 * 1000,
   );
 
-  console.log(
-    "[ExchangePolicy] Fulfillment date    :",
-    fulfillmentDate.toISOString(),
-  );
-  console.log("[ExchangePolicy] Now                 :", now.toISOString());
-  console.log("[ExchangePolicy] Days since fulfillment:", daysSinceFloor);
-  console.log("[ExchangePolicy] Policy window       :", daysAllowed, "days");
-  console.log("[ExchangePolicy] Deadline            :", deadline.toISOString());
-  console.log("[ExchangePolicy] Days remaining      :", daysRemaining);
-  console.log(
-    "[ExchangePolicy] Within window?      :",
-    daysSince <= daysAllowed ? "YES ✓" : "NO ✗",
-  );
-
   if (daysSince > daysAllowed) {
-    console.log(
-      `[ExchangePolicy] ✗ INELIGIBLE — ${daysSinceFloor} day(s) since fulfillment, window is ${daysAllowed} day(s)`,
-    );
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     return {
       eligible: false,
       days_allowed: daysAllowed,
@@ -1842,10 +1720,6 @@ const getExchangePolicyEligibility = async (
     };
   }
 
-  console.log(
-    `[ExchangePolicy] ✓ ELIGIBLE — ${daysSinceFloor} day(s) since fulfillment, ${daysRemaining} day(s) remaining`,
-  );
-  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
   return {
     eligible: true,
     days_allowed: daysAllowed,
