@@ -5,6 +5,7 @@ const {
   storeMetadataQuery,
   relatedProductsQuery,
   productSearchByQuery,
+  getReturnableFulfillmentsQuery,
 } = require("./graphql_queries");
 const { getCache, setCache } = require("./cache");
 
@@ -21,6 +22,7 @@ const SMTP_PASS = process.env.SMTP_PASS;
 const BACKEND_API_URL = process.env.BACKEND_API_URL;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL;
+const WIDGET_KEY = process.env.WIDGET_KEY;
 
 const allEnvironmentVariables = {
   MCP_NAME,
@@ -33,6 +35,7 @@ const allEnvironmentVariables = {
   BACKEND_API_URL,
   OPENAI_API_KEY,
   OPENAI_MODEL,
+  WIDGET_KEY,
 };
 
 // Validate environment variables
@@ -136,6 +139,9 @@ const callBackendAPI = async (method, endpoint, data = {}) => {
     const config = {
       method,
       url,
+      headers: {
+        "X-Widget-Key": WIDGET_KEY,
+      },
       timeout: 15000,
       data: data,
     };
@@ -1058,30 +1064,7 @@ class ShopifyExchangeManager {
   }
 
   async getReturnableFulfillments(orderId) {
-    const query = `
-      query GetReturnableFulfillments($orderId: ID!) {
-        returnableFulfillments(orderId: $orderId, first: 10) {
-          edges {
-            node {
-              id
-              fulfillment { id }
-              returnableFulfillmentLineItems(first: 10) {
-                edges {
-                  node {
-                    fulfillmentLineItem {
-                      id
-                      lineItem { id }
-                    }
-                    quantity
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-    const data = await this._graphql(query, { orderId });
+    const data = await this._graphql(getReturnableFulfillmentsQuery, { orderId });
     return data.returnableFulfillments.edges;
   }
 
@@ -1583,25 +1566,12 @@ const getExchangePolicyEligibility = async (
 
   if (!parsedPolicy) {
     try {
-      const shopDomain = (SHOPIFY_BASE_URL || "")
-        .replace(/^https?:\/\//, "")
-        .replace(/\/$/, "");
-      const apiVersion = process.env.SHOPIFY_API_VERSION || "2025-04";
-
-      const policyResponse = await axios.post(
-        `https://${shopDomain}/api/${apiVersion}/graphql.json`,
-        { query: `query { shop { refundPolicy { body } } }` },
-        {
-          headers: {
-            "Content-Type": "application/json",
-            "X-Shopify-Storefront-Access-Token": SHOPIFY_STOREFRONT_API_TOKEN,
-          },
-          timeout: 10000,
-        },
-      );
+      const policyResponse = await callShopifyApi("POST", "", {
+        query: `query { shop { refundPolicy { body } } }`,
+      });
 
       const policyBody =
-        policyResponse?.data?.data?.shop?.refundPolicy?.body || "";
+        policyResponse?.data?.shop?.refundPolicy?.body || "";
 
       if (!policyBody) {
         console.warn(
@@ -1733,6 +1703,7 @@ module.exports = {
   BACKEND_API_URL,
   OPENAI_API_KEY,
   OPENAI_MODEL,
+  WIDGET_KEY,
   // helpers
   callShopifyApi,
   callBackendAPI,

@@ -342,6 +342,30 @@ const discountQuery = `{
     }
   }
 }`;
+const getReturnableFulfillmentsQuery = `
+  query GetReturnableFulfillments($orderId: ID!) {
+    returnableFulfillments(orderId: $orderId, first: 10) {
+      edges {
+        node {
+          id
+          fulfillment { id }
+          returnableFulfillmentLineItems(first: 10) {
+            edges {
+              node {
+                fulfillmentLineItem {
+                  id
+                  lineItem { id }
+                }
+                quantity
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
 const refundQuery = `
   query GetOrderRefundStatus($id: ID!) {
     order(id: $id) {
@@ -371,4 +395,5 @@ module.exports = {
   productSortQuery,
   discountQuery,
   refundQuery,
+  getReturnableFulfillmentsQuery,
 };

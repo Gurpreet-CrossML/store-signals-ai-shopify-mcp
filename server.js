@@ -42,10 +42,19 @@ const {
 
 const { getCache, setCache } = require("./cache");
 
-// Factory — creates a fresh McpServer instance per HTTP request.
-// A singleton cannot be shared across concurrent stateless HTTP connections;
-// each connection must own its transport, so we create a new server each time.
+// Configure Nodemailer transporter for sending OTP emails using SMTP credentials from environment variables.
+const transporter = nodemailer.createTransport({
+  host: "smtp.gmail.com",
+  port: 587,
+  secure: false,
+  auth: {
+    user: SMTP_USER,
+    pass: SMTP_PASS,
+  },
+});
+
 const createMcpServer = () => {
+  // Initialize the MCP server
   const server = new McpServer({
     name: MCP_NAME,
     version: MCP_VERSION,
@@ -55,16 +64,6 @@ const createMcpServer = () => {
     },
   });
 
-  // Configure Nodemailer transporter for sending OTP emails using SMTP credentials from environment variables.
-  const transporter = nodemailer.createTransport({
-    host: "smtp.gmail.com",
-    port: 587,
-    secure: false,
-    auth: {
-      user: SMTP_USER,
-      pass: SMTP_PASS,
-    },
-  });
 
   // ********************************** MCP Tools **********************************
   // ######### 1. Search Products #########
@@ -1944,8 +1943,8 @@ app.use(
 // A fresh McpServer is created per request so concurrent stateless
 // HTTP sessions each own their transport without conflict.
 app.post("/mcp", async (req, res) => {
-  const server = createMcpServer();
   try {
+    const server = createMcpServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
