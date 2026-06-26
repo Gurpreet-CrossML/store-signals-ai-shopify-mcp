@@ -64,7 +64,6 @@ const createMcpServer = () => {
     },
   });
 
-
   // ********************************** MCP Tools **********************************
   // ######### 1. Search Products #########
   server.tool(

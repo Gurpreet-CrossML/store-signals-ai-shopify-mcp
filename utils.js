@@ -1064,7 +1064,9 @@ class ShopifyExchangeManager {
   }
 
   async getReturnableFulfillments(orderId) {
-    const data = await this._graphql(getReturnableFulfillmentsQuery, { orderId });
+    const data = await this._graphql(getReturnableFulfillmentsQuery, {
+      orderId,
+    });
     return data.returnableFulfillments.edges;
   }
 
@@ -1570,8 +1572,7 @@ const getExchangePolicyEligibility = async (
         query: `query { shop { refundPolicy { body } } }`,
       });
 
-      const policyBody =
-        policyResponse?.data?.shop?.refundPolicy?.body || "";
+      const policyBody = policyResponse?.data?.shop?.refundPolicy?.body || "";
 
       if (!policyBody) {
         console.warn(
