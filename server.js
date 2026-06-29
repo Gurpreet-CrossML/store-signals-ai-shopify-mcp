@@ -36,6 +36,8 @@ const {
   formatOrderTransactions,
   searchProductsByNames,
   formatRefundStatus,
+  ShopifyExchangeManager,
+  getExchangePolicyEligibility,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
@@ -523,8 +525,8 @@ const createMcpServer = () => {
   server.tool(
     "get_store_meta_info",
     `Fetch metadata about the store's product catalog.
-    Returns product tags, types, collections, and categories available in the store.
-    `,
+  Returns product tags, types, collections, and categories available in the store.
+  `,
     async () => {
       try {
         const metadata = await storeMetadata();
@@ -555,7 +557,7 @@ const createMcpServer = () => {
   server.tool(
     "filter_products_by_space",
     `Filters and ranks products based on available space by extracting dimensions from product descriptions.
-    Returns products in the same format as search_products.`,
+   Returns products in the same format as search_products.`,
     {
       products: z.array(
         z.object({
@@ -689,8 +691,8 @@ const createMcpServer = () => {
   server.tool(
     "list_available_discounts",
     `List all available discounts from the store.
-    Returns active discount codes, automatic discounts (price rules), and their details.
-    `,
+  Returns active discount codes, automatic discounts (price rules), and their details.
+  `,
     {},
     async () => {
       try {
@@ -784,12 +786,12 @@ const createMcpServer = () => {
   server.tool(
     "send_otp",
     `Send a verification OTP to the provided email.
-    This tool is strictly used for order tracking verification.
+  This tool is strictly used for order tracking verification.
 
-    Parameters:
-    @param {string} email - User email to receive OTP
-    @param {string} session_id - Unique session identifier
-    `,
+  Parameters:
+  @param {string} email - User email to receive OTP
+  @param {string} session_id - Unique session identifier
+  `,
     {
       email: z.string().email().describe("User email address"),
       session_id: z.string().min(5).describe("Unique session identifier"),
@@ -887,11 +889,11 @@ const createMcpServer = () => {
     "verify_otp",
     `Verify an OTP sent for order tracking email verification.
 
-    Parameters:
-    @param {string} email - User email used for verification
-    @param {string} otp_code - 6 digit OTP
-    @param {string} session_id - Session identifier
-    `,
+  Parameters:
+  @param {string} email - User email used for verification
+  @param {string} otp_code - 6 digit OTP
+  @param {string} session_id - Session identifier
+  `,
     {
       email: z.string().email().describe("User email"),
       otp_code: z.string().length(6).describe("6 digit OTP"),
@@ -939,19 +941,23 @@ const createMcpServer = () => {
   server.tool(
     "get_order_detail",
     `Fetch a specific order by order number and email.
-    Returns a single order object.
+  Returns a single order object.
 
-    Parameters:
-    @param {string} email: Order identifier (e.g. "test@example.com")
-    @param {string} order_id: Order identifier (e.g. "1026")
-    @param {string} session_id - Session identifier
-    @param {string} customer_id - Customer ID
-    `,
+  Parameters:
+  @param {string} email: Order identifier (e.g. "test@example.com")
+  @param {string} order_id: Order identifier (e.g. "1026")
+  @param {string} session_id - Session identifier
+  @param {string} customer_id - Customer ID
+  `,
     {
       email: z.string().describe("Order email (e.g. 'test@example.com')"),
       order_id: z.string().describe("Order ID (e.g. '1026')"),
       session_id: z.string().describe("Session identifier"),
-      customer_id: z.string().describe("Customer ID"),
+      customer_id: z.coerce
+        .string()
+        .describe(
+          "Customer ID — always passed as a string even if it looks like a number",
+        ),
     },
     async ({ email, order_id, session_id, customer_id = "" }) => {
       if (!customer_id) {
@@ -1038,12 +1044,12 @@ const createMcpServer = () => {
     "cancel_order",
     `Cancel a Shopify order by order number.
 
-    Parameters:
-    @param {string} order_id - Order number (e.g. "1006")
-    @param {string} email - Customer email
-    @param {string} reason - Cancellation reason
-    @param {string} session_id - Session identifier
-    `,
+  Parameters:
+  @param {string} order_id - Order number (e.g. "1006")
+  @param {string} email - Customer email
+  @param {string} reason - Cancellation reason
+  @param {string} session_id - Session identifier
+  `,
     {
       order_id: z.string().describe("Order number"),
       email: z.string().email().describe("Customer email"),
@@ -1152,24 +1158,23 @@ const createMcpServer = () => {
       }
     },
   );
-
   // ######### 11. Modify Order #########
   server.tool(
     "modify_order",
     `Modify an existing Shopify order using the 3-step Order Edit API
-    (orderEditBegin → apply changes → orderEditCommit).
+  (orderEditBegin → apply changes → orderEditCommit).
 
-    Supported change types in the "changes" array:
-      • addVariant   – add a product variant to the order
-      • setQuantity  – update the quantity of an existing line item
-      • remove       – remove a line item from the order
+  Supported change types in the "changes" array:
+    • addVariant   – add a product variant to the order
+    • setQuantity  – update the quantity of an existing line item
+    • remove       – remove a line item from the order
 
-    Parameters:
-    @param {string}  shopify_order_id         Shopify Order GID or plain numeric ID (e.g. "18693365366829")
-    @param {array}   changes          List of change objects (see schema below)
-    @param {boolean} notify_customer  Whether to send a notification email to the customer (default: false)
-    @param {string}  staff_note       Internal note attached to the edit (default: "Modified via MCP Server")
-    `,
+  Parameters:
+  @param {string}  shopify_order_id         Shopify Order GID or plain numeric ID (e.g. "18693365366829")
+  @param {array}   changes          List of change objects (see schema below)
+  @param {boolean} notify_customer  Whether to send a notification email to the customer (default: false)
+  @param {string}  staff_note       Internal note attached to the edit (default: "Modified via MCP Server")
+  `,
     {
       shopify_order_id: z
         .string()
@@ -1303,21 +1308,25 @@ const createMcpServer = () => {
     "get_order_transactions",
     `Fetch payment transactions for a specific order.
 
-    Returns a payment investigation summary that can be used
-    to identify duplicate charges, authorization holds,
-    refunds, captures, and other billing issues.
+  Returns a payment investigation summary that can be used
+  to identify duplicate charges, authorization holds,
+  refunds, captures, and other billing issues.
 
-    Parameters:
-    @param {string} email
-    @param {string} order_id
-    @param {string} session_id
-    @param {string} customer_id
-    `,
+  Parameters:
+  @param {string} email
+  @param {string} order_id
+  @param {string} session_id
+  @param {string} customer_id
+  `,
     {
       email: z.string().describe("Order email"),
       order_id: z.string().describe("Order ID"),
       session_id: z.string().describe("Session identifier"),
-      customer_id: z.string().describe("Customer ID"),
+      customer_id: z.coerce
+        .string()
+        .describe(
+          "Customer ID — always passed as a string even if it looks like a number",
+        ),
     },
     async ({ email, order_id, session_id, customer_id = "" }) => {
       try {
@@ -1407,19 +1416,19 @@ const createMcpServer = () => {
     "get_refund_status",
     `Fetch the refund status of a specific order by order number and customer email.
 
-    Returns one of the following statuses:
-      - NOT_REFUNDED       : No refunds exist on this order
-      - FULLY_REFUNDED     : Order has been fully refunded
-      - PARTIALLY_REFUNDED : Order has been partially refunded
-      - REFUND_PENDING     : A refund is initiated but not yet settled
-      - REFUND_FAILED      : A refund transaction failed
+  Returns one of the following statuses:
+    - NOT_REFUNDED       : No refunds exist on this order
+    - FULLY_REFUNDED     : Order has been fully refunded
+    - PARTIALLY_REFUNDED : Order has been partially refunded
+    - REFUND_PENDING     : A refund is initiated but not yet settled
+    - REFUND_FAILED      : A refund transaction failed
 
-    Parameters:
-    @param {string} email       - Customer email associated with the order
-    @param {string} order_id    - Short order number (e.g. "1026")
-    @param {string} session_id  - Session identifier
-    @param {string} customer_id - Customer ID (optional; skips email verification if provided)
-    `,
+  Parameters:
+  @param {string} email       - Customer email associated with the order
+  @param {string} order_id    - Short order number (e.g. "1026")
+  @param {string} session_id  - Session identifier
+  @param {string} customer_id - Customer ID (optional; skips email verification if provided)
+  `,
     {
       email: z.string().email().describe("Customer email address"),
       order_id: z.string().describe("Short order number (e.g. '1026')"),
@@ -1541,23 +1550,23 @@ const createMcpServer = () => {
   server.tool(
     "search_products_by_names",
     `Search for multiple products one by one using an array of product names.
-    Each name is searched independently against the Shopify catalog and the results
-    are returned as an ordered array that mirrors the input list.
+  Each name is searched independently against the Shopify catalog and the results
+  are returned as an ordered array that mirrors the input list.
 
-    Use this when the user provides a list of specific product names they want to look up,
-    for example: ["Product 1", "Product 2", "Product 3"].
+  Use this when the user provides a list of specific product names they want to look up,
+  for example: ["Product 1", "Product 2", "Product 3"].
 
-    Each entry in the response includes:
-    - query: the original product name searched
-    - found: whether any matching products were discovered
-    - products: array of matched product objects (same shape as search_products)
+  Each entry in the response includes:
+  - query: the original product name searched
+  - found: whether any matching products were discovered
+  - products: array of matched product objects (same shape as search_products)
 
-    Parameters:
-    @param {string[]} product_names: Array of product names to search for
-    @param {string}   session_id:    Session ID
-    @param {string}   store_code:    Store name or code
-    @param {boolean}  full_details:  Whether to return full product details including variants, images, and URLs. Defaults to false.
-    `,
+  Parameters:
+  @param {string[]} product_names: Array of product names to search for
+  @param {string}   session_id:    Session ID
+  @param {string}   store_code:    Store name or code
+  @param {boolean}  full_details:  Whether to return full product details including variants, images, and URLs. Defaults to false.
+  `,
     {
       product_names: z
         .array(z.string().min(1))
@@ -1605,10 +1614,316 @@ const createMcpServer = () => {
     },
   );
 
+  // ######### 15. Exchange Items #########
+  server.tool(
+    "exchange_items",
+    `Exchange products on a fulfilled order using Shopify's Exchange API.
+
+  IMPORTANT: Before processing the exchange this tool automatically checks the
+  store's return/exchange policy (fetched live from the Storefront API and
+  parsed with AI). If the order is outside the exchange window, or the item is
+  marked non-exchangeable (e.g. hygiene / Final-Sale products), the exchange
+  will be declined with a clear reason — no Shopify API call is made.
+
+  Parameters:
+  @param {string}  order_id              Shopify Order ID (numeric or GID)
+                                         (e.g. "2026-06-22T02:52:51-04:00")
+  @param {array}   return_items          List of items being returned:
+      [ { fulfillment_line_item_id, quantity, returnReason? }, ... ]
+  @param {array}   exchange_items        List of new items to add:
+      [ { variant_id, quantity }, ... ]
+  @param {string[]} [product_tags]       Tags from the order line item (optional).
+                                         Used to detect non-returnable products
+                                         (e.g. ["serum", "final-sale"]).
+  @param {string}  [session_id]          Optional session ID for logging
+  @param {string}  [staff_note]          Internal note (default: "Exchange via MCP")
+  `,
+    {
+      order_id: z
+        .string()
+        .describe(
+          "Shopify Order ID (numeric or full GID). Example: '123456789' or 'gid://shopify/Order/123456789'",
+        ),
+      fulfillment_created_at: z
+        .string()
+        .describe(
+          "ISO-8601 created_at timestamp from fulfillments[0].created_at in the order response " +
+            "(e.g. '2026-06-22T02:53:43-04:00'). This is the date the order was actually " +
+            "shipped/fulfilled — the exchange window is calculated from this date, NOT from order.created_at.",
+        ),
+      return_items: z
+        .array(
+          z.object({
+            fulfillment_line_item_id: z
+              .union([z.string(), z.number()])
+              .transform((val) => String(val))
+              .describe(
+                "FulfillmentLineItem GID returned by get_fulfillment_line_item_id, " +
+                  "e.g. 'gid://shopify/FulfillmentLineItem/456'",
+              ),
+            quantity: z
+              .number()
+              .int()
+              .positive()
+              .describe("Quantity being returned"),
+            returnReason: z
+              .enum([
+                "SIZE_TOO_SMALL",
+                "SIZE_TOO_LARGE",
+                "COLOR",
+                "STYLE",
+                "WRONG_ITEM",
+                "UNWANTED",
+                "DEFECTIVE",
+                "NOT_AS_DESCRIBED",
+                "OTHER",
+                "UNKNOWN",
+              ])
+              .describe(
+                "Shopify return reason. Defaults to 'UNKNOWN' if omitted. " +
+                  "Use SIZE_TOO_SMALL / SIZE_TOO_LARGE for size issues, COLOR for wrong color, " +
+                  "STYLE for wrong variant, WRONG_ITEM for wrong product, UNWANTED for change of mind.",
+              ),
+          }),
+        )
+        .min(1)
+        .describe("One or more line items to return."),
+      exchange_items: z
+        .array(
+          z.object({
+            variant_id: z
+              .union([z.string(), z.number()])
+              .transform((val) => String(val))
+              .describe(
+                "Product variant GID to add, e.g. 'gid://shopify/ProductVariant/987'",
+              ),
+            quantity: z
+              .number()
+              .int()
+              .positive()
+              .describe("Quantity to exchange"),
+          }),
+        )
+        .min(1)
+        .describe("One or more new variants to add to the order."),
+      product_type: z
+        .string()
+        .describe(
+          "productType of the item being exchanged (e.g. 'Laptop Bags'). " +
+            "Used to detect consumable/non-returnable product types. Pass empty string if unknown.",
+        ),
+      session_id: z.string().optional().describe("Session ID for logging."),
+      staff_note: z
+        .string()
+        .optional()
+        .describe("Internal staff note. Defaults to 'Exchange via MCP'."),
+    },
+    async ({
+      order_id,
+      fulfillment_created_at,
+      return_items,
+      exchange_items,
+      product_type,
+      session_id,
+    }) => {
+      try {
+        // ── Guard: detect order NUMBER passed instead of shopify ORDER ID ────────
+        // shopify_order_id is always a large number (> 1,000,000,000).
+        // A small number like 1074 is the human-readable order_number — it won't
+        // resolve to a valid Shopify GID and will cause "no returnable fulfillments".
+        const numericOrderId = parseInt(
+          String(order_id).replace(/\D/g, ""),
+          10,
+        );
+        if (!isNaN(numericOrderId) && numericOrderId < 1_000_000) {
+          const errMsg =
+            `order_id "${order_id}" looks like an order number, not a Shopify order ID. ` +
+            `Use the "shopify_order_id" field from get_order_detail (a large number like 7116424446018), ` +
+            `not the "order_number" field (e.g. 1074).`;
+          console.error("[exchange_items] ✗ WRONG order_id —", errMsg);
+          return {
+            content: [
+              { type: "text", text: JSON.stringify({ error: errMsg }) },
+            ],
+            isError: true,
+          };
+        }
+
+        // ── Guard: warn if fulfillment_created_at is missing ────────────────────
+        if (!fulfillment_created_at) {
+          console.warn(
+            "[exchange_items] ⚠ fulfillment_created_at is missing. " +
+              "Pass the 'fulfillment_created_at' field from get_order_detail. " +
+              "Policy window check will be skipped (fail-open).",
+          );
+        }
+
+        // ── Step 1: policy eligibility check ────────────────────────────────────
+        const policyCheck = await getExchangePolicyEligibility(
+          fulfillment_created_at,
+          product_type,
+        );
+
+        if (!policyCheck.eligible) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    eligible: false,
+                    reason: policyCheck.reason,
+                    days_allowed: policyCheck.days_allowed,
+                    days_since_order: policyCheck.days_since_order,
+                    suggestion:
+                      "Please contact our support team if you believe this is an error.",
+                  },
+                  null,
+                  2,
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        // ── Step 2: normalise IDs and process exchange ───────────────────────
+        // Normalise IDs inside the arrays (accept both GID and numeric)
+        const normaliseGid = (id, type) => {
+          const prefix = `gid://shopify/${type}/`;
+          return id.startsWith(prefix) ? id : `${prefix}${id}`;
+        };
+
+        const normalisedReturnItems = return_items.map((item) => ({
+          fulfillmentLineItemId: normaliseGid(
+            item.fulfillment_line_item_id,
+            "FulfillmentLineItem",
+          ),
+          quantity: item.quantity,
+          returnReason: item.returnReason || "UNKNOWN",
+        }));
+
+        const normalisedExchangeItems = exchange_items.map((item) => ({
+          variantId: normaliseGid(item.variant_id, "ProductVariant"),
+          quantity: item.quantity,
+        }));
+
+        const exchangeManager = new ShopifyExchangeManager();
+        const result = await exchangeManager.exchangeItems(
+          order_id,
+          normalisedReturnItems,
+          normalisedExchangeItems,
+        );
+
+        // Optionally log the event if session_id provided
+        if (session_id) {
+          await callBackendAPI("POST", "/chat/bot-events/", {
+            thread_id: session_id,
+            event_type: "exchange_items",
+            order_id: order_id,
+            return_items: JSON.stringify(return_items),
+            exchange_items: JSON.stringify(exchange_items),
+          }).catch(() => {});
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        console.error("exchange_items error:", error);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error performing exchange: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ######### 16. Check Exchange Policy Eligibility #########
+  server.tool(
+    "check_exchange_eligibility",
+    `Check if an order item is eligible for exchange based on the store's return/exchange policy.
+
+  Checks two things:
+  1. Exchange window  — is the item within the allowed exchange window (e.g. 7 days from fulfillment)?
+  2. Product type     — is the productType eligible for exchange (not a consumable / non-returnable)?
+
+  When to call:
+  - Right after get_order_detail (pass fulfillment_created_at, leave product_type = ""):
+      → detects an expired exchange window BEFORE searching for a replacement.
+  - Right after search_products (pass fulfillment_created_at + productType from the search result):
+      → confirms both window eligibility AND product-type eligibility.
+
+  Returns: { eligible, days_allowed, days_since_fulfillment, days_remaining, reason }
+  If eligible is false, surface the reason to the customer and DO NOT proceed with exchange_items.
+  `,
+    {
+      fulfillment_created_at: z
+        .string()
+        .describe(
+          "ISO-8601 created_at from fulfillments[0].created_at in the order response " +
+            "(e.g. '2026-06-22T02:53:43-04:00'). The exchange window is measured from this date.",
+        ),
+      product_type: z
+        .string()
+        .describe(
+          "productType of the item being exchanged (e.g. 'Laptop Bags'). " +
+            "Pass empty string '' when only checking the time window (product type not yet known).",
+        ),
+    },
+    async ({ fulfillment_created_at, product_type = "" }) => {
+      try {
+        const result = await getExchangePolicyEligibility(
+          fulfillment_created_at,
+          product_type,
+        );
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        console.error("[check_exchange_eligibility] Error:", error.message);
+        // Fail open — let exchange_items perform its own check
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  eligible: true,
+                  reason:
+                    "Policy check could not be completed — proceeding with exchange",
+                  error: error.message,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+    },
+  );
+
   // ********************************** End of MCP Tools **********************************
 
   return server;
-};
+}; // end createMcpServer
 
 // Start the server
 const app = express();
@@ -1623,7 +1938,9 @@ app.use(
   }),
 );
 
-// Handle incoming MCP requests at the /mcp endpoint, connecting them to the MCP server transport layer. This allows the server to process JSON-RPC requests sent to /mcp and route them to the appropriate tools defined in the MCP server.
+// Handle incoming MCP requests at the /mcp endpoint.
+// A fresh McpServer is created per request so concurrent stateless
+// HTTP sessions each own their transport without conflict.
 app.post("/mcp", async (req, res) => {
   try {
     const server = createMcpServer();
@@ -1631,7 +1948,6 @@ app.post("/mcp", async (req, res) => {
       sessionIdGenerator: undefined,
     });
     res.on("close", () => {
-      console.log("Request closed");
       transport.close();
       server.close();
     });
