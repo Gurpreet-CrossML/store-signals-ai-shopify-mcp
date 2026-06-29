@@ -5,6 +5,7 @@ const {
   storeMetadataQuery,
   relatedProductsQuery,
   productSearchByQuery,
+  getReturnableFulfillmentsQuery,
 } = require("./graphql_queries");
 const { getCache, setCache } = require("./cache");
 
@@ -21,6 +22,7 @@ const SMTP_PASS = process.env.SMTP_PASS;
 const BACKEND_API_URL = process.env.BACKEND_API_URL;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL;
+const WIDGET_KEY = process.env.WIDGET_KEY;
 
 const allEnvironmentVariables = {
   MCP_NAME,
@@ -33,6 +35,7 @@ const allEnvironmentVariables = {
   BACKEND_API_URL,
   OPENAI_API_KEY,
   OPENAI_MODEL,
+  WIDGET_KEY,
 };
 
 // Validate environment variables
@@ -136,6 +139,9 @@ const callBackendAPI = async (method, endpoint, data = {}) => {
     const config = {
       method,
       url,
+      headers: {
+        "X-Widget-Key": WIDGET_KEY,
+      },
       timeout: 15000,
       data: data,
     };
@@ -781,14 +787,42 @@ const formatOrder = (o) => {
       ? "shipped"
       : "not_shipped";
 
+  // Build a lookup: line_item_id (numeric) -> { fulfillment_line_item_id, fulfillment_id, fulfillment_created_at }
+  const fulfillmentLineItemMap = {};
+  for (const f of fulfillments) {
+    if ((f.status || "").toLowerCase() === "cancelled") continue;
+    for (const fli of f.line_items || []) {
+      fulfillmentLineItemMap[fli.id] = {
+        fulfillment_line_item_id: fli.id,
+        fulfillment_id: f.id,
+        fulfillment_status: f.status,
+        // When was this item actually shipped? Used by exchange_items as fulfillment_created_at.
+        fulfillment_created_at: f.created_at || null,
+      };
+    }
+  }
+
+  // Top-level fulfillment_created_at: the created_at of the first active fulfillment.
+  // Always use this (not order.created_at) when calling exchange_items.
+  const firstActiveFulfillment = fulfillments.find(
+    (f) => (f.status || "").toLowerCase() !== "cancelled",
+  );
+  const topLevelFulfillmentCreatedAt =
+    firstActiveFulfillment?.created_at || null;
+
   const formattedOrder = {
-    order_id: o.order_number,
+    // order_number is the human-readable number shown to customers (e.g. 1074).
+    // USE shopify_order_id (the large numeric ID) for ALL Shopify API / exchange_items calls.
+    order_number: o.order_number,
     shopify_order_id: o.id,
     email: o.email,
     financial_status: o.financial_status,
     fulfillment_status: o.fulfillment_status,
     shipment_status: shipmentStatus,
     created_at: o.created_at,
+    // ⚠ USE THIS — NOT created_at — as the fulfillment_created_at argument for exchange_items.
+    // The exchange window is measured from the shipment date, not the order placement date.
+    fulfillment_created_at: topLevelFulfillmentCreatedAt,
     cancelled_at: o.cancelled_at,
     cancel_reason: o.cancel_reason,
     payment_gateways: o.payment_gateway_names,
@@ -806,14 +840,23 @@ const formatOrder = (o) => {
     is_returnable: returnStatus.allowed,
     return_message: returnStatus.reason || "Eligible for return",
 
-    items: o.line_items.map((item) => ({
-      line_item_id: item.id,
-      product_id: item.product_id,
-      variant_id: item.variant_id,
-      name: item.name,
-      quantity: item.quantity,
-      price: `${getCurrencySymbol(o.presentment_currency)}${item.price || 0}`,
-    })),
+    items: o.line_items.map((item) => {
+      const fliInfo = fulfillmentLineItemMap[item.id] || {};
+      return {
+        line_item_id: item.id,
+        fulfillment_line_item_id: fliInfo.fulfillment_line_item_id ?? null,
+        fulfillment_id: fliInfo.fulfillment_id ?? null,
+        // Per-item fulfillment_created_at for multi-fulfillment orders.
+        fulfillment_created_at:
+          fliInfo.fulfillment_created_at ?? topLevelFulfillmentCreatedAt,
+        product_id: item.product_id,
+        variant_id: item.variant_id,
+        name: item.name,
+        quantity: item.quantity,
+        fulfillment_status: item.fulfillment_status,
+        price: `${getCurrencySymbol(o.presentment_currency)}${item.price || 0}`,
+      };
+    }),
   };
 
   return formattedOrder;
@@ -985,6 +1028,218 @@ class ShopifyOrderEditor {
   }
 }
 
+/**
+ * ShopifyExchangeManager – implements the Exchange API:
+ *   Step 1: fetch returnable fulfillments
+ *   Step 2: returnCreate (with exchange line items)
+ *   Step 3: returnProcess
+ */
+class ShopifyExchangeManager {
+  constructor() {
+    const baseUrl = SHOPIFY_BASE_URL || "";
+    this.shopDomain = baseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    this.accessToken = SHOPIFY_ACCESS_TOKEN;
+    this.apiVersion = process.env.SHOPIFY_API_VERSION || "2025-04"; // Use latest
+    this.graphqlEndpoint = `https://${this.shopDomain}/admin/api/${this.apiVersion}/graphql.json`;
+  }
+
+  async _graphql(query, variables = {}) {
+    console.log("GraphQL Query:", query);
+    console.log("GraphQL Variables:", JSON.stringify(variables, null, 2));
+    const response = await axios.post(
+      this.graphqlEndpoint,
+      { query, variables },
+      {
+        headers: {
+          "X-Shopify-Access-Token": this.accessToken,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+    const { data, errors } = response.data;
+    if (errors?.length > 0) {
+      throw new Error(`GraphQL Errors: ${JSON.stringify(errors)}`);
+    }
+    return data;
+  }
+
+  async getReturnableFulfillments(orderId) {
+    const data = await this._graphql(getReturnableFulfillmentsQuery, {
+      orderId,
+    });
+    return data.returnableFulfillments.edges;
+  }
+
+  async createReturnWithExchange(
+    orderId,
+    returnableFulfillmentId,
+    returnLineItems, // each: { fulfillmentLineItemId, quantity, returnReason? }
+    exchangeLineItems, // each: { variantId, quantity }
+  ) {
+    const mutation = `
+      mutation CreateReturnWithExchange($input: ReturnInput!) {
+        returnCreate(returnInput: $input) {
+          return { id status }
+          userErrors { field message }
+        }
+      }
+    `;
+
+    // returnableFulfillmentId is only used to find the correct fulfillment (Step 1).
+    // It must NOT be passed into the mutation — ReturnLineItemInput only accepts:
+    // fulfillmentLineItemId, quantity, returnReason
+    const returnItemsWithReason = returnLineItems.map((item) => ({
+      fulfillmentLineItemId: item.fulfillmentLineItemId,
+      quantity: item.quantity,
+      returnReason: item.returnReason || "DEFECTIVE",
+    }));
+
+    const variables = {
+      input: {
+        orderId: orderId,
+        returnLineItems: returnItemsWithReason,
+        exchangeLineItems: exchangeLineItems.map((item) => ({
+          variantId: item.variantId,
+          quantity: item.quantity,
+        })),
+      },
+    };
+
+    console.log("Mutation variables:", JSON.stringify(variables, null, 2));
+
+    const data = await this._graphql(mutation, variables);
+    const result = data.returnCreate;
+    if (result.userErrors?.length) {
+      throw new Error(
+        `Return creation failed: ${result.userErrors[0].message}`,
+      );
+    }
+    return result.return;
+  }
+
+  async processReturn(returnId) {
+    const mutation = `
+      mutation ProcessReturn($input: ReturnProcessInput!) {
+        returnProcess(input: $input) {
+          return { id status }
+          userErrors { field message }
+        } 
+      }
+    `;
+    console.log("[processReturn] Processing return ID:", returnId);
+    const data = await this._graphql(mutation, { input: { returnId } });
+    const result = data.returnProcess;
+    if (result.userErrors?.length) {
+      throw new Error(
+        `Return processing failed: ${result.userErrors[0].message}`,
+      );
+    }
+    console.log("[processReturn] ✓ Success:", result.return);
+    return result.return;
+  }
+
+  async exchangeItems(
+    orderId,
+    returnItems, // [{ fulfillmentLineItemId, quantity, returnReason? }]
+    exchangeItems, // [{ variantId, quantity }]
+  ) {
+    const gid = orderId.startsWith("gid://shopify/Order/")
+      ? orderId
+      : `gid://shopify/Order/${orderId}`;
+
+    // Step 1: Get returnable fulfillments
+    const edges = await this.getReturnableFulfillments(gid);
+    if (!edges.length) {
+      console.error(
+        "[ShopifyExchangeManager.exchangeItems] ✗ No returnable fulfillments found",
+      );
+      throw new Error("No returnable fulfillments found for this order.");
+    }
+
+    // Build a flat map of all returnable FulfillmentLineItem GIDs.
+    // Keys (all mapped to the full FulfillmentLineItem GID):
+    //   1. The full FulfillmentLineItem GID itself (exact match)
+    //   2. The numeric suffix of FulfillmentLineItem GID
+    //   3. The full LineItem GID (so REST line_item_id can be passed as GID)
+    //   4. The numeric suffix of LineItem GID (so REST line_item_id numeric can be passed directly)
+    const returnableLineItemMap = {};
+    for (const edge of edges) {
+      const lineItems = edge.node.returnableFulfillmentLineItems?.edges || [];
+      for (const li of lineItems) {
+        const fliGid = li.node.fulfillmentLineItem.id;
+        const fliNumeric = fliGid.split("/").pop();
+        // Map by FulfillmentLineItem GID and its numeric part
+        returnableLineItemMap[fliGid] = fliGid;
+        returnableLineItemMap[fliNumeric] = fliGid;
+        // Also map by the underlying LineItem GID and its numeric part
+        // so callers can pass the REST API line_item_id directly
+        const lineItemGid = li.node.fulfillmentLineItem.lineItem?.id;
+        if (lineItemGid) {
+          const lineItemNumeric = lineItemGid.split("/").pop();
+          returnableLineItemMap[lineItemGid] = fliGid;
+          returnableLineItemMap[lineItemNumeric] = fliGid;
+        }
+      }
+    }
+
+    // Step 2: Resolve each caller-supplied fulfillmentLineItemId.
+    //
+    // The caller may pass either:
+    //   (a) a FulfillmentLineItem GID from get_fulfillment_line_item_id  ← preferred
+    //   (b) a LineItem GID / numeric id from the order payload            ← legacy
+    //
+    // Strategy:
+    //   1. Try exact GID match in the returnable map.
+    //   2. Try numeric suffix match in the returnable map.
+    //   3. If still unresolved, throw a clear user-facing error.
+    const returnLineItems = returnItems.map((item) => {
+      const raw = item.fulfillmentLineItemId;
+      const numericId = raw.split("/").pop();
+
+      const resolvedId =
+        returnableLineItemMap[raw] || // exact GID match
+        returnableLineItemMap[numericId]; // numeric suffix match
+
+      if (!resolvedId) {
+        const returnableIds = [
+          ...new Set(Object.values(returnableLineItemMap)),
+        ];
+        throw new Error(
+          `FulfillmentLineItem "${raw}" is not returnable for this order. ` +
+            `Returnable IDs: ${returnableIds.join(", ")}`,
+        );
+      }
+
+      return {
+        fulfillmentLineItemId: resolvedId,
+        quantity: item.quantity,
+        returnReason: item.returnReason || "UNKNOWN",
+      };
+    });
+
+    // Step 3: Create return with exchange
+    const returnableFulfillmentId = edges[0].node.id;
+    const createdReturn = await this.createReturnWithExchange(
+      gid,
+      returnableFulfillmentId,
+      returnLineItems,
+      exchangeItems,
+    );
+
+    // Step 4: Process the return
+    // Note: We skip processReturn here. Processing the return (restocking items, etc.)
+    // should happen when the warehouse physically receives the return.
+    // The returnCreate mutation already creates the return and exchange order.
+
+    return {
+      success: true,
+      returnId: createdReturn.id,
+      status: createdReturn.status,
+      message: "Exchange completed successfully.",
+    };
+  }
+}
+
 // Utility function to format order transactions received from Shopify API
 const formatOrderTransactions = (order, transactions) => {
   const successfulTransactions = transactions.filter(
@@ -1088,8 +1343,6 @@ const searchProductsByNames = async (
         query: productSearchByQuery,
         variables: {
           search: name,
-          sortKey: "RELEVANCE",
-          reverse: false,
         },
       };
 
@@ -1175,6 +1428,269 @@ const formatRefundStatus = (restOrder, gqlOrder) => {
   };
 };
 
+// Hardcoded list of consumable product type keywords.
+// Checked against the product's productType field — never against policy text.
+// This avoids false positives from keywords like "final sale" or "non-returnable"
+// in policy HTML blocking every product regardless of what it actually is.
+const CONSUMABLE_PRODUCT_TYPES = [
+  // Food & Beverages
+  "coffee",
+  "tea",
+  "energy drink",
+  "protein powder",
+  "snack",
+  "cooking oil",
+  "spice",
+  "seasoning",
+  "baby food",
+  "pet food",
+  "food",
+  "beverage",
+  "drink",
+  // Health & Personal Care
+  "toothpaste",
+  "mouthwash",
+  "shampoo",
+  "conditioner",
+  "soap",
+  "body wash",
+  "deodorant",
+  "razor",
+  "contact lens",
+  "vitamin",
+  "supplement",
+  "first aid",
+  // Beauty & Cosmetics
+  "makeup",
+  "lipstick",
+  "foundation",
+  "mascara",
+  "face cream",
+  "serum",
+  "sunscreen",
+  "nail polish",
+  "cosmetic",
+  "skincare",
+  "skin care",
+  // Household Supplies
+  "laundry detergent",
+  "dishwashing",
+  "cleaning spray",
+  "paper towel",
+  "toilet paper",
+  "trash bag",
+  "air freshener",
+  "sponge",
+  "detergent",
+  // Baby Products
+  "diaper",
+  "baby wipe",
+  "formula",
+  "baby lotion",
+  "baby shampoo",
+  // Pet Supplies
+  "cat litter",
+  "pet treat",
+  "pet hygiene",
+  // Office Consumables
+  "printer ink",
+  "toner",
+  "ink cartridge",
+  // Electronics Consumables
+  "battery",
+  "printer paper",
+  "filament",
+  "thermal paper",
+  // Automotive Consumables
+  "engine oil",
+  "coolant",
+  "washer fluid",
+  "fuel additive",
+  // Medical Consumables
+  "face mask",
+  "glove",
+  "test strip",
+  "bandage",
+  "disinfectant",
+  // Skincare
+  "moisturiser",
+  "moisturizer",
+  "face wash",
+  "cleanser",
+  "toner",
+  "mask",
+  "peel",
+  "exfoliant",
+  "face oil",
+  "ampoule",
+];
+
+// Returns true if the productType string matches any consumable category.
+const isConsumableProductType = (productType = "") => {
+  const pt = productType.toLowerCase().trim();
+  if (!pt) return false;
+  return CONSUMABLE_PRODUCT_TYPES.some(
+    (kw) => pt.includes(kw) || kw.includes(pt),
+  );
+};
+
+// Check exchange policy eligibility.
+//
+// Parameters:
+//   fulfillment_created_at  {string}  – ISO-8601 from fulfillments[0].created_at.
+//                                       The exchange window is measured from this
+//                                       date (shipment date), NOT order.created_at.
+//   product_type            {string}  – productType of the item (e.g. "Laptop Bags").
+//                                       Used to detect consumables. Pass "" if unknown.
+//
+// Returns:
+//   { eligible, days_allowed, days_since_fulfillment, days_remaining, reason }
+const getExchangePolicyEligibility = async (
+  fulfillment_created_at,
+  product_type = "",
+) => {
+  const POLICY_CACHE_KEY = "store_exchange_policy_parsed";
+
+  // Step 1: Check consumable type FIRST — no API call needed.
+  const consumable = isConsumableProductType(product_type);
+
+  if (consumable) {
+    return {
+      eligible: false,
+      days_allowed: null,
+      days_since_fulfillment: null,
+      reason: `"${product_type}" is a consumable product and cannot be exchanged or returned under our store policy.`,
+    };
+  }
+
+  // Step 2: Fetch exchange window days from the store policy.
+  let parsedPolicy = await getCache(POLICY_CACHE_KEY);
+
+  if (!parsedPolicy) {
+    try {
+      const policyResponse = await callShopifyApi("POST", "", {
+        query: `query { shop { refundPolicy { body } } }`,
+      });
+
+      const policyBody = policyResponse?.data?.shop?.refundPolicy?.body || "";
+
+      if (!policyBody) {
+        console.warn(
+          "[ExchangePolicy] ⚠ Policy body empty — allowing exchange",
+        );
+        return {
+          eligible: false,
+          days_allowed: null,
+          days_since_fulfillment: null,
+          reason: "Policy unavailable — proceeding",
+        };
+      }
+
+      // Ask OpenAI ONLY for the exchange window in days.
+      // We do NOT extract non-exchangeable keywords from the policy because
+      // that causes false positives — keywords like "final sale" and "non-returnable"
+      // appear in policy text and would incorrectly block every product.
+      // Consumable detection is handled by the hardcoded CONSUMABLE_PRODUCT_TYPES list above.
+      const prompt = `You are a policy parser. From this store policy HTML extract ONLY the exchange/return window in days (maximum days after delivery within which a customer can request an exchange or return).
+
+Return ONLY a compact JSON object, no markdown, no explanation:
+{ "exchange_window_days": <integer> }
+
+If no specific window is mentioned, return: { "exchange_window_days": null }
+
+Policy HTML:
+${policyBody.slice(0, 4000)}`;
+
+      const aiResponse = await axios.post(
+        "https://api.openai.com/v1/chat/completions",
+        {
+          model: OPENAI_MODEL,
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0,
+          max_tokens: 50,
+        },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+          },
+          timeout: 12000,
+        },
+      );
+
+      const raw =
+        aiResponse?.data?.choices?.[0]?.message?.content?.trim() || "{}";
+      parsedPolicy = JSON.parse(raw.replace(/```json|```/g, "").trim());
+
+      try {
+        await setCache(POLICY_CACHE_KEY, parsedPolicy);
+      } catch (cacheErr) {
+        console.warn("[ExchangePolicy] Cache set failed:", cacheErr?.message);
+      }
+    } catch (err) {
+      console.error(
+        "[ExchangePolicy] ✗ Policy fetch/parse failed:",
+        err?.message,
+      );
+      return {
+        eligible: true,
+        days_allowed: null,
+        days_since_fulfillment: null,
+        reason: "Policy check skipped — proceeding",
+      };
+    }
+  }
+
+  const daysAllowed = parsedPolicy?.exchange_window_days ?? null;
+
+  if (daysAllowed == null) {
+    return {
+      eligible: true,
+      days_allowed: null,
+      days_since_fulfillment: null,
+      reason: "No exchange window found in policy — proceeding.",
+    };
+  }
+
+  // Step 3: Check the fulfillment date window.
+  const fulfillmentDate = new Date(fulfillment_created_at);
+  const now = new Date();
+
+  if (isNaN(fulfillmentDate.getTime())) {
+    console.warn(
+      "[ExchangePolicy] ⚠ Could not parse fulfillment_created_at — allowing exchange",
+    );
+    return {
+      eligible: true,
+      days_allowed: daysAllowed,
+      days_since_fulfillment: null,
+      reason: "Could not parse fulfillment date",
+    };
+  }
+
+  const daysSince = (now - fulfillmentDate) / (1000 * 60 * 60 * 24);
+  const daysSinceFloor = Math.floor(daysSince);
+  const daysRemaining = Math.max(0, daysAllowed - daysSinceFloor);
+
+  if (daysSince > daysAllowed) {
+    return {
+      eligible: false,
+      days_allowed: daysAllowed,
+      days_since_fulfillment: daysSinceFloor,
+      days_remaining: 0,
+      reason: `Exchange window has expired. The policy allows exchanges within ${daysAllowed} day(s) of fulfillment. Your order was fulfilled ${daysSinceFloor} day(s) ago.`,
+    };
+  }
+
+  return {
+    eligible: true,
+    days_allowed: daysAllowed,
+    days_since_fulfillment: daysSinceFloor,
+    days_remaining: daysRemaining,
+    reason: `Order is within the ${daysAllowed}-day exchange window (fulfilled ${daysSinceFloor} day(s) ago, ${daysRemaining} day(s) remaining).`,
+  };
+};
+
 // Export environment variables and utility functions
 module.exports = {
   // envs
@@ -1188,6 +1704,7 @@ module.exports = {
   BACKEND_API_URL,
   OPENAI_API_KEY,
   OPENAI_MODEL,
+  WIDGET_KEY,
   // helpers
   callShopifyApi,
   callBackendAPI,
@@ -1207,4 +1724,7 @@ module.exports = {
   formatOrderTransactions,
   searchProductsByNames,
   formatRefundStatus,
+  ShopifyExchangeManager,
+  getExchangePolicyEligibility,
+  isConsumableProductType,
 };
