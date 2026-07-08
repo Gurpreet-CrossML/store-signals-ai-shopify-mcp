@@ -480,6 +480,198 @@ const getProductSortConfig = (sortKey) => {
   );
 };
 
+// Utility function to safely quote a value for Shopify's product search
+// query syntax. Values containing whitespace, colons, or quotes must be
+// wrapped in double quotes (e.g. product_type:"Makeup Brushes"), otherwise
+// Shopify's query parser splits on the whitespace and mis-parses the clause.
+const quoteSearchValue = (value) => {
+  const str = String(value ?? "").trim();
+  if (!str) return "";
+  const escaped = str.replace(/"/g, '\\"');
+  return /[\s:"]/.test(str) ? `"${escaped}"` : escaped;
+};
+
+// Utility function to fuzzy-match a caller-supplied term (e.g. a product
+// type or tag guess extracted from a customer's message) against the
+// store's real catalogue values. Matches case-insensitively and tolerates
+// simple plural/singular differences and substring containment in either
+// direction (e.g. "perfumes" ~ "Perfume", "oily skin" ~ "Oily Skin Care").
+// Returns the real, correctly-cased catalogue value, or null when nothing
+// close enough exists — callers should treat null as "not a real facet"
+// and fall back to free-text search rather than emitting a filter clause
+// for a value the store doesn't actually have.
+const groundTerm = (term, candidates = []) => {
+  if (!term || !Array.isArray(candidates) || candidates.length === 0) {
+    return null;
+  }
+
+  const normalize = (s) =>
+    String(s || "")
+      .toLowerCase()
+      .trim()
+      .replace(/s$/, "");
+
+  const target = normalize(term);
+  if (!target) return null;
+
+  const exact = candidates.find((c) => normalize(c) === target);
+  if (exact) return exact;
+
+  const partial = candidates.find((c) => {
+    const norm = normalize(c);
+    return norm.includes(target) || target.includes(norm);
+  });
+
+  return partial || null;
+};
+
+// Utility function to resolve caller-supplied product_type/vendor/tags
+// against the store's real catalogue metadata (fetched via storeMetadata()),
+// so search_products only ever emits Shopify filter clauses for values the
+// store actually carries. Terms with no close match are never silently
+// dropped — they're returned as extraKeywords so the intent still reaches
+// Shopify via free-text search instead of zeroing out the results.
+const resolveSearchFilters = (
+  { product_type, vendor, tags = [] },
+  metadata = {},
+) => {
+  const types = metadata?.types || [];
+  const collections = metadata?.collections || [];
+  const allTags = metadata?.tags || [];
+
+  const extraKeywords = [];
+
+  let resolvedType = null;
+  if (product_type) {
+    resolvedType =
+      groundTerm(product_type, types) || groundTerm(product_type, collections);
+    if (!resolvedType) extraKeywords.push(product_type);
+  }
+
+  const resolvedTags = [];
+  for (const tag of tags || []) {
+    const match = groundTerm(tag, allTags);
+    if (match) resolvedTags.push(match);
+    else if (tag) extraKeywords.push(tag);
+  }
+
+  return {
+    product_type: resolvedType,
+    vendor: vendor || null,
+    tags: resolvedTags,
+    extraKeywords,
+  };
+};
+
+// Utility function to build a Shopify product search query string from
+// structured filter inputs, combining free-text keywords with field-
+// qualified clauses. Shopify ANDs space-separated terms/clauses by default,
+// so a query like `"vitamin c" product_type:"Serum" tag:"Men" variants.price:<=8000`
+// narrows on all of them at once instead of relying on fuzzy full-text
+// matching alone.
+//
+// Empirically verified against a live store: an UNQUOTED multi-word free-text
+// term combined with a product_type: clause only loosely influences ranking
+// rather than acting as a hard filter (e.g. "vitamin c product_type:Serum"
+// also returned an unrelated hair serum). Quoting the free text as an exact
+// phrase makes it a real AND'd filter instead. This is only safe to do when
+// at least one other structured clause is present — a lone free-text query
+// (the common case, e.g. "makeup brushes") should keep Shopify's normal
+// fuzzy/loose relevance matching, since forcing an exact-phrase match there
+// would make simple searches far too strict.
+const buildShopifySearchQuery = ({
+  query = "",
+  product_type = null,
+  vendor = null,
+  tags = [],
+  min_price = null,
+  max_price = null,
+  availability = null,
+} = {}) => {
+  const clauses = [];
+
+  const hasStructuredClause = Boolean(
+    product_type ||
+    vendor ||
+    (tags && tags.length > 0) ||
+    min_price != null ||
+    max_price != null ||
+    availability,
+  );
+
+  const freeText = String(query || "").trim();
+  if (freeText) {
+    clauses.push(hasStructuredClause ? quoteSearchValue(freeText) : freeText);
+  }
+
+  if (product_type) {
+    clauses.push(`product_type:${quoteSearchValue(product_type)}`);
+  }
+
+  if (vendor) {
+    clauses.push(`vendor:${quoteSearchValue(vendor)}`);
+  }
+
+  for (const tag of tags || []) {
+    if (tag) clauses.push(`tag:${quoteSearchValue(tag)}`);
+  }
+
+  if (min_price != null && min_price !== "") {
+    clauses.push(`variants.price:>=${min_price}`);
+  }
+
+  if (max_price != null && max_price !== "") {
+    clauses.push(`variants.price:<=${max_price}`);
+  }
+
+  if (availability === "in_stock") clauses.push("available_for_sale:true");
+  if (availability === "out_of_stock") clauses.push("available_for_sale:false");
+
+  return clauses.join(" ").trim();
+};
+
+// Utility function to build a stable, filter-aware cache key for
+// search_products. SemanticCache (cache.js) only does an exact-match lookup
+// when the key contains the `filter_by_` marker — otherwise it falls
+// through to an LLM similarity judge that only ever sees the key string. Any
+// structured filter MUST be folded into that marker, or two searches that
+// differ only by filters (e.g. tag:Men vs tag:Women) but have similar
+// free-text could be judged "similar" and collide on the wrong cached result.
+const buildSearchCacheKey = ({
+  query,
+  product_type,
+  vendor,
+  tags = [],
+  min_price,
+  max_price,
+  availability,
+  sort_by,
+  full_details,
+}) => {
+  const hasStructuredFilters =
+    Boolean(product_type) ||
+    Boolean(vendor) ||
+    (tags && tags.length > 0) ||
+    min_price != null ||
+    max_price != null ||
+    Boolean(availability) ||
+    (sort_by && sort_by !== "relevance");
+
+  const descriptor = [
+    product_type || "",
+    vendor || "",
+    [...(tags || [])].sort().join(","),
+    min_price ?? "",
+    max_price ?? "",
+    availability || "",
+    sort_by || "",
+  ].join("|");
+
+  const filterKey = hasStructuredFilters ? `filter_by_${descriptor}` : "";
+
+  return `search:${query}:${filterKey}:${full_details ? "full" : "brief"}`;
+};
+
 // Utility function to parse space input and convert dimensions to centimeters. This can be used to filter products based on available space by extracting dimensions from product descriptions and converting them to a standard unit for comparison.
 const parseSpaceInput = (space) => {
   if (!space || typeof space !== "object") {
@@ -1727,4 +1919,9 @@ module.exports = {
   ShopifyExchangeManager,
   getExchangePolicyEligibility,
   isConsumableProductType,
+  quoteSearchValue,
+  groundTerm,
+  resolveSearchFilters,
+  buildShopifySearchQuery,
+  buildSearchCacheKey,
 };
