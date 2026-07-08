@@ -287,7 +287,12 @@ const createMcpServer = () => {
 
           const resp = await callShopifyApi("POST", "", {
             query: productSearchByQuery,
-            variables: { search: searchQuery, sortKey, reverse, first: page_size },
+            variables: {
+              search: searchQuery,
+              sortKey,
+              reverse,
+              first: page_size,
+            },
           });
 
           if (resp?.data?.products?.edges?.length > 0) {
