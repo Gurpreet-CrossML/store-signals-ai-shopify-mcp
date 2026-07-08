@@ -1,13 +1,13 @@
 // Query to search products by a free-text `search` string, which may also
 // contain field-qualified clauses (product_type:, vendor:, tag:,
 // variants.price, available_for_sale:) built by buildShopifySearchQuery.
-// - Variables: { search: String!, sortKey, reverse, first? }
-// - Returns: up to `first` (default 15) matching products with selected
-//   fields, including images, price range, and up to 20 variants per product.
-//   The larger default pool (vs. the previous 5) gives the calling agent's
-//   own audience/budget/attribute post-filtering enough surviving candidates
-//   to work with once server-side filters have already narrowed the set.
-const productSearchByQuery = `query getProducts($search: String!, $sortKey: ProductSortKeys!, $reverse: Boolean!, $first: Int = 15) {
+// - Variables: { search: String!, sortKey, reverse, first: Int! }
+// - Returns: up to `first` matching products with selected fields, including
+//   images, price range, and up to 20 variants per product.
+//   The `first` value is passed dynamically from the search_products tool
+//   in server.js (default: 15) — giving the calling agent's own
+//   audience/budget/attribute post-filtering enough surviving candidates.
+const productSearchByQuery = `query getProducts($search: String!, $sortKey: ProductSortKeys!, $reverse: Boolean!, $first: Int!) {
   products(first: $first, query: $search, sortKey:$sortKey, reverse:$reverse) {
     edges {
       node {

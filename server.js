@@ -84,6 +84,7 @@ const createMcpServer = () => {
     @param {string} session_id: Session ID
     @param {string} store_code: Store name or code
     @param {boolean} full_details: Whether to return full product details including variants, images, and URLs
+    @param {number} page_size: Number of products to return (default: 15)
     @param {string} product_type: Category/type filter, e.g. "Perfume", "Sunscreen" (matched against the store's real types/collections)
     @param {string} vendor: Brand filter, e.g. "Chanel" - only when the customer names a specific brand
     @param {string[]} tags: Attribute filters as store tags - gender/audience, skin/hair type or concern, material, occasion, feature, dietary preference, etc.
@@ -146,6 +147,10 @@ const createMcpServer = () => {
         .nonnegative()
         .optional()
         .describe("Maximum price filter (e.g., 500 for products under $500)"),
+      page_size: z
+        .number()
+        .optional()
+        .describe("Number of products to return (default: 15)"),
       sort_by: z
         .enum([
           "relevance",
@@ -166,6 +171,7 @@ const createMcpServer = () => {
       session_id,
       store_code,
       full_details = false,
+      page_size = 15,
       product_type = null,
       vendor = null,
       tags = [],
@@ -281,7 +287,7 @@ const createMcpServer = () => {
 
           const resp = await callShopifyApi("POST", "", {
             query: productSearchByQuery,
-            variables: { search: searchQuery, sortKey, reverse },
+            variables: { search: searchQuery, sortKey, reverse, first: page_size },
           });
 
           if (resp?.data?.products?.edges?.length > 0) {
@@ -326,6 +332,7 @@ const createMcpServer = () => {
                 search: searchQuery,
                 sortKey: sortKey,
                 reverse: reverse,
+                first: page_size,
               },
             };
 
