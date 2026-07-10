@@ -84,7 +84,8 @@ const createMcpServer = () => {
     @param {string} session_id: Session ID
     @param {string} store_code: Store name or code
     @param {boolean} full_details: Whether to return full product details including variants, images, and URLs
-    @param {number} page_size: Number of products to return (default: 15)
+    @param {number} page_size: Number of products to return per page (default: 8)
+    @param {number} current_page: Page number (default: 1)
     @param {string} product_type: Category/type filter, e.g. "Perfume", "Sunscreen" (matched against the store's real types/collections)
     @param {string} vendor: Brand filter, e.g. "Chanel" - only when the customer names a specific brand
     @param {string[]} tags: Attribute filters as store tags - gender/audience, skin/hair type or concern, material, occasion, feature, dietary preference, etc.
@@ -150,7 +151,8 @@ const createMcpServer = () => {
       page_size: z
         .number()
         .optional()
-        .describe("Number of products to return (default: 15)"),
+        .describe("Number of products to return per page (default: 8)"),
+      current_page: z.number().optional().describe("Page number (default: 1)"),
       sort_by: z
         .enum([
           "relevance",
@@ -171,7 +173,8 @@ const createMcpServer = () => {
       session_id,
       store_code,
       full_details = false,
-      page_size = 15,
+      page_size = 8,
+      current_page = 1,
       product_type = null,
       vendor = null,
       tags = [],
@@ -244,6 +247,8 @@ const createMcpServer = () => {
           ...toSearchParams(baseFilters),
           sort_by,
           full_details,
+          page_size,
+          current_page,
         });
         const cached = await getCache(cacheKey);
         if (cached) {
@@ -291,13 +296,36 @@ const createMcpServer = () => {
               search: searchQuery,
               sortKey,
               reverse,
-              first: page_size,
+              first: current_page * page_size,
             },
           });
 
           if (resp?.data?.products?.edges?.length > 0) {
-            searchResponse = resp;
-            break;
+            // Slice the results for the requested page
+            const startIndex = (current_page - 1) * page_size;
+            const endIndex = startIndex + page_size;
+            const totalFetched = resp.data.products.edges.length;
+            const slicedEdges = resp.data.products.edges.slice(
+              startIndex,
+              endIndex,
+            );
+
+            if (slicedEdges.length > 0) {
+              searchResponse = resp;
+              searchResponse.data.products.edges = slicedEdges;
+              // Add a flag to indicate if there are more products after this page
+              searchResponse.data.products.pageInfo = {
+                hasNextPage:
+                  totalFetched > endIndex ||
+                  resp.data.products.pageInfo?.hasNextPage,
+                hasPreviousPage: current_page > 1,
+              };
+              break;
+            } else if (totalFetched > 0) {
+              // We got results, but not enough to reach the requested page.
+              // We should still break to avoid relaxing filters unnecessarily.
+              break;
+            }
           }
         }
 
@@ -314,6 +342,9 @@ const createMcpServer = () => {
         // Final response object to be returned, which may include related products if found.
         const result = {
           products: formattedProducts,
+          ...(searchResponse?.data?.products?.pageInfo && {
+            page_info: searchResponse.data.products.pageInfo,
+          }),
         };
 
         // If no products found with any structured relaxation, fall back to
@@ -337,7 +368,7 @@ const createMcpServer = () => {
                 search: searchQuery,
                 sortKey: sortKey,
                 reverse: reverse,
-                first: page_size,
+                first: current_page * page_size,
               },
             };
 
@@ -347,15 +378,31 @@ const createMcpServer = () => {
               kwResponse?.data?.products?.edges &&
               kwResponse?.data?.products?.edges?.length > 0
             ) {
-              const formattedProducts = formatProducts(
-                kwResponse.data.products.edges,
-                session_id,
-                store_code,
-                full_details,
+              const startIndex = (current_page - 1) * page_size;
+              const endIndex = startIndex + page_size;
+              const totalFetched = kwResponse.data.products.edges.length;
+              const slicedEdges = kwResponse.data.products.edges.slice(
+                startIndex,
+                endIndex,
               );
 
-              result.products = formattedProducts;
-              break;
+              if (slicedEdges.length > 0) {
+                const formattedProducts = formatProducts(
+                  slicedEdges,
+                  session_id,
+                  store_code,
+                  full_details,
+                );
+
+                result.products = formattedProducts;
+                result.page_info = {
+                  hasNextPage:
+                    totalFetched > endIndex ||
+                    kwResponse.data.products.pageInfo?.hasNextPage,
+                  hasPreviousPage: current_page > 1,
+                };
+                break;
+              }
             }
           }
         }
