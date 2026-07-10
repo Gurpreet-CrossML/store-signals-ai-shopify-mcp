@@ -9,6 +9,10 @@
 //   audience/budget/attribute post-filtering enough surviving candidates.
 const productSearchByQuery = `query getProducts($search: String!, $sortKey: ProductSortKeys!, $reverse: Boolean!, $first: Int!) {
   products(first: $first, query: $search, sortKey:$sortKey, reverse:$reverse) {
+    pageInfo {
+      hasNextPage
+      hasPreviousPage
+    }
     edges {
       node {
         id

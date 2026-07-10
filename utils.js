@@ -647,6 +647,8 @@ const buildSearchCacheKey = ({
   availability,
   sort_by,
   full_details,
+  page_size = 15,
+  current_page = 1,
 }) => {
   const hasStructuredFilters =
     Boolean(product_type) ||
@@ -668,8 +670,9 @@ const buildSearchCacheKey = ({
   ].join("|");
 
   const filterKey = hasStructuredFilters ? `filter_by_${descriptor}` : "";
+  const pageKey = `page${current_page}x${page_size}`;
 
-  return `search:${query}:${filterKey}:${full_details ? "full" : "brief"}`;
+  return `search:${query}:${filterKey}:${pageKey}:${full_details ? "full" : "brief"}`;
 };
 
 // Utility function to parse space input and convert dimensions to centimeters. This can be used to filter products based on available space by extracting dimensions from product descriptions and converting them to a standard unit for comparison.
