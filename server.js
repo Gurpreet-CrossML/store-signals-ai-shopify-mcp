@@ -56,7 +56,16 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-const createMcpServer = () => {
+const createMcpServer = (configs = {}) => {
+  const { baseUrl, storefrontAccessToken, adminAccessToken, storeCode, sessionId } = configs;
+
+  // fail fast if the backend forgot to send required creds
+  if (!baseUrl || !storefrontAccessToken || !adminAccessToken || !storeCode || !sessionId) {
+    throw new Error(
+      "createMcpServer: missing required config (baseUrl / adminAccessToken / adminAccessToken / storeCode / sessionId)",
+    );
+  }
+
   // Initialize the MCP server
   const server = new McpServer({
     name: MCP_NAME,
@@ -81,8 +90,6 @@ const createMcpServer = () => {
 
     Parameters:
     @param {string} query: Free-text search keywords (product name, description terms, descriptive attributes)
-    @param {string} session_id: Session ID
-    @param {string} store_code: Store name or code
     @param {boolean} full_details: Whether to return full product details including variants, images, and URLs
     @param {number} page_size: Number of products to return (default: 15)
     @param {string} product_type: Category/type filter, e.g. "Perfume", "Sunscreen" (matched against the store's real types/collections)
@@ -99,8 +106,6 @@ const createMcpServer = () => {
         .describe(
           "Free-text search keywords (product name, description terms, or descriptive attributes not covered by product_type/tags - e.g. 'vitamin c', 'oily skin', 'wireless').",
         ),
-      session_id: z.string().describe("Session ID"),
-      store_code: z.string().describe("Store name/code"),
       full_details: z
         .boolean()
         .optional()
@@ -168,8 +173,6 @@ const createMcpServer = () => {
     },
     async ({
       query,
-      session_id,
-      store_code,
       full_details = false,
       page_size = 15,
       product_type = null,
@@ -197,7 +200,12 @@ const createMcpServer = () => {
         let extraKeywords = [];
 
         if (product_type || vendor || (tags && tags.length > 0)) {
-          const metadata = await storeMetadata();
+          const metadata = await storeMetadata(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            storeCode,
+          );
           const resolved = resolveSearchFilters(
             { product_type, vendor, tags },
             metadata,
@@ -244,10 +252,11 @@ const createMcpServer = () => {
           ...toSearchParams(baseFilters),
           sort_by,
           full_details,
+          storeCode,
         });
         const cached = await getCache(cacheKey);
         if (cached) {
-          logProductViewEvents(cached.products, session_id, store_code);
+          logProductViewEvents(cached.products, sessionId, storeCode);
           return {
             content: [
               {
@@ -285,7 +294,7 @@ const createMcpServer = () => {
           if (searchQuery === lastTriedQuery) continue;
           lastTriedQuery = searchQuery;
 
-          const resp = await callShopifyApi("POST", "", {
+          const resp = await callShopifyApi(baseUrl, storefrontAccessToken, adminAccessToken, "POST", "", {
             query: productSearchByQuery,
             variables: {
               search: searchQuery,
@@ -304,9 +313,10 @@ const createMcpServer = () => {
         // Format the products data to be returned
         let formattedProducts = searchResponse
           ? formatProducts(
+              baseUrl,
               searchResponse.data.products.edges,
-              session_id,
-              store_code,
+              sessionId,
+              storeCode,
               full_details,
             )
           : [];
@@ -319,7 +329,7 @@ const createMcpServer = () => {
         // If no products found with any structured relaxation, fall back to
         // LLM-based keyword expansion as the last resort.
         if (result?.products?.length === 0) {
-          const keywords = await extractSearchTerms(query);
+          const keywords = await extractSearchTerms(query, baseUrl, storefrontAccessToken, adminAccessToken, storeCode);
           console.log(
             `No products found for this query "${query}", retrying with keywords - [${keywords}]...`,
           );
@@ -341,16 +351,17 @@ const createMcpServer = () => {
               },
             };
 
-            const kwResponse = await callShopifyApi("POST", "", gQuery);
+            const kwResponse = await callShopifyApi(baseUrl, storefrontAccessToken, adminAccessToken, "POST", "", gQuery);
 
             if (
               kwResponse?.data?.products?.edges &&
               kwResponse?.data?.products?.edges?.length > 0
             ) {
               const formattedProducts = formatProducts(
+                baseUrl,
                 kwResponse.data.products.edges,
-                session_id,
-                store_code,
+                sessionId,
+                storeCode,
                 full_details,
               );
 
@@ -378,7 +389,7 @@ const createMcpServer = () => {
         for (let p of result.products) {
           console.log("Fetching related products for ID:", p.id);
 
-          const relatedProducts = await fetchRelatedProducts(p.id);
+          const relatedProducts = await fetchRelatedProducts(p.id, baseUrl, storefrontAccessToken, adminAccessToken);
 
           console.log(`Related products for ${p.id}:`, relatedProducts);
 
@@ -440,8 +451,6 @@ const createMcpServer = () => {
 
     Parameters:
     @param {string[]} product_ids  One or more numeric or GID product IDs
-    @param {string}   session_id   Session ID
-    @param {string}   store_code   Store name or code
     `,
     {
       product_ids: z
@@ -451,10 +460,8 @@ const createMcpServer = () => {
           "One or more product IDs. Accepts plain numeric IDs ('123456789') " +
             "or full GIDs ('gid://shopify/Product/123456789').",
         ),
-      session_id: z.string().describe("Session ID"),
-      store_code: z.string().describe("Store name/code"),
     },
-    async ({ product_ids, session_id, store_code }) => {
+    async ({ product_ids }) => {
       try {
         // Deduplicate + normalize to full GID
         const gids = [
@@ -475,7 +482,7 @@ const createMcpServer = () => {
         const toFetch = [];
 
         for (const id of numericIds) {
-          const cached = await getCache(`product:${id}`);
+          const cached = await getCache(`product:${id}:store:${storeCode}`);
           if (cached) cachedProducts.push(cached);
           else toFetch.push(id);
         }
@@ -487,7 +494,7 @@ const createMcpServer = () => {
 
         // Helper to fetch a single product by GID, returning the product node or null if not found.
         const fetchOne = (gid) =>
-          callShopifyApi("POST", "", singleProductQuery(gid)).then(
+          callShopifyApi(baseUrl, storefrontAccessToken, adminAccessToken, "POST", "", singleProductQuery(gid)).then(
             (res) => res?.data?.product ?? null,
           );
 
@@ -511,9 +518,10 @@ const createMcpServer = () => {
 
         const formattedFetched = fetchedResults.length
           ? formatProducts(
+              baseUrl,
               fetchedResults.map((node) => ({ node })),
-              session_id,
-              store_code,
+              sessionId,
+              storeCode,
               true,
             )
           : [];
@@ -521,7 +529,7 @@ const createMcpServer = () => {
         // cache fetched products
         for (const p of formattedFetched) {
           try {
-            await setCache(`product:${p.id}`, p);
+            await setCache(`product:${p.id}:store:${storeCode}`, p);
           } catch (e) {
             console.warn("product cache set failed:", e?.message || e);
           }
@@ -537,7 +545,7 @@ const createMcpServer = () => {
           };
         }
 
-        logProductViewEvents(formattedProducts, session_id, store_code);
+        logProductViewEvents(formattedProducts, sessionId, storeCode);
 
         const responsePayload = {
           products: formattedProducts,
@@ -572,21 +580,17 @@ const createMcpServer = () => {
     `Fetch up to 5 products, sorted by Shopify sort options. Supported sort keys: relevance, price_asc, price_desc, newest, best_selling.
 
     Parameters:
-    @param {string} session_id: Session ID
-    @param {string} store_code: Store name or code
     @param {string} [sort_key]: Sort key. Supported values: relevance, price_asc, price_desc, newest, best_selling, featured.
     `,
     {
-      session_id: z.string().describe("Session ID"),
-      store_code: z.string().describe("Store name/code"),
       sort_key: z.string().describe("Sort key for the product list"),
     },
-    async ({ session_id, store_code, sort_key }) => {
+    async ({ sort_key }) => {
       try {
-        const cacheKey = `get_products_sorted:${String(sort_key || "relevance")}`;
+        const cacheKey = `get_products_sorted:${String(sort_key || "relevance")}:store:${storeCode}`;
         const cached = await getCache(cacheKey);
         if (cached) {
-          logProductViewEvents(cached.products, session_id, store_code);
+          logProductViewEvents(cached.products, sessionId, storeCode);
           return {
             content: [
               {
@@ -607,14 +611,15 @@ const createMcpServer = () => {
           },
         };
 
-        const response = await callShopifyApi("POST", "", graphqlQuery);
+        const response = await callShopifyApi(baseUrl, storefrontAccessToken, adminAccessToken, "POST", "", graphqlQuery);
 
         const products = response?.data?.products?.edges || [];
 
         const formattedProducts = formatProducts(
+          baseUrl,
           products,
-          session_id,
-          store_code,
+          sessionId,
+          storeCode,
           false,
         );
 
@@ -658,7 +663,12 @@ const createMcpServer = () => {
   `,
     async () => {
       try {
-        const metadata = await storeMetadata();
+        const metadata = await storeMetadata(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          storeCode,
+        );
 
         return {
           content: [
@@ -825,7 +835,7 @@ const createMcpServer = () => {
     {},
     async () => {
       try {
-        const cacheKey = "available_discounts";
+        const cacheKey = `available_discounts:store:${storeCode}`;
         const cached = await getCache(cacheKey);
         if (cached) {
           return {
@@ -842,7 +852,7 @@ const createMcpServer = () => {
           query: discountQuery,
         };
 
-        const response = await callShopifyApi("POST", "", graphqlQuery, true);
+        const response = await callShopifyApi(baseUrl, storefrontAccessToken, adminAccessToken, "POST", "", graphqlQuery, true);
 
         if (
           !response?.data?.discountNodes?.edges ||
@@ -919,18 +929,16 @@ const createMcpServer = () => {
 
   Parameters:
   @param {string} email - User email to receive OTP
-  @param {string} session_id - Unique session identifier
   `,
     {
       email: z.string().email().describe("User email address"),
-      session_id: z.string().min(5).describe("Unique session identifier"),
     },
-    async ({ email, session_id }) => {
+    async ({ email }) => {
       try {
         const verificationStatus = await callBackendAPI(
           "POST",
           "/chat/email/verify-status/",
-          { thread_id: session_id, email: email },
+          { thread_id: sessionId, email: email },
         );
         if (verificationStatus && verificationStatus?.is_verified) {
           return {
@@ -943,6 +951,9 @@ const createMcpServer = () => {
 
         // Check customer existence (Admin API only)
         const customerResponse = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
           "GET",
           `/admin/api/2024-01/customers/search.json?query=email:${encodeURIComponent(email)}`,
         );
@@ -966,7 +977,7 @@ const createMcpServer = () => {
           "POST",
           "/chat/otp/generate/",
           {
-            thread_id: session_id,
+            thread_id: sessionId,
             email: email,
           },
         );
@@ -1021,17 +1032,15 @@ const createMcpServer = () => {
   Parameters:
   @param {string} email - User email used for verification
   @param {string} otp_code - 6 digit OTP
-  @param {string} session_id - Session identifier
   `,
     {
       email: z.string().email().describe("User email"),
       otp_code: z.string().length(6).describe("6 digit OTP"),
-      session_id: z.string().describe("Session identifier"),
     },
-    async ({ email, otp_code, session_id }) => {
+    async ({ email, otp_code }) => {
       try {
         const payload = {
-          thread_id: session_id,
+          thread_id: sessionId,
           email: email,
           otp: otp_code,
         };
@@ -1075,25 +1084,23 @@ const createMcpServer = () => {
   Parameters:
   @param {string} email: Order identifier (e.g. "test@example.com")
   @param {string} order_id: Order identifier (e.g. "1026")
-  @param {string} session_id - Session identifier
   @param {string} customer_id - Customer ID
   `,
     {
       email: z.string().describe("Order email (e.g. 'test@example.com')"),
       order_id: z.string().describe("Order ID (e.g. '1026')"),
-      session_id: z.string().describe("Session identifier"),
       customer_id: z.coerce
         .string()
         .describe(
           "Customer ID — always passed as a string even if it looks like a number",
         ),
     },
-    async ({ email, order_id, session_id, customer_id = "" }) => {
+    async ({ email, order_id, customer_id = "" }) => {
       if (!customer_id) {
         const verificationStatus = await callBackendAPI(
           "POST",
           "/chat/email/verify-status/",
-          { thread_id: session_id, email: email },
+          { thread_id: sessionId, email: email },
         );
 
         if (!verificationStatus && !verificationStatus?.is_verified) {
@@ -1111,6 +1118,9 @@ const createMcpServer = () => {
 
       try {
         const response = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
           "GET",
           `/admin/api/2024-04/orders.json?email=${encodeURIComponent(email)}&status=any`,
         );
@@ -1177,17 +1187,18 @@ const createMcpServer = () => {
   @param {string} order_id - Order number (e.g. "1006")
   @param {string} email - Customer email
   @param {string} reason - Cancellation reason
-  @param {string} session_id - Session identifier
   `,
     {
       order_id: z.string().describe("Order number"),
       email: z.string().email().describe("Customer email"),
       reason: z.string().describe("Cancellation reason"),
-      session_id: z.string().describe("Session identifier"),
     },
-    async ({ order_id, email, reason, session_id }) => {
+    async ({ order_id, email, reason }) => {
       try {
         const response = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
           "GET",
           `/admin/api/2024-04/orders.json?name=%23${order_id}&status=any&email=${encodeURIComponent(email)}`,
         );
@@ -1243,6 +1254,9 @@ const createMcpServer = () => {
         }
 
         const cancelResponse = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
           "POST",
           `/admin/api/2024-04/orders/${order.id}/cancel.json`,
           { reason: reason, email: true },
@@ -1258,7 +1272,7 @@ const createMcpServer = () => {
         const cancelled = cancelResponse.order;
 
         console.log(
-          `cancel_order: success | order_id=${cancelled.order_number} | email=${email} | session=${session_id} | reason=${reason}`,
+          `cancel_order: success | order_id=${cancelled.order_number} | email=${email} | session=${sessionId} | reason=${reason}`,
         );
 
         return {
@@ -1403,7 +1417,7 @@ const createMcpServer = () => {
           return c;
         });
 
-        const editor = new ShopifyOrderEditor();
+        const editor = new ShopifyOrderEditor(baseUrl, adminAccessToken);
         const result = await editor.modifyOrder(orderId, normalisedChanges, {
           notifyCustomer: notify_customer,
           staffNote: staff_note,
@@ -1444,20 +1458,18 @@ const createMcpServer = () => {
   Parameters:
   @param {string} email
   @param {string} order_id
-  @param {string} session_id
   @param {string} customer_id
   `,
     {
       email: z.string().describe("Order email"),
       order_id: z.string().describe("Order ID"),
-      session_id: z.string().describe("Session identifier"),
       customer_id: z.coerce
         .string()
         .describe(
           "Customer ID — always passed as a string even if it looks like a number",
         ),
     },
-    async ({ email, order_id, session_id, customer_id = "" }) => {
+    async ({ email, order_id, customer_id = "" }) => {
       try {
         // Verify email first
         if (!customer_id) {
@@ -1465,7 +1477,7 @@ const createMcpServer = () => {
             "POST",
             "/chat/email/verify-status/",
             {
-              thread_id: session_id,
+              thread_id: sessionId,
               email,
             },
           );
@@ -1485,6 +1497,9 @@ const createMcpServer = () => {
 
         // Find order
         const orderResponse = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
           "GET",
           `/admin/api/2024-04/orders.json?email=${encodeURIComponent(
             email,
@@ -1509,6 +1524,9 @@ const createMcpServer = () => {
 
         // Get transactions
         const transactionResponse = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
           "GET",
           `/admin/api/2024-04/orders/${currentOrder.id}/transactions.json`,
         );
@@ -1555,25 +1573,23 @@ const createMcpServer = () => {
   Parameters:
   @param {string} email       - Customer email associated with the order
   @param {string} order_id    - Short order number (e.g. "1026")
-  @param {string} session_id  - Session identifier
   @param {string} customer_id - Customer ID (optional; skips email verification if provided)
   `,
     {
       email: z.string().email().describe("Customer email address"),
       order_id: z.string().describe("Short order number (e.g. '1026')"),
-      session_id: z.string().describe("Session identifier"),
       customer_id: z
         .string()
         .describe("Customer ID (optional, pass empty string if unknown)"),
     },
-    async ({ email, order_id, session_id, customer_id = "" }) => {
+    async ({ email, order_id, customer_id = "" }) => {
       try {
         //1. Email verification (skipped when customer_id is known)
         if (!customer_id) {
           const verificationStatus = await callBackendAPI(
             "POST",
             "/chat/email/verify-status/",
-            { thread_id: session_id, email },
+            { thread_id: sessionId, email },
           );
 
           if (!verificationStatus?.is_verified) {
@@ -1591,6 +1607,9 @@ const createMcpServer = () => {
 
         //2. Find the order via REST (same pattern as get_order_detail)
         const ordersResponse = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
           "GET",
           `/admin/api/2024-04/orders.json?email=${encodeURIComponent(email)}&status=any`,
         );
@@ -1625,6 +1644,9 @@ const createMcpServer = () => {
         const shopifyOrderGid = `gid://shopify/Order/${restOrder.id}`;
 
         const graphqlResponse = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
           "POST",
           "",
           { query: refundQuery, variables: { id: shopifyOrderGid } },
@@ -1649,7 +1671,7 @@ const createMcpServer = () => {
         const payload = formatRefundStatus(restOrder, gqlOrder);
 
         console.log(
-          `get_refund_status: order_id=${order_id} | status=${payload.refund_status} | session=${session_id}`,
+          `get_refund_status: order_id=${order_id} | status=${payload.refund_status} | session=${sessionId}`,
         );
 
         return {
@@ -1692,8 +1714,6 @@ const createMcpServer = () => {
 
   Parameters:
   @param {string[]} product_names: Array of product names to search for
-  @param {string}   session_id:    Session ID
-  @param {string}   store_code:    Store name or code
   @param {boolean}  full_details:  Whether to return full product details including variants, images, and URLs. Defaults to false.
   `,
     {
@@ -1703,8 +1723,6 @@ const createMcpServer = () => {
         .describe(
           "Array of product names to search for, e.g. ['Product 1', 'Product 2'].",
         ),
-      session_id: z.string().describe("Session ID"),
-      store_code: z.string().describe("Store name/code"),
       full_details: z
         .boolean()
         .optional()
@@ -1712,12 +1730,15 @@ const createMcpServer = () => {
           "Whether to return full product details including variants, images, and URLs. Defaults to false.",
         ),
     },
-    async ({ product_names, session_id, store_code, full_details = false }) => {
+    async ({ product_names, full_details = false }) => {
       try {
         const results = await searchProductsByNames(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          storeCode,
           product_names,
-          session_id,
-          store_code,
+          sessionId,
           full_details,
         );
 
@@ -1764,7 +1785,6 @@ const createMcpServer = () => {
   @param {string[]} [product_tags]       Tags from the order line item (optional).
                                          Used to detect non-returnable products
                                          (e.g. ["serum", "final-sale"]).
-  @param {string}  [session_id]          Optional session ID for logging
   @param {string}  [staff_note]          Internal note (default: "Exchange via MCP")
   `,
     {
@@ -1841,7 +1861,6 @@ const createMcpServer = () => {
           "productType of the item being exchanged (e.g. 'Laptop Bags'). " +
             "Used to detect consumable/non-returnable product types. Pass empty string if unknown.",
         ),
-      session_id: z.string().optional().describe("Session ID for logging."),
       staff_note: z
         .string()
         .optional()
@@ -1853,7 +1872,6 @@ const createMcpServer = () => {
       return_items,
       exchange_items,
       product_type,
-      session_id,
     }) => {
       try {
         // ── Guard: detect order NUMBER passed instead of shopify ORDER ID ────────
@@ -1889,6 +1907,10 @@ const createMcpServer = () => {
 
         // ── Step 1: policy eligibility check ────────────────────────────────────
         const policyCheck = await getExchangePolicyEligibility(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          storeCode,
           fulfillment_created_at,
           product_type,
         );
@@ -1937,17 +1959,17 @@ const createMcpServer = () => {
           quantity: item.quantity,
         }));
 
-        const exchangeManager = new ShopifyExchangeManager();
+        const exchangeManager = new ShopifyExchangeManager(baseUrl, adminAccessToken);
         const result = await exchangeManager.exchangeItems(
           order_id,
           normalisedReturnItems,
           normalisedExchangeItems,
         );
 
-        // Optionally log the event if session_id provided
-        if (session_id) {
+        // Optionally log the event if sessionId provided
+        if (sessionId) {
           await callBackendAPI("POST", "/chat/bot-events/", {
-            thread_id: session_id,
+            thread_id: sessionId,
             event_type: "exchange_items",
             order_id: order_id,
             return_items: JSON.stringify(return_items),
@@ -2013,6 +2035,10 @@ const createMcpServer = () => {
     async ({ fulfillment_created_at, product_type = "" }) => {
       try {
         const result = await getExchangePolicyEligibility(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          storeCode,
           fulfillment_created_at,
           product_type,
         );
@@ -2072,7 +2098,15 @@ app.use(
 // HTTP sessions each own their transport without conflict.
 app.post("/mcp", async (req, res) => {
   try {
-    const server = createMcpServer();
+    const configs = {
+      baseUrl: req.headers["x-base-url"],
+      storefrontAccessToken: req.headers["x-storefront-access-token"],
+      adminAccessToken: req.headers["x-admin-access-token"],
+      storeCode: req.headers["x-store-code"],
+      sessionId: req.headers["x-session-id"],
+    };
+
+    const server = createMcpServer(configs);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
