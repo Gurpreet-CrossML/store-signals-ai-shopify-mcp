@@ -301,7 +301,12 @@ const formatProducts = (
 };
 
 // Utility function to fetch store metadata like product tags, types, collections, and categories. This metadata can be used for various purposes like improving search relevance, generating search queries, etc.
-const storeMetadata = async (base_url, storefront_token, admin_token, store_code) => {
+const storeMetadata = async (
+  base_url,
+  storefront_token,
+  admin_token,
+  store_code,
+) => {
   const cacheKey = `store_metadata:store:${store_code}`;
 
   try {
@@ -314,7 +319,14 @@ const storeMetadata = async (base_url, storefront_token, admin_token, store_code
       query: storeMetadataQuery,
     };
 
-    const result = await callShopifyApi(base_url, storefront_token, admin_token, "POST", "", graphqlQuery);
+    const result = await callShopifyApi(
+      base_url,
+      storefront_token,
+      admin_token,
+      "POST",
+      "",
+      graphqlQuery,
+    );
 
     if (result.errors) {
       return {
@@ -373,13 +385,24 @@ const storeMetadata = async (base_url, storefront_token, admin_token, store_code
 };
 
 // Utility function to extract relevant search terms from a user query using OpenAI's language model. It uses the store metadata to generate more accurate and relevant search terms that can be used to query the product catalog.
-const extractSearchTerms = async (query, base_url, storefront_token, admin_token, store_code) => {
+const extractSearchTerms = async (
+  query,
+  base_url,
+  storefront_token,
+  admin_token,
+  store_code,
+) => {
   if (!query || typeof query !== "string") {
     return [];
   }
 
   try {
-    const metadata = await storeMetadata(base_url, storefront_token, admin_token, store_code);
+    const metadata = await storeMetadata(
+      base_url,
+      storefront_token,
+      admin_token,
+      store_code,
+    );
 
     const prompt = `You are an eCommerce search query generator.
 
@@ -436,7 +459,12 @@ const extractSearchTerms = async (query, base_url, storefront_token, admin_token
 };
 
 // Utility function to fetch related products for a given product ID using Shopify's product recommendations API. This can be used to provide additional product suggestions to users based on the products they are viewing or have shown interest in.
-const fetchRelatedProducts = async (product_id, base_url, storefront_token, admin_token) => {
+const fetchRelatedProducts = async (
+  product_id,
+  base_url,
+  storefront_token,
+  admin_token,
+) => {
   try {
     if (!product_id) return [];
 
@@ -448,7 +476,14 @@ const fetchRelatedProducts = async (product_id, base_url, storefront_token, admi
     };
 
     // Call Shopify API
-    const searchResponse = await callShopifyApi(base_url, storefront_token, admin_token, "POST", "", graphqlQuery);
+    const searchResponse = await callShopifyApi(
+      base_url,
+      storefront_token,
+      admin_token,
+      "POST",
+      "",
+      graphqlQuery,
+    );
 
     const recommendations = searchResponse?.data?.productRecommendations || [];
 
@@ -1543,7 +1578,14 @@ const searchProductsByNames = async (
         },
       };
 
-      const searchResponse = await callShopifyApi(base_url, storefront_token, admin_token, "POST", "", graphqlQuery);
+      const searchResponse = await callShopifyApi(
+        base_url,
+        storefront_token,
+        admin_token,
+        "POST",
+        "",
+        graphqlQuery,
+      );
 
       let formattedProducts = [];
 
@@ -1770,9 +1812,16 @@ const getExchangePolicyEligibility = async (
 
   if (!parsedPolicy) {
     try {
-      const policyResponse = await callShopifyApi(base_url, storefront_token, admin_token, "POST", "", {
-        query: `query { shop { refundPolicy { body } } }`,
-      });
+      const policyResponse = await callShopifyApi(
+        base_url,
+        storefront_token,
+        admin_token,
+        "POST",
+        "",
+        {
+          query: `query { shop { refundPolicy { body } } }`,
+        },
+      );
 
       const policyBody = policyResponse?.data?.shop?.refundPolicy?.body || "";
 

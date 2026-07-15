@@ -57,10 +57,22 @@ const transporter = nodemailer.createTransport({
 });
 
 const createMcpServer = (configs = {}) => {
-  const { baseUrl, storefrontAccessToken, adminAccessToken, storeCode, sessionId } = configs;
+  const {
+    baseUrl,
+    storefrontAccessToken,
+    adminAccessToken,
+    storeCode,
+    sessionId,
+  } = configs;
 
   // fail fast if the backend forgot to send required creds
-  if (!baseUrl || !storefrontAccessToken || !adminAccessToken || !storeCode || !sessionId) {
+  if (
+    !baseUrl ||
+    !storefrontAccessToken ||
+    !adminAccessToken ||
+    !storeCode ||
+    !sessionId
+  ) {
     throw new Error(
       "createMcpServer: missing required config (baseUrl / adminAccessToken / adminAccessToken / storeCode / sessionId)",
     );
@@ -294,15 +306,22 @@ const createMcpServer = (configs = {}) => {
           if (searchQuery === lastTriedQuery) continue;
           lastTriedQuery = searchQuery;
 
-          const resp = await callShopifyApi(baseUrl, storefrontAccessToken, adminAccessToken, "POST", "", {
-            query: productSearchByQuery,
-            variables: {
-              search: searchQuery,
-              sortKey,
-              reverse,
-              first: page_size,
+          const resp = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "POST",
+            "",
+            {
+              query: productSearchByQuery,
+              variables: {
+                search: searchQuery,
+                sortKey,
+                reverse,
+                first: page_size,
+              },
             },
-          });
+          );
 
           if (resp?.data?.products?.edges?.length > 0) {
             searchResponse = resp;
@@ -329,7 +348,13 @@ const createMcpServer = (configs = {}) => {
         // If no products found with any structured relaxation, fall back to
         // LLM-based keyword expansion as the last resort.
         if (result?.products?.length === 0) {
-          const keywords = await extractSearchTerms(query, baseUrl, storefrontAccessToken, adminAccessToken, storeCode);
+          const keywords = await extractSearchTerms(
+            query,
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            storeCode,
+          );
           console.log(
             `No products found for this query "${query}", retrying with keywords - [${keywords}]...`,
           );
@@ -351,7 +376,14 @@ const createMcpServer = (configs = {}) => {
               },
             };
 
-            const kwResponse = await callShopifyApi(baseUrl, storefrontAccessToken, adminAccessToken, "POST", "", gQuery);
+            const kwResponse = await callShopifyApi(
+              baseUrl,
+              storefrontAccessToken,
+              adminAccessToken,
+              "POST",
+              "",
+              gQuery,
+            );
 
             if (
               kwResponse?.data?.products?.edges &&
@@ -389,7 +421,12 @@ const createMcpServer = (configs = {}) => {
         for (let p of result.products) {
           console.log("Fetching related products for ID:", p.id);
 
-          const relatedProducts = await fetchRelatedProducts(p.id, baseUrl, storefrontAccessToken, adminAccessToken);
+          const relatedProducts = await fetchRelatedProducts(
+            p.id,
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+          );
 
           console.log(`Related products for ${p.id}:`, relatedProducts);
 
@@ -494,9 +531,14 @@ const createMcpServer = (configs = {}) => {
 
         // Helper to fetch a single product by GID, returning the product node or null if not found.
         const fetchOne = (gid) =>
-          callShopifyApi(baseUrl, storefrontAccessToken, adminAccessToken, "POST", "", singleProductQuery(gid)).then(
-            (res) => res?.data?.product ?? null,
-          );
+          callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "POST",
+            "",
+            singleProductQuery(gid),
+          ).then((res) => res?.data?.product ?? null);
 
         const CHUNK = 5;
         const fetchedResults = [];
@@ -611,7 +653,14 @@ const createMcpServer = (configs = {}) => {
           },
         };
 
-        const response = await callShopifyApi(baseUrl, storefrontAccessToken, adminAccessToken, "POST", "", graphqlQuery);
+        const response = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "POST",
+          "",
+          graphqlQuery,
+        );
 
         const products = response?.data?.products?.edges || [];
 
@@ -852,7 +901,15 @@ const createMcpServer = (configs = {}) => {
           query: discountQuery,
         };
 
-        const response = await callShopifyApi(baseUrl, storefrontAccessToken, adminAccessToken, "POST", "", graphqlQuery, true);
+        const response = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "POST",
+          "",
+          graphqlQuery,
+          true,
+        );
 
         if (
           !response?.data?.discountNodes?.edges ||
@@ -1959,7 +2016,10 @@ const createMcpServer = (configs = {}) => {
           quantity: item.quantity,
         }));
 
-        const exchangeManager = new ShopifyExchangeManager(baseUrl, adminAccessToken);
+        const exchangeManager = new ShopifyExchangeManager(
+          baseUrl,
+          adminAccessToken,
+        );
         const result = await exchangeManager.exchangeItems(
           order_id,
           normalisedReturnItems,
