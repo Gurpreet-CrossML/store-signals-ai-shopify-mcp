@@ -63,6 +63,7 @@ const createMcpServer = (configs = {}) => {
     adminAccessToken,
     storeCode,
     sessionId,
+    widgetKey,
   } = configs;
 
   // fail fast if the backend forgot to send required creds
@@ -71,7 +72,8 @@ const createMcpServer = (configs = {}) => {
     !storefrontAccessToken ||
     !adminAccessToken ||
     !storeCode ||
-    !sessionId
+    !sessionId ||
+    !widgetKey
   ) {
     throw new Error(
       "createMcpServer: missing required config (baseUrl / adminAccessToken / adminAccessToken / storeCode / sessionId)",
@@ -268,7 +270,12 @@ const createMcpServer = (configs = {}) => {
         });
         const cached = await getCache(cacheKey);
         if (cached) {
-          logProductViewEvents(cached.products, sessionId, storeCode);
+          logProductViewEvents(
+            widgetKey,
+            cached.products,
+            sessionId,
+            storeCode,
+          );
           return {
             content: [
               {
@@ -333,6 +340,7 @@ const createMcpServer = (configs = {}) => {
         let formattedProducts = searchResponse
           ? formatProducts(
               baseUrl,
+              widgetKey,
               searchResponse.data.products.edges,
               sessionId,
               storeCode,
@@ -391,6 +399,7 @@ const createMcpServer = (configs = {}) => {
             ) {
               const formattedProducts = formatProducts(
                 baseUrl,
+                widgetKey,
                 kwResponse.data.products.edges,
                 sessionId,
                 storeCode,
@@ -561,6 +570,7 @@ const createMcpServer = (configs = {}) => {
         const formattedFetched = fetchedResults.length
           ? formatProducts(
               baseUrl,
+              widgetKey,
               fetchedResults.map((node) => ({ node })),
               sessionId,
               storeCode,
@@ -587,7 +597,12 @@ const createMcpServer = (configs = {}) => {
           };
         }
 
-        logProductViewEvents(formattedProducts, sessionId, storeCode);
+        logProductViewEvents(
+          widgetKey,
+          formattedProducts,
+          sessionId,
+          storeCode,
+        );
 
         const responsePayload = {
           products: formattedProducts,
@@ -632,7 +647,12 @@ const createMcpServer = (configs = {}) => {
         const cacheKey = `get_products_sorted:${String(sort_key || "relevance")}:store:${storeCode}`;
         const cached = await getCache(cacheKey);
         if (cached) {
-          logProductViewEvents(cached.products, sessionId, storeCode);
+          logProductViewEvents(
+            widgetKey,
+            cached.products,
+            sessionId,
+            storeCode,
+          );
           return {
             content: [
               {
@@ -666,6 +686,7 @@ const createMcpServer = (configs = {}) => {
 
         const formattedProducts = formatProducts(
           baseUrl,
+          widgetKey,
           products,
           sessionId,
           storeCode,
@@ -993,6 +1014,7 @@ const createMcpServer = (configs = {}) => {
     async ({ email }) => {
       try {
         const verificationStatus = await callBackendAPI(
+          widgetKey,
           "POST",
           "/chat/email/verify-status/",
           { thread_id: sessionId, email: email },
@@ -1031,6 +1053,7 @@ const createMcpServer = (configs = {}) => {
         }
 
         const otpResponse = await callBackendAPI(
+          widgetKey,
           "POST",
           "/chat/otp/generate/",
           {
@@ -1102,6 +1125,7 @@ const createMcpServer = (configs = {}) => {
           otp: otp_code,
         };
         const verificationResponse = await callBackendAPI(
+          widgetKey,
           "POST",
           "/chat/otp/verify/",
           payload,
@@ -1155,6 +1179,7 @@ const createMcpServer = (configs = {}) => {
     async ({ email, order_id, customer_id = "" }) => {
       if (!customer_id) {
         const verificationStatus = await callBackendAPI(
+          widgetKey,
           "POST",
           "/chat/email/verify-status/",
           { thread_id: sessionId, email: email },
@@ -1531,6 +1556,7 @@ const createMcpServer = (configs = {}) => {
         // Verify email first
         if (!customer_id) {
           const verificationStatus = await callBackendAPI(
+            widgetKey,
             "POST",
             "/chat/email/verify-status/",
             {
@@ -1644,6 +1670,7 @@ const createMcpServer = (configs = {}) => {
         //1. Email verification (skipped when customer_id is known)
         if (!customer_id) {
           const verificationStatus = await callBackendAPI(
+            widgetKey,
             "POST",
             "/chat/email/verify-status/",
             { thread_id: sessionId, email },
@@ -1794,6 +1821,7 @@ const createMcpServer = (configs = {}) => {
           storefrontAccessToken,
           adminAccessToken,
           storeCode,
+          widgetKey,
           product_names,
           sessionId,
           full_details,
@@ -2028,7 +2056,7 @@ const createMcpServer = (configs = {}) => {
 
         // Optionally log the event if sessionId provided
         if (sessionId) {
-          await callBackendAPI("POST", "/chat/bot-events/", {
+          await callBackendAPI(widgetKey, "POST", "/chat/bot-events/", {
             thread_id: sessionId,
             event_type: "exchange_items",
             order_id: order_id,
@@ -2164,6 +2192,7 @@ app.post("/mcp", async (req, res) => {
       adminAccessToken: req.headers["x-admin-access-token"],
       storeCode: req.headers["x-store-code"],
       sessionId: req.headers["x-session-id"],
+      widgetKey: req.headers["x-widget-key"],
     };
 
     const server = createMcpServer(configs);

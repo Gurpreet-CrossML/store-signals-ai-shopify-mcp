@@ -19,7 +19,6 @@ const SMTP_PASS = process.env.SMTP_PASS;
 const BACKEND_API_URL = process.env.BACKEND_API_URL;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL;
-const WIDGET_KEY = process.env.WIDGET_KEY;
 
 const allEnvironmentVariables = {
   MCP_NAME,
@@ -29,7 +28,6 @@ const allEnvironmentVariables = {
   BACKEND_API_URL,
   OPENAI_API_KEY,
   OPENAI_MODEL,
-  WIDGET_KEY,
 };
 
 // Validate environment variables
@@ -127,7 +125,7 @@ const callShopifyApi = async (
 };
 
 // Utility function to call the backend API
-const callBackendAPI = async (method, endpoint, data = {}) => {
+const callBackendAPI = async (widget_key, method, endpoint, data = {}) => {
   try {
     const url = `${BACKEND_API_URL}${endpoint}`;
 
@@ -137,7 +135,7 @@ const callBackendAPI = async (method, endpoint, data = {}) => {
       method,
       url,
       headers: {
-        "X-Widget-Key": WIDGET_KEY,
+        "X-Widget-Key": widget_key,
       },
       timeout: 15000,
       data: data,
@@ -186,7 +184,12 @@ function toCm(value, unit) {
 }
 
 // Save viewed products to backend for analytics
-const logProductViewEvents = async (products, session_id, store_code) => {
+const logProductViewEvents = async (
+  widget_key,
+  products,
+  session_id,
+  store_code,
+) => {
   if (!Array.isArray(products) || !session_id || !store_code) {
     return;
   }
@@ -198,7 +201,7 @@ const logProductViewEvents = async (products, session_id, store_code) => {
         .pop();
       if (!productId) return Promise.resolve();
 
-      return callBackendAPI("POST", "/chat/bot-events/", {
+      return callBackendAPI(widget_key, "POST", "/chat/bot-events/", {
         thread_id: session_id,
         event_type: "view_product",
         store_code,
@@ -234,6 +237,7 @@ const getVariantDiscount = (variant) => {
 // Utility function to format products data received from Shopify API, and also log product view events to the backend for analytics.
 const formatProducts = (
   base_url,
+  widget_key,
   products,
   session_id,
   store_code,
@@ -246,7 +250,7 @@ const formatProducts = (
       const productCategory = node?.category?.name;
 
       // Log product view event to backend for analytics
-      callBackendAPI("POST", "/chat/bot-events/", {
+      callBackendAPI(widget_key, "POST", "/chat/bot-events/", {
         thread_id: session_id,
         event_type: "view_product",
         store_code: store_code,
@@ -1545,6 +1549,7 @@ const searchProductsByNames = async (
   storefront_token,
   admin_token,
   store_code,
+  widget_key,
   product_names,
   session_id,
   full_details = false,
@@ -1557,7 +1562,12 @@ const searchProductsByNames = async (
       const cached = await getCache(cacheKey);
 
       if (cached) {
-        logProductViewEvents(cached.products, session_id, store_code);
+        logProductViewEvents(
+          widget_key,
+          cached.products,
+          session_id,
+          store_code,
+        );
         results.push({
           product_name: name,
           product_detail:
@@ -1592,6 +1602,7 @@ const searchProductsByNames = async (
       if (searchResponse?.data?.products?.edges?.length > 0) {
         formattedProducts = formatProducts(
           base_url,
+          widget_key,
           searchResponse.data.products.edges,
           session_id,
           store_code,
@@ -1952,7 +1963,6 @@ module.exports = {
   BACKEND_API_URL,
   OPENAI_API_KEY,
   OPENAI_MODEL,
-  WIDGET_KEY,
   // helpers
   callShopifyApi,
   callBackendAPI,
