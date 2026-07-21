@@ -272,7 +272,7 @@ const formatProducts = (
             variant_name: v.title,
             options: v.selectedOptions,
           };
-        })
+        });
         return baseProduct;
       }
 
