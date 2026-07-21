@@ -267,6 +267,12 @@ const formatProducts = (
       };
 
       if (!full_details) {
+        baseProduct.variants = node.variants?.edges?.map(({ node: v }) => {
+          return {
+            variant_name: v.title,
+            options: v.selectedOptions,
+          };
+        })
         return baseProduct;
       }
 
