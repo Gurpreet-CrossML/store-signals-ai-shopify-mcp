@@ -69,35 +69,36 @@ const productSearchByQuery = `query getProducts($search: String!, $sortKey: Prod
 
 // GraphQL query to fetch store metadata including product tags, types, collections, and categories.
 const storeMetadataQuery = `query {
-    productTags(first: 250) {
-        edges {
-        node
-        }
+  productTags(first: 250) {
+    edges {
+      node
     }
+  }
 
-    productTypes(first: 250) {
-        edges {
-        node
-        }
+  productTypes(first: 250) {
+    edges {
+      node
     }
+  }
 
-    collections(first: 250) {
-        edges {
-        node {
-            title
-        }
-        }
+  collections(first: 250) {
+    edges {
+      node {
+        title
+      }
     }
+  }
 
-    products(first: 250) {
-        edges {
-        node {
-            category {
-            name
-            }
+  products(first: 250) {
+    edges {
+      node {
+        category {
+          id
+          name
         }
-        }
+      }
     }
+  }
 }`;
 
 // GraphQL query to fetch related products based on a given product ID.
@@ -347,6 +348,7 @@ const discountQuery = `{
     }
   }
 }`;
+
 const getReturnableFulfillmentsQuery = `
   query GetReturnableFulfillments($orderId: ID!) {
     returnableFulfillments(orderId: $orderId, first: 10) {
@@ -391,6 +393,56 @@ const refundQuery = `
   }
 `;
 
+// GraphQL query to search products for recommendations
+productRecommendationsQuery = `query getProducts($search: String!, $sortKey: ProductSortKeys!, $reverse: Boolean!) {
+  products(first: 5, query: $search, sortKey:$sortKey, reverse:$reverse) {
+    edges {
+      node {
+        id
+        title
+        handle
+        productType
+        category { name }
+        onlineStoreUrl
+        description
+        media(first: 5) {
+          edges {
+            node {
+              ... on MediaImage { image { url } }
+            }
+          }
+        }
+        priceRangeV2 {
+          minVariantPrice { amount currencyCode }
+        }
+        variants(first: 20) {
+          edges {
+            node {
+              id
+              title
+              price
+              compareAtPrice
+              availableForSale
+              inventoryQuantity
+              selectedOptions { name value }
+              contextualPricing(context: {  }) {
+                price {
+                  amount
+                  currencyCode
+                }
+                compareAtPrice {
+                  amount
+                  currencyCode
+                }
+            }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
 // Export the GraphQL query for use in other modules
 module.exports = {
   productSearchByQuery,
@@ -401,4 +453,5 @@ module.exports = {
   discountQuery,
   refundQuery,
   getReturnableFulfillmentsQuery,
+  productRecommendationsQuery,
 };

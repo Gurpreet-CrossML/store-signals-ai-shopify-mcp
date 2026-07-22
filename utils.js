@@ -93,7 +93,7 @@ const callShopifyApi = async (
   try {
     let url = isAdmin
       ? `${SHOPIFY_BASE_URL}/admin/api/2025-10/graphql.json`
-      : `${SHOPIFY_BASE_URL}/api/2025-01/graphql.json`;
+      : `${SHOPIFY_BASE_URL}/api/2025-10/graphql.json`;
     if (endpoint) {
       url = `${SHOPIFY_BASE_URL}${endpoint}`;
     }
@@ -257,13 +257,18 @@ const formatProducts = (
         category: productCategory || "",
       });
 
+      const priceRange = node.priceRange ?? node.priceRangeV2;
+
       const baseProduct = {
         id: productId,
         name: productName,
         category: productCategory,
-        price: `${getCurrencySymbol(node.priceRange?.minVariantPrice?.currencyCode)}${node.priceRange?.minVariantPrice?.amount || 0}`,
+        price: `${getCurrencySymbol(priceRange?.minVariantPrice?.currencyCode)}${priceRange?.minVariantPrice?.amount || 0}`,
         description: node.description || "",
-        available_for_sale: node.availableForSale,
+        available_for_sale:
+          node.availableForSale ??
+          node.variants?.edges?.some(({ node: v }) => v.availableForSale) ??
+          null,
       };
 
       if (!full_details) {
@@ -278,25 +283,34 @@ const formatProducts = (
 
       return {
         ...baseProduct,
-        image: node.images?.edges?.[0]?.node?.url || null,
+        image:
+          node.images?.edges?.[0]?.node?.url ??
+          node.media?.edges?.[0]?.node?.image?.url ??
+          null,
         product_url:
           node.onlineStoreUrl || `${SHOPIFY_BASE_URL}/products/${node?.handle}`,
-        variants: node.variants?.edges?.map(({ node: v }) => {
+          variants: node.variants?.edges?.map(({ node: v }) => {
           const discount = getVariantDiscount(v);
+          const price = v.priceV2 ?? v.contextualPricing.price;
+          const comparePrice = v.compareAtPriceV2 ?? v.compareAtPrice?.price ?? null;
 
           return {
             variant_id: v.id.split("/").pop(),
             variant_name: v.title,
 
-            variant_price: `${getCurrencySymbol(v.priceV2?.currencyCode)}${v.priceV2?.amount || 0}`,
+            variant_price: `${getCurrencySymbol(price?.currencyCode)}${price?.amount || 0}`,
 
-            compare_at_price: v.compareAtPriceV2?.amount
-              ? `${getCurrencySymbol(v.compareAtPriceV2?.currencyCode)}${v.compareAtPriceV2.amount}`
+            compare_at_price: comparePrice?.amount
+              ? `${getCurrencySymbol(comparePrice?.currencyCode)}${comparePrice.amount}`
               : null,
 
             discount: discount,
 
             available_for_sale: v.availableForSale,
+            in_stock:
+              v?.inventoryQuantity != null
+                ? v.inventoryQuantity > 0
+                : !v.currentlyNotInStock,
             options: v.selectedOptions,
           };
         }),
@@ -342,15 +356,17 @@ const storeMetadata = async () => {
     const collections =
       result?.data?.collections?.edges?.map((item) => item?.node?.title) || [];
 
-    const categories = [
-      ...new Set(
-        (
-          result?.data?.products?.edges?.map(
-            (item) => item?.node?.category?.name,
-          ) || []
-        ).filter(Boolean),
-      ),
-    ];
+    const categories = Array.from(
+      new Map(
+        (result?.data?.products?.edges || [])
+          .map(({ node }) => node?.category)
+          .filter(Boolean)
+          .map((category) => [category.id, {
+            id: category.id.replace("gid://shopify/TaxonomyCategory/", ""),
+            name: category.name,
+          }])
+      ).values()
+    );
 
     const metadata = {
       tags,

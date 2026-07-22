@@ -12,6 +12,7 @@ const {
   productSortQuery,
   discountQuery,
   refundQuery,
+  productRecommendationsQuery,
 } = require("./graphql_queries");
 const {
   MCP_NAME,
@@ -2049,10 +2050,165 @@ const createMcpServer = () => {
     },
   );
 
-  // ********************************** End of MCP Tools **********************************
+  // ######### 17. Product Recomendations #########
+  server.tool(
+    "product_recomendations",
+    `Search and recommend products from the store catalog.
+
+    Use this tool whenever the customer asks for:
+    - Product recommendations
+    - Products matching a category
+    - Products matching keywords or attributes
+    - Products within a price range
+    - Best-selling, newest, or price-sorted products
+
+    The tool returns a list of matching products. It does not answer customer questions itself.
+
+    Search priority:
+    1. category_id (if matched)
+    2. query (free-text search)
+
+    When category_id is provided, it is always preferred over query.
+
+    Use full_details=true only when detailed product information (description, variants, images, URL, etc.) is required. Otherwise leave it false for faster responses.
+    `,
+    {
+      session_id: z.string().describe("Session ID"),
+      store_code: z.string().describe("Store code"),
+      query: z
+      .string()
+      .optional()
+      .describe(
+        "Free-text product search in English. Use product names, categories, colors, materials, features, or descriptive keywords. Example: 'waterproof laptop bag', 'leather backpack', 'travel duffel'."
+      ),
+      category_id: z
+      .string()
+      .optional()
+      .describe(
+        "Shopify taxonomy category ID. Preferred over query when available. Example: 'lb-15'"
+      ),
+      full_details: z
+      .boolean()
+      .optional()
+      .describe(
+        "Return complete product details including description, images, variants, availability, and URL. Defaults to false."
+      ),
+      sort_by: z
+      .enum([
+        "relevance",
+        "price_asc",
+        "price_desc",
+        "newest",
+        "best_selling",
+      ])
+      .optional()
+      .describe(
+        "Sorting strategy: relevance (default), best_selling, newest, price_asc, or price_desc."
+      ),
+      min_price: z
+      .number()
+      .nonnegative()
+      .optional()
+      .describe(
+      "Only return products priced greater than or equal to this amount."
+      ),
+      max_price: z
+      .number()
+      .nonnegative()
+      .optional()
+      .describe(
+        "Only return products priced less than or equal to this amount."
+      )
+    },
+    async ({
+      session_id,
+      store_code,
+      query="",
+      category_id="",
+      full_details=false,
+      sort_by="relevance",
+      min_price=null,
+      max_price=null,
+    }) => {
+      try {
+        let searchQuery = "";
+
+        // Priority 1: Search by category id
+        if (category_id) {
+          searchQuery = `category_id:${category_id}`;
+        }
+        else if (query) {
+          searchQuery = `${query}`;
+        }
+
+        // Min Price filter
+        if (min_price) {
+          searchQuery += ` price:<=${min_price}`;
+        }
+
+        // Max Price Filter
+        if (max_price) {
+          searchQuery += ` price:>=${max_price}`;
+        }
+
+        // Sorting (Default: Relevance)
+        const { sortKey, reverse } = getProductSortConfig(sort_by);
+
+        // Search product by graphql query
+        const searchResponse = await callShopifyApi("POST", "", {
+          query: productRecommendationsQuery,
+          variables: {
+            search: searchQuery,
+            sortKey,
+            reverse,
+          },
+        }, true);
+
+        let formatedProducts = [];
+
+        // Format the products data to be returned
+        if (searchResponse?.data?.products?.edges) {
+          formatedProducts = formatProducts(
+            searchResponse?.data?.products?.edges,
+            session_id,
+            store_code,
+            full_details,
+          )
+        };
+
+        const result = {
+          products: formatedProducts,
+        };
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+
+      }
+      catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to recomend products: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  )
 
   return server;
-}; // end createMcpServer
+
+  // ********************************** End of MCP Tools **********************************
+
+};
 
 // Start the server
 const app = express();
