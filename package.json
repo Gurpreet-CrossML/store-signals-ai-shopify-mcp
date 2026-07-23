@@ -29,9 +29,11 @@
     "date-fns": "^4.1.0",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
+    "fuse.js": "^7.5.0",
     "https": "^1.0.0",
     "lint": "^1.2.2",
     "nodemailer": "^7.0.5",
+    "openai": "^6.48.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

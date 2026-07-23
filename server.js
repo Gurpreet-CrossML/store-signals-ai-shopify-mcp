@@ -12,6 +12,7 @@ const {
   productSortQuery,
   discountQuery,
   refundQuery,
+  productRecommendationsQuery,
 } = require("./graphql_queries");
 const {
   MCP_NAME,
@@ -41,6 +42,8 @@ const {
   resolveSearchFilters,
   buildShopifySearchQuery,
   buildSearchCacheKey,
+  resolveStoreCategory,
+  validateSearchResults,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
@@ -2049,10 +2052,241 @@ const createMcpServer = () => {
     },
   );
 
-  // ********************************** End of MCP Tools **********************************
+  // ######### 17. Product Recomendations #########
+  server.tool(
+    "product_recomendations",
+    `Search and recommend products from the store catalog.
+
+    Use this tool whenever the customer is looking for products, including:
+    - Product recommendations
+    - Products from a category
+    - Products matching keywords or descriptions
+    - Products within a price range
+    - Products with specific attributes (color, size, material, capacity, style, brand, etc.)
+    - Products that combine multiple filters (e.g. "red leather backpack under $100")
+
+    The tool searches the catalog and returns matching products. It does not generate the customer-facing response itself.
+
+    Search priority:
+    1. category_id (preferred whenever a matching category is available)
+    2. query (free-text search)
+
+    If category_id is provided, it always takes precedence over query.
+
+    Filtering guidelines:
+    - Extract product attributes into the 'options' field whenever possible instead of putting them only in the query.
+    - Use 'options' for structured filters such as:
+      - Color (Red, Black, Blue)
+      - Size (S, M, L, XL, 42)
+      - Material (Leather, Cotton, Stainless Steel)
+      - Capacity (20L, 500ml)
+      - Style (Casual, Formal)
+      - Brand
+      - Pattern
+      - Gender
+      - Age Group
+      - Any other product option or variant attribute supported by the catalog.
+    - Multiple attributes may be provided together.
+    - Keep the query focused on the product type or general search intent, while options contain attribute filters.
+
+    Examples:
+    - "Red T-shirt in size M"
+      query: "T-shirt"
+      options: [
+        { name: "Color", value: "Red" },
+        { name: "Size", value: "M" }
+      ]
+
+    - "Leather backpack under $100"
+      query: "backpack"
+      options: [
+        { name: "Material", value: "Leather" }
+      ]
+      max_price: 100
+
+    - "Blue waterproof hiking backpack 30L"
+      query: "hiking backpack"
+      options: [
+        { name: "Color", value: "Blue" },
+        { name: "Feature", value: "Waterproof" },
+        { name: "Capacity", value: "30L" }
+      ]
+
+    Use full_details=true only when detailed product information is required, such as product descriptions, variants, images, specifications, or product URLs. Otherwise, leave it false for faster responses.
+    `,
+    {
+      session_id: z.string().describe("Session ID"),
+      store_code: z.string().describe("Store code"),
+      query: z
+      .string()
+      .optional()
+      .describe(
+        "Free-text product search in English. Use product names, categories, colors, materials, features, or descriptive keywords. Example: 'waterproof laptop bag', 'leather backpack', 'travel duffel'."
+      ),
+      category_id: z
+      .string()
+      .optional()
+      .describe(
+        "Shopify taxonomy category ID. Preferred over query when available. Example: 'lb-15'"
+      ),
+      full_details: z
+      .boolean()
+      .optional()
+      .describe(
+        "Return complete product details including description, images, variants, availability, and URL. Defaults to false."
+      ),
+      min_price: z
+      .number()
+      .nonnegative()
+      .optional()
+      .describe(
+      "Only return products priced greater than or equal to this amount."
+      ),
+      max_price: z
+      .number()
+      .nonnegative()
+      .optional()
+      .describe(
+        "Only return products priced less than or equal to this amount."
+      ),
+      options: z
+      .array(
+        z.object({
+          name: z
+            .string()
+            .describe("Product option or attribute name (e.g. Color, Size, Capacity, Material)."),
+          value: z
+            .string()
+            .describe("Desired option value (e.g. Red, M, 20L, Leather)."),
+        })
+      )
+      .optional()
+      .describe(
+        "Product attributes extracted from the customer's request. Examples: [{ name: 'Color', value: 'Red' }, { name: 'Size', value: 'M' }]."
+      )
+    },
+    async ({
+      session_id,
+      store_code,
+      query = "",
+      category_id = "",
+      full_details = false,
+      min_price = null,
+      max_price = null,
+      options = [],
+    }) => {
+      try {
+        // Build the Shopify product search query
+        const filters = [];
+
+        if (category_id) {
+          const matchedCategory = await resolveStoreCategory(category_id);
+          if (matchedCategory) {
+            filters.push(`category_id:${matchedCategory.id}`);
+          } else if (query?.trim()) {
+            // Invalid category_id or category name; fall back to query search.
+            filters.push(query.trim());
+          }
+        } else if (query?.trim()) {
+          filters.push(query.trim());
+        }
+
+        // Min/Max Price filter
+        if (min_price != null) {
+          filters.push(`price:>=${min_price}`);
+        }
+        if (max_price != null) {
+          filters.push(`price:<=${max_price}`);
+        }
+
+        const searchQuery = filters.join(" ");
+
+        console.log("Search Query for product recommendations:", searchQuery);
+
+        // Cache key for save ot get products from cache
+        const cacheKey = `product_recommendation:${searchQuery}`;
+        const cached = await getCache(cacheKey);
+        if (cached) {
+          logProductViewEvents(cached.products, session_id, store_code);
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(cached, null, 2),
+              },
+            ],
+          };
+        }
+
+        // Execute product search
+        const productSearchResponse = await callShopifyApi("POST", "", {
+          query: productRecommendationsQuery,
+          variables: {
+            search: searchQuery,
+          },
+        }, true);
+
+        let formattedProducts = [];
+
+        // Convert Shopify response into the standard product format
+        if (productSearchResponse?.data?.products?.edges) {
+          formattedProducts = formatProducts(
+            productSearchResponse?.data?.products?.edges,
+            session_id,
+            store_code,
+            full_details,
+          )
+        };
+
+        // Validate the product search results
+        const { products: sortedProducts, validation } = await validateSearchResults(
+          formattedProducts,
+          query,
+          options
+        );
+
+        const response = {
+          validation,
+          products: formattedProducts,
+        };
+
+        // Save product in cache
+        try {
+          setCache(cacheKey, response);
+        }
+        catch (error) {
+          console.error("Cache set failed, Error:", error);
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(response, null, 2),
+            },
+          ],
+        };
+
+      }
+      catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to recomend products: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
 
   return server;
-}; // end createMcpServer
+
+  // ********************************** End of MCP Tools **********************************
+
+};
 
 // Start the server
 const app = express();
