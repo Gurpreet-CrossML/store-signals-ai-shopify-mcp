@@ -8,6 +8,7 @@ const {
   getReturnableFulfillmentsQuery,
 } = require("./graphql_queries");
 const { getCache, setCache } = require("./cache");
+const openai = require("openai");
 
 // Load environment variables from .env file
 dotenv.config();
@@ -45,6 +46,11 @@ for (const [key, value] of Object.entries(allEnvironmentVariables)) {
     process.exit(1);
   }
 }
+
+// OpenAI Client
+const client = new openai({
+  apiKey: OPENAI_API_KEY,
+});
 
 // Define sort options and their mapping to Shopify's sort keys and reverse flags
 const SortOption = Object.freeze({
@@ -323,13 +329,16 @@ const formatProducts = (
 };
 
 // Utility function to fetch store metadata like product tags, types, collections, and categories. This metadata can be used for various purposes like improving search relevance, generating search queries, etc.
-const storeMetadata = async () => {
+// If category_only is true, return only categories - [{name, id}, ...]
+const storeMetadata = async (category_only=false) => {
   const cacheKey = "store_metadata";
 
   try {
     const cachedMetadata = await getCache(cacheKey);
     if (cachedMetadata) {
-      return cachedMetadata;
+      return category_only
+        ? cachedMetadata.categories || []
+        : cachedMetadata;
     }
 
     const graphqlQuery = {
@@ -367,6 +376,10 @@ const storeMetadata = async () => {
           }])
       ).values()
     );
+
+    if (category_only) {
+      return categories;
+    }
 
     const metadata = {
       tags,
@@ -1905,6 +1918,314 @@ ${policyBody.slice(0, 4000)}`;
   };
 };
 
+/**
+ * Resolves a category from the store catalogue using a category ID or name.
+ *
+ * This function is intentionally defensive because LLMs may return either:
+ * - The canonical category ID (e.g. "lb-15")
+ * - The category name (e.g. "Laptop Bags")
+ * - A normalized variation of the name (e.g. "Laptop-Bags", "laptop_bags")
+ *
+ * Matching priority:
+ * 1. Exact category ID (case-insensitive)
+ * 2. Exact category name (case-insensitive)
+ * 3. Normalized category name (ignores spaces, hyphens, and underscores)
+ *
+ * Partial/fuzzy matching is intentionally NOT supported to avoid
+ * ambiguous matches (e.g. "bag" matching multiple categories).
+ *
+ * @param {string} category
+ * @returns {{id: string, name: string} | null}
+ */
+const resolveStoreCategory = async (category) => {
+  const categories = await storeMetadata(true);
+
+  if (!category || !Array.isArray(categories)) {
+    return null;
+  }
+
+  const normalizedInput = category.trim().toLowerCase();
+
+  const normalizeName = (value) =>
+    value.toLowerCase().replace(/[\s_-]+/g, "");
+
+  return (
+    categories.find(
+      ({ id }) => id.toLowerCase() === normalizedInput,
+    ) ??
+    categories.find(
+      ({ name }) => name.toLowerCase() === normalizedInput,
+    ) ??
+    categories.find(
+      ({ name }) =>
+        normalizeName(name) === normalizeName(normalizedInput),
+    ) ??
+    null
+  );
+};
+
+/**
+ * Uses an LLM to determine which products best match a user's search query.
+ *
+ * The model should consider the product name and description, understand
+ * semantic meaning (e.g. "bags" -> "backpack"), and return only the IDs of
+ * relevant products.
+ *
+ * @param {string} query User's search query.
+ * @param {Array<{id:string,name:string,description:string}>} products
+ * @returns {Promise<string[]>} Matching product IDs.
+ */
+const findMatchingProducts = async (query, products) => {
+  const prompt = `
+You are an ecommerce product relevance checker.
+
+Task:
+- Compare the user's search query with the provided products.
+- Use semantic understanding, not exact keyword matching.
+- Consider product name and description.
+- Return only products that are genuinely relevant.
+- If nothing matches, return an empty array.
+
+User query:
+${query}
+
+Products:
+${JSON.stringify(products, null, 2)}
+`;
+
+  const response = await client.responses.create({
+    model: "gpt-4.1-mini",
+    temperature: 0,
+    input: [
+      {
+        role: "system",
+        content:
+          "Return only valid JSON. Do not explain your reasoning.",
+      },
+      {
+        role: "user",
+        content: prompt,
+      },
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "matching_products",
+        schema: {
+          type: "object",
+          properties: {
+            matched_ids: {
+              type: "array",
+              items: {
+                type: "string",
+              },
+            },
+          },
+          required: ["matched_ids"],
+          additionalProperties: false,
+        },
+      },
+    },
+  });
+
+  return JSON.parse(response.output_text).matched_ids;
+}
+
+/**
+ * Validates whether the returned products satisfy the user's search query and
+ * attribute filters, then reorders the results so the best matches appear first.
+ *
+ * Validation priority
+ * -------------------
+ * Attribute filters (options):
+ *   1. Variant options (Color, Size, Material, etc.)
+ *   2. Variant name/title
+ *   3. Product title and description
+ *
+ * Search query:
+ *   1. Product title and description
+ *   2. Variant name/title
+ *
+ * Notes:
+ * - Price and category are intentionally NOT validated here because they are
+ *   already handled by Shopify search filters.
+ * - This function is only responsible for verifying the textual relevance of
+ *   the returned products.
+ * - Products that satisfy both the query and attribute filters are moved to the
+ *   beginning of the array while preserving their original order.
+ *
+ * @param {Array} products
+ * List of formatted products returned from Shopify.
+ *
+ * @param {string} [query=""]
+ * User's free-text search query.
+ *
+ * @param {Array<{name:string,value:string}>} [options=[]]
+ * Structured attribute filters extracted from the user's request.
+ *
+ * @returns {{
+ *   products: Array,
+ *   validation: {
+ *     isMatch: boolean,
+ *     matchedCount: number,
+ *     totalCount: number,
+ *     message: string
+ *   }
+ * }}
+ */
+const validateSearchResults = async (
+  products,
+  query = "",
+  options = []
+) => {
+  /**
+   * Normalizes text for case-insensitive matching.
+   */
+  const normalize = (text = "") =>
+    String(text)
+      .toLowerCase()
+      .replace(/<[^>]*>/g, "")
+      .replace(/[^\w\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  /**
+   * Returns true if the keyword exists within the text.
+   */
+  const includesText = (text, keyword) =>
+    normalize(text).includes(normalize(keyword));
+
+  // ----------------------------------------------------
+  // Validate query using LLM (single request)
+  // ----------------------------------------------------
+  let matchedQueryIds = new Set();
+
+  if (query?.trim()) {
+    const productContext = products
+      .map(
+        (product) => `
+Product Name: ${product.name}
+Product ID: ${product.id}
+Description: ${(product.description || "").slice(0, 300)}
+`.trim()
+      )
+      .join("\n\n--------------------\n\n");
+
+    const matchedIds = await findMatchingProducts(query, productContext);
+
+    matchedQueryIds = new Set(matchedIds);
+  }
+
+  const matchedProducts = [];
+  const unmatchedProducts = [];
+
+  for (const product of products) {
+    const productTitle = normalize(product.title || "");
+    const productDescription = normalize(product.description || "");
+
+    const variants = product.variants || [];
+
+    // ----------------------------------------------------
+    // Verify attribute filters (options)
+    //
+    // Priority:
+    // 1. Variant options
+    // 2. Variant name
+    // 3. Product title/description
+    // ----------------------------------------------------
+    let optionsMatched = true;
+
+    for (const option of options) {
+      const value = normalize(option.value);
+
+      let found = false;
+
+      for (const variant of variants) {
+        // Priority 1
+        if (
+          variant.options?.some(
+            (o) => includesText(normalize(o.value), value)
+          )
+        ) {
+          found = true;
+          break;
+        }
+
+        // Priority 2
+        if (includesText(normalize(variant.variant_name), value)) {
+          found = true;
+          break;
+        }
+      }
+
+      // Priority 3
+      if (
+        !found &&
+        (
+          includesText(productTitle, value) ||
+          includesText(productDescription, value)
+        )
+      ) {
+        found = true;
+      }
+
+      if (!found) {
+        optionsMatched = false;
+        break;
+      }
+    }
+
+
+    // Query validation comes from the LLM
+    const queryMatched =
+      !query?.trim() || matchedQueryIds.has(String(product.id));
+
+    if (queryMatched && optionsMatched) {
+      matchedProducts.push(product);
+    } else {
+      unmatchedProducts.push(product);
+    }
+  }
+
+  const sortedProducts = [...matchedProducts, ...unmatchedProducts];
+
+  const matchedCount = matchedProducts.length;
+  const totalCount = products.length;
+
+  let validation;
+
+  if (matchedCount === totalCount && totalCount > 0) {
+    validation = {
+      isMatch: true,
+      matchedCount,
+      totalCount,
+      message:
+        "All returned products closely match the customer's search query and requested attributes. Present these products as the best recommendations.",
+    };
+  } else if (matchedCount > 0) {
+    validation = {
+      isMatch: true,
+      matchedCount,
+      totalCount,
+      message:
+        "Some returned products closely match the customer's search query and requested attributes. Recommend the matching products first, then present the remaining products as additional alternatives the customer may also be interested in.",
+    };
+  } else {
+    validation = {
+      isMatch: false,
+      matchedCount,
+      totalCount,
+      message:
+        "No products closely match the customer's search query or requested attributes. Inform the customer that an exact match wasn't found, then recommend the returned products as similar or alternative options that may still meet their needs. Do not describe them as exact matches.",
+    };
+  }
+
+  return {
+    products: sortedProducts,
+    validation,
+  };
+}
+
 // Export environment variables and utility functions
 module.exports = {
   // envs
@@ -1946,4 +2267,6 @@ module.exports = {
   resolveSearchFilters,
   buildShopifySearchQuery,
   buildSearchCacheKey,
+  resolveStoreCategory,
+  validateSearchResults,
 };

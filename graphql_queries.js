@@ -394,8 +394,8 @@ const refundQuery = `
 `;
 
 // GraphQL query to search products for recommendations
-productRecommendationsQuery = `query getProducts($search: String!, $sortKey: ProductSortKeys!, $reverse: Boolean!) {
-  products(first: 5, query: $search, sortKey:$sortKey, reverse:$reverse) {
+productRecommendationsQuery = `query getProducts($search: String!) {
+  products(first: 5, query: $search) {
     edges {
       node {
         id
