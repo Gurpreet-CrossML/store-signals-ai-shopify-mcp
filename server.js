@@ -1075,40 +1075,20 @@ const createMcpServer = () => {
   Parameters:
   @param {string} email: Order identifier (e.g. "test@example.com")
   @param {string} order_id: Order identifier (e.g. "1026")
-  @param {string} session_id - Session identifier
-  @param {string} customer_id - Customer ID
   `,
     {
-      email: z.string().describe("Order email (e.g. 'test@example.com')"),
-      order_id: z.string().describe("Order ID (e.g. '1026')"),
-      session_id: z.string().describe("Session identifier"),
-      customer_id: z.coerce
+      email: z
         .string()
-        .describe(
-          "Customer ID — always passed as a string even if it looks like a number",
-        ),
+        .trim()
+        .email()
+        .describe("Order email (e.g. 'test@example.com')"),
+      order_id: z
+        .string()
+        .trim()
+        .min(4, "Order ID is required")
+        .describe("Order ID (e.g. '1026')"),
     },
-    async ({ email, order_id, session_id, customer_id = "" }) => {
-      if (!customer_id) {
-        const verificationStatus = await callBackendAPI(
-          "POST",
-          "/chat/email/verify-status/",
-          { thread_id: session_id, email: email },
-        );
-
-        if (!verificationStatus && !verificationStatus?.is_verified) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Please verify your email before accessing order details.",
-              },
-            ],
-            isError: true,
-          };
-        }
-      }
-
+    async ({ email, order_id }) => {
       try {
         const response = await callShopifyApi(
           "GET",
@@ -1180,8 +1160,16 @@ const createMcpServer = () => {
   @param {string} session_id - Session identifier
   `,
     {
-      order_id: z.string().describe("Order number"),
-      email: z.string().email().describe("Customer email"),
+      order_id: z
+        .string()
+        .trim()
+        .min(4, "Order ID is required")
+        .describe("Order ID (e.g. '1026')"),
+      email: z
+        .string()
+        .trim()
+        .email()
+        .describe("Order email (e.g. 'test@example.com')"),
       reason: z.string().describe("Cancellation reason"),
       session_id: z.string().describe("Session identifier"),
     },
@@ -1287,6 +1275,7 @@ const createMcpServer = () => {
       }
     },
   );
+
   // ######### 11. Modify Order #########
   server.tool(
     "modify_order",
@@ -1444,45 +1433,21 @@ const createMcpServer = () => {
   Parameters:
   @param {string} email
   @param {string} order_id
-  @param {string} session_id
-  @param {string} customer_id
   `,
     {
-      email: z.string().describe("Order email"),
-      order_id: z.string().describe("Order ID"),
-      session_id: z.string().describe("Session identifier"),
-      customer_id: z.coerce
+      email: z
         .string()
-        .describe(
-          "Customer ID — always passed as a string even if it looks like a number",
-        ),
+        .trim()
+        .email()
+        .describe("Order email (e.g. 'test@example.com')"),
+      order_id: z
+        .string()
+        .trim()
+        .min(4, "Order ID is required")
+        .describe("Order ID (e.g. '1026')"),
     },
-    async ({ email, order_id, session_id, customer_id = "" }) => {
+    async ({ email, order_id }) => {
       try {
-        // Verify email first
-        if (!customer_id) {
-          const verificationStatus = await callBackendAPI(
-            "POST",
-            "/chat/email/verify-status/",
-            {
-              thread_id: session_id,
-              email,
-            },
-          );
-
-          if (!verificationStatus?.is_verified) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: "Please verify your email before accessing payment information.",
-                },
-              ],
-              isError: true,
-            };
-          }
-        }
-
         // Find order
         const orderResponse = await callShopifyApi(
           "GET",
@@ -1556,40 +1521,23 @@ const createMcpServer = () => {
   @param {string} email       - Customer email associated with the order
   @param {string} order_id    - Short order number (e.g. "1026")
   @param {string} session_id  - Session identifier
-  @param {string} customer_id - Customer ID (optional; skips email verification if provided)
   `,
     {
-      email: z.string().email().describe("Customer email address"),
-      order_id: z.string().describe("Short order number (e.g. '1026')"),
-      session_id: z.string().describe("Session identifier"),
-      customer_id: z
+      email: z
         .string()
-        .describe("Customer ID (optional, pass empty string if unknown)"),
+        .trim()
+        .email()
+        .describe("Order email (e.g. 'test@example.com')"),
+      order_id: z
+        .string()
+        .trim()
+        .min(4, "Order ID is required")
+        .describe("Order ID (e.g. '1026')"),
+      session_id: z.string().describe("Session identifier"),
     },
-    async ({ email, order_id, session_id, customer_id = "" }) => {
+    async ({ email, order_id, session_id }) => {
       try {
-        //1. Email verification (skipped when customer_id is known)
-        if (!customer_id) {
-          const verificationStatus = await callBackendAPI(
-            "POST",
-            "/chat/email/verify-status/",
-            { thread_id: session_id, email },
-          );
-
-          if (!verificationStatus?.is_verified) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: "Please verify your email before accessing refund information.",
-                },
-              ],
-              isError: true,
-            };
-          }
-        }
-
-        //2. Find the order via REST (same pattern as get_order_detail)
+        //1. Find the order via REST (same pattern as get_order_detail)
         const ordersResponse = await callShopifyApi(
           "GET",
           `/admin/api/2024-04/orders.json?email=${encodeURIComponent(email)}&status=any`,
