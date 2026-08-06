@@ -959,6 +959,40 @@ const getReturnStatus = (o) => {
   return { allowed: true };
 };
 
+// Utility function to calculate the total refunded amount for an order by summing up the amounts of all successful refund transactions. This can be used to display the total refunded amount to customers or for internal accounting purposes.
+function getRefundedAmount(order) {
+  return (order.refunds || []).reduce((total, refund) => {
+    const refundTotal = (refund.transactions || [])
+      .filter((t) => t.kind === "refund" && t.status === "success")
+      .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+
+    return total + refundTotal;
+  }, 0);
+}
+
+// Utility function to determine the refund status of an order based on its financial status. It categorizes the order as fully refunded, partially refunded, or not refunded, and provides a corresponding message for each status.
+function getRefundStatus(order) {
+  switch ((order.financial_status || "").toLowerCase()) {
+    case "refunded":
+      return {
+        status: "refunded",
+        message: "Order has been fully refunded.",
+      };
+
+    case "partially_refunded":
+      return {
+        status: "partially_refunded",
+        message: "Order has been partially refunded.",
+      };
+
+    default:
+      return {
+        status: "not_refunded",
+        message: "No refund has been issued.",
+      };
+  }
+}
+
 // Utility function to format order details received from Shopify API, including calculating cancel and return eligibility based on order status and timestamps. This can be used to provide customers with clear information about their orders and their options for cancellation or returns.
 const formatOrder = (o) => {
   const cancelStatus = getCancelStatus(o);
@@ -1010,6 +1044,13 @@ const formatOrder = (o) => {
     email: o.email,
     financial_status: o.financial_status,
     fulfillment_status: o.fulfillment_status,
+
+    // Refund info
+    refund_status: getRefundStatus(o),
+    refunded_amount: `${getCurrencySymbol(o.presentment_currency)}${getRefundedAmount(o)}`,
+    has_refund: (o.refunds || []).length > 0,
+    refund_count: (o.refunds || []).length,
+
     shipment_status: shipmentStatus,
     created_at: o.created_at,
     // ⚠ USE THIS — NOT created_at — as the fulfillment_created_at argument for exchange_items.
@@ -1535,6 +1576,9 @@ const searchProductsByNames = async (
         query: productSearchByQuery,
         variables: {
           search: name,
+          sortKey: "RELEVANCE",
+          reverse: false,
+          first: 1,
         },
       };
 
