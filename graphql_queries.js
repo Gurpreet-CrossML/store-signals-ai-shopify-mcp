@@ -130,11 +130,13 @@ const productByIdQuery = `query getProductById($id: ID!) {
 
 // GraphQL query to fetch products sorted by specified Shopify sort options, such as relevance, price ascending/descending, newest, or best selling.
 const productSortQuery = `query getProducts(
+  $query: String
   $sortKey: ProductSortKeys
   $reverse: Boolean
 ) {
   products(
-    first: 5
+    first: 10
+    query: $query
     sortKey: $sortKey
     reverse: $reverse
   ) {

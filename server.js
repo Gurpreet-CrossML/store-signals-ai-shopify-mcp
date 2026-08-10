@@ -569,21 +569,58 @@ const createMcpServer = () => {
   // ######### 3. Fetch Sorted Products #########
   server.tool(
     "get_products_sorted",
-    `Fetch up to 5 products, sorted by Shopify sort options. Supported sort keys: relevance, price_asc, price_desc, newest, best_selling.
+    `Fetch up to 10 products, sorted by Shopify sort options.
+
+    Supported sort keys:
+    - relevance (default)
+    - featured
+    - newest
+    - best_selling
+    - price_asc
+    - price_desc
 
     Parameters:
     @param {string} session_id: Session ID
     @param {string} store_code: Store name or code
-    @param {string} [sort_key]: Sort key. Supported values: relevance, price_asc, price_desc, newest, best_selling, featured.
+    @param {string} [sort_key]: Sort key. Supported values: relevance(default), price_asc, price_desc, newest, best_selling, featured.
+    @param {number} [min_price] - Only return products priced greater than or equal to this value.
+    @param {number} [max_price] - Only return products priced less than or equal to this value.
     `,
     {
       session_id: z.string().describe("Session ID"),
       store_code: z.string().describe("Store name/code"),
       sort_key: z.string().describe("Sort key for the product list"),
+      min_price: z
+        .number()
+        .optional()
+        .describe("Minimum product price"),
+      max_price: z
+        .number()
+        .optional()
+        .describe("Maximum product price"),
     },
-    async ({ session_id, store_code, sort_key }) => {
+    async ({ session_id, store_code, sort_key, min_price, max_price }) => {
       try {
-        const cacheKey = `get_products_sorted:${String(sort_key || "relevance")}`;
+        const priceFilters = [];
+
+        if (min_price !== undefined) {
+          priceFilters.push(`variants.price:>=${min_price}`);
+        }
+
+        if (max_price !== undefined) {
+          priceFilters.push(`variants.price:<=${max_price}`);
+        }
+
+        const searchQuery =
+          priceFilters.length > 0 ? priceFilters.join(" AND ") : undefined;
+
+        const cacheKey = [
+          "get_products_sorted",
+          sort_key || "relevance",
+          min_price ?? "any",
+          max_price ?? "any",
+        ].join(":");
+
         const cached = await getCache(cacheKey);
         if (cached) {
           logProductViewEvents(cached.products, session_id, store_code);
@@ -602,6 +639,7 @@ const createMcpServer = () => {
         const graphqlQuery = {
           query: productSortQuery,
           variables: {
+            query: searchQuery,
             sortKey,
             reverse,
           },
