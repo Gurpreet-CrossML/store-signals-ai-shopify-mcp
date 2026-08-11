@@ -590,14 +590,8 @@ const createMcpServer = () => {
       session_id: z.string().describe("Session ID"),
       store_code: z.string().describe("Store name/code"),
       sort_key: z.string().describe("Sort key for the product list"),
-      min_price: z
-        .number()
-        .optional()
-        .describe("Minimum product price"),
-      max_price: z
-        .number()
-        .optional()
-        .describe("Maximum product price"),
+      min_price: z.number().optional().describe("Minimum product price"),
+      max_price: z.number().optional().describe("Maximum product price"),
     },
     async ({ session_id, store_code, sort_key, min_price, max_price }) => {
       try {
@@ -639,9 +633,10 @@ const createMcpServer = () => {
         const graphqlQuery = {
           query: productSortQuery,
           variables: {
-            query: searchQuery,
-            sortKey,
-            reverse,
+            query: searchQuery || "",
+            sortKey: sortKey,
+            reverse: reverse,
+            first: 10,
           },
         };
 
@@ -1162,7 +1157,7 @@ const createMcpServer = () => {
           };
         }
 
-        const formattedOrder = formatOrder(currentOrder);
+        const formattedOrder = await formatOrder(currentOrder);
 
         return {
           content: [
@@ -1227,7 +1222,7 @@ const createMcpServer = () => {
         }
 
         const order = orders[0];
-        const formatted = formatOrder(order);
+        const formatted = await formatOrder(order);
 
         if (order.cancelled_at) {
           return {
@@ -2030,6 +2025,146 @@ const createMcpServer = () => {
               ),
             },
           ],
+        };
+      }
+    },
+  );
+
+  // ######### 17. Fetch Discounted Products #########
+  server.tool(
+    "get_discounted_products",
+    `Fetch up to 10 discounted products.
+
+    Supported sort keys:
+    - query
+    - relevance (default)
+    - featured
+    - newest
+    - best_selling
+    - price_asc
+    - price_desc
+
+    Parameters:
+    @param {string} query: Search query for discounted products
+    @param {string} session_id: Session ID
+    @param {string} store_code: Store name or code
+    @param {string} [sort_key]: Sort key. Supported values: relevance(default), price_asc, price_desc, newest, best_selling, featured.
+    @param {number} [min_price] - Only return products priced greater than or equal to this value.
+    @param {number} [max_price] - Only return products priced less than or equal to this value.
+    `,
+    {
+      query: z
+        .string()
+        .optional()
+        .describe("Search query for discounted products"),
+      session_id: z.string().describe("Session ID"),
+      store_code: z.string().describe("Store name/code"),
+      sort_key: z.string().optional().describe("Sort key for the product list"),
+      min_price: z.number().optional().describe("Minimum product price"),
+      max_price: z.number().optional().describe("Maximum product price"),
+    },
+    async ({
+      query,
+      session_id,
+      store_code,
+      sort_key,
+      min_price,
+      max_price,
+    }) => {
+      try {
+        const priceFilters = [];
+
+        if (min_price !== undefined) {
+          priceFilters.push(`variants.price:>=${min_price}`);
+        }
+
+        if (max_price !== undefined) {
+          priceFilters.push(`variants.price:<=${max_price}`);
+        }
+
+        const searchFilters = [];
+
+        if (query?.trim()) {
+          searchFilters.push(query.trim());
+        }
+
+        searchFilters.push(...priceFilters);
+
+        const searchQuery =
+          searchFilters.length > 0 ? searchFilters.join(" AND ") : undefined;
+
+        const cacheKey = [
+          "get_discounted_products",
+          sort_key || "relevance",
+          min_price ?? "any",
+          max_price ?? "any",
+          query ?? "",
+        ].join(":");
+
+        const cached = await getCache(cacheKey);
+        if (cached) {
+          logProductViewEvents(cached.products, session_id, store_code);
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(cached, null, 2),
+              },
+            ],
+          };
+        }
+
+        const { sortKey, reverse } = getProductSortConfig(sort_key);
+
+        const graphqlQuery = {
+          query: productSortQuery,
+          variables: {
+            search: searchQuery,
+            sortKey: sortKey,
+            reverse: reverse,
+            first: 20,
+          },
+        };
+
+        const response = await callShopifyApi("POST", "", graphqlQuery);
+
+        const products = response?.data?.products?.edges || [];
+
+        const formattedProducts = formatProducts(
+          products,
+          session_id,
+          store_code,
+          false,
+          true,
+        );
+
+        const result = { products: formattedProducts };
+        try {
+          await setCache(cacheKey, result);
+        } catch (cacheError) {
+          console.warn(
+            "get_discounted_products cache set failed:",
+            cacheError?.message || cacheError,
+          );
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error fetching discounted products: ${error.message}`,
+            },
+          ],
+          isError: true,
         };
       }
     },

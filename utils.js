@@ -240,62 +240,87 @@ const formatProducts = (
   session_id,
   store_code,
   full_details = false,
+  only_discounted = false,
 ) => {
   try {
-    return products.map(({ node }) => {
-      const productId = node.id.split("/").pop();
-      const productName = node.title;
-      const productCategory = node?.category?.name;
+    return products
+      .map(({ node }) => {
+        const productId = node.id.split("/").pop();
+        const productName = node.title;
+        const productCategory = node?.category?.name;
 
-      // Log product view event to backend for analytics
-      callBackendAPI("POST", "/chat/bot-events/", {
-        thread_id: session_id,
-        event_type: "view_product",
-        store_code: store_code,
-        product_id: productId,
-        product_name: productName,
-        category: productCategory || "",
-      });
+        const baseProduct = {
+          id: productId,
+          name: productName,
+          category: productCategory,
+          price: `${getCurrencySymbol(node.priceRange?.minVariantPrice?.currencyCode)}${node.priceRange?.minVariantPrice?.amount || 0}`,
+          description: node.description || "",
+          available_for_sale: node.availableForSale,
+        };
 
-      const baseProduct = {
-        id: productId,
-        name: productName,
-        category: productCategory,
-        price: `${getCurrencySymbol(node.priceRange?.minVariantPrice?.currencyCode)}${node.priceRange?.minVariantPrice?.amount || 0}`,
-        description: node.description || "",
-        available_for_sale: node.availableForSale,
-      };
+        const variants = node.variants?.edges || [];
+        const firstVariant = variants[0]?.node;
+        const price = parseFloat(
+          firstVariant?.priceV2?.amount ||
+            node.priceRange?.minVariantPrice?.amount ||
+            0,
+        );
+        const compareAtPrice = parseFloat(
+          firstVariant?.compareAtPriceV2?.amount || 0,
+        );
 
-      if (!full_details) {
-        return baseProduct;
-      }
+        const hasDiscount = compareAtPrice > price && price > 0;
+        const discountPercentage = hasDiscount
+          ? Math.round(((compareAtPrice - price) / compareAtPrice) * 100)
+          : 0;
 
-      return {
-        ...baseProduct,
-        image: node.images?.edges?.[0]?.node?.url || null,
-        product_url:
-          node.onlineStoreUrl || `${SHOPIFY_BASE_URL}/products/${node?.handle}`,
-        variants: node.variants?.edges?.map(({ node: v }) => {
-          const discount = getVariantDiscount(v);
+        if (only_discounted && !hasDiscount) return null;
 
-          return {
-            variant_id: v.id.split("/").pop(),
-            variant_name: v.title,
+        baseProduct.discount_percentage = `${discountPercentage}%`;
 
-            variant_price: `${getCurrencySymbol(v.priceV2?.currencyCode)}${v.priceV2?.amount || 0}`,
+        // Log product view event to backend for analytics
+        callBackendAPI("POST", "/chat/bot-events/", {
+          thread_id: session_id,
+          event_type: "view_product",
+          store_code: store_code,
+          product_id: productId,
+          product_name: productName,
+          category: productCategory || "",
+        });
 
-            compare_at_price: v.compareAtPriceV2?.amount
-              ? `${getCurrencySymbol(v.compareAtPriceV2?.currencyCode)}${v.compareAtPriceV2.amount}`
-              : null,
+        if (!full_details) {
+          return baseProduct;
+        }
 
-            discount: discount,
+        return {
+          ...baseProduct,
+          image: node.images?.edges?.[0]?.node?.url || null,
+          product_url:
+            node.onlineStoreUrl ||
+            `${SHOPIFY_BASE_URL}/products/${node?.handle}`,
+          variants: node.variants?.edges?.map(({ node: v }) => {
+            const discount = getVariantDiscount(v);
 
-            available_for_sale: v.availableForSale,
-            options: v.selectedOptions,
-          };
-        }),
-      };
-    });
+            return {
+              variant_id: v.id.split("/").pop(),
+              variant_name: v.title,
+
+              variant_price: `${getCurrencySymbol(v.priceV2?.currencyCode)}${v.priceV2?.amount || 0}`,
+
+              compare_at_price: v.compareAtPriceV2?.amount
+                ? `${getCurrencySymbol(v.compareAtPriceV2?.currencyCode)}${v.compareAtPriceV2.amount}`
+                : null,
+
+              discount: discount,
+
+              available_for_sale: v.availableForSale,
+              options: v.selectedOptions,
+            };
+          }),
+        };
+      })
+      .filter(Boolean)
+      .slice(0, 10);
   } catch (err) {
     console.error("Error formatting products, error:", err);
     return [];
@@ -993,8 +1018,40 @@ function getRefundStatus(order) {
   }
 }
 
+// Utility function to format a delivery date string into a more human-readable format (e.g., "12 Jan 2024").
+const formatDeliveryDate = (dateString) => {
+  if (!dateString) return null;
+
+  const date = new Date(dateString);
+
+  return date.toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+};
+
+// Utility function to fetch fulfillment data for a specific order from Shopify's API.
+const getOrderFulfillmentData = async (order_id) => {
+  try {
+    const fulfillmentData = await callShopifyApi(
+      "GET",
+      "/admin/api/2025-01/orders/" + order_id + "/fulfillment_orders.json",
+    );
+
+    if (fulfillmentData && fulfillmentData?.fulfillment_orders?.length) {
+      return fulfillmentData.fulfillment_orders[0];
+    }
+
+    return null;
+  } catch (error) {
+    console.log("Error fetching order fulfillment status:", error);
+    return null;
+  }
+};
+
 // Utility function to format order details received from Shopify API, including calculating cancel and return eligibility based on order status and timestamps. This can be used to provide customers with clear information about their orders and their options for cancellation or returns.
-const formatOrder = (o) => {
+const formatOrder = async (o) => {
   const cancelStatus = getCancelStatus(o);
   const returnStatus = getReturnStatus(o);
 
@@ -1036,12 +1093,20 @@ const formatOrder = (o) => {
   const topLevelFulfillmentCreatedAt =
     firstActiveFulfillment?.created_at || null;
 
+  // Fetch delivery time
+  const orderFulfillment = await getOrderFulfillmentData(o.id);
+  const expectedDeliveryDate = formatDeliveryDate(
+    orderFulfillment?.delivery_method?.max_delivery_date_time ||
+      orderFulfillment?.delivery_method?.min_delivery_date_time,
+  );
+
   const formattedOrder = {
     // order_number is the human-readable number shown to customers (e.g. 1074).
     // USE shopify_order_id (the large numeric ID) for ALL Shopify API / exchange_items calls.
     order_number: o.order_number,
     shopify_order_id: o.id,
     email: o.email,
+    expected_delivery_date: expectedDeliveryDate,
     financial_status: o.financial_status,
     fulfillment_status: o.fulfillment_status,
 
