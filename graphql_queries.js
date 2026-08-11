@@ -23,6 +23,11 @@ const productSearchByQuery = `query getProducts($search: String!, $sortKey: Prod
         description
         descriptionHtml
 
+        metafield(namespace: "custom", key: "warranty") {
+          value
+          type
+        }
+
         images(first: 5) {
           edges {
             node {
@@ -112,6 +117,10 @@ const productByIdQuery = `query getProductById($id: ID!) {
     product(id: $id) {
         id title handle productType category { name } availableForSale onlineStoreUrl
         description descriptionHtml
+        metafield(namespace: "custom", key: "warranty") {
+          value
+          type
+        }
         images(first: 5) { edges { node { url altText } } }
         priceRange { minVariantPrice { amount currencyCode } }
         variants(first: 20) {
@@ -155,6 +164,10 @@ const productSortQuery = `query getProducts(
           }
         }
         description
+        metafield(namespace: "custom", key: "warranty") {
+          value
+          type
+        }
         availableForSale
         variants(first: 20) {
           edges {
