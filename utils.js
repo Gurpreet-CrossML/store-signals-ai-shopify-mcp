@@ -221,13 +221,14 @@ const getVariantDiscount = (variant) => {
   const compare = parseFloat(variant.compareAtPriceV2?.amount || 0);
 
   if (compare && compare > price) {
+    const savings = compare - price;
     const discount = ((compare - price) / compare) * 100;
 
     return {
       original_price: compare,
       discounted_price: price,
       discount_percentage: Math.round(discount),
-      savings: compare - price,
+      savings: Number(savings.toFixed(2)),
     };
   }
 
@@ -276,7 +277,9 @@ const formatProducts = (
 
         if (only_discounted && !hasDiscount) return null;
 
-        baseProduct.discount_percentage = `${discountPercentage}%`;
+        baseProduct.discount_percentage = discountPercentage
+          ? `${discountPercentage}%`
+          : null;
 
         // Log product view event to backend for analytics
         callBackendAPI("POST", "/chat/bot-events/", {
