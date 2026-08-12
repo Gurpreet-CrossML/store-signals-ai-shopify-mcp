@@ -633,7 +633,7 @@ const createMcpServer = () => {
         const graphqlQuery = {
           query: productSortQuery,
           variables: {
-            query: searchQuery || "",
+            search: searchQuery || "",
             sortKey: sortKey,
             reverse: reverse,
             first: 10,
