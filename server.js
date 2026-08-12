@@ -175,15 +175,27 @@ const createMcpServer = () => {
       product_type = null,
       vendor = null,
       tags = [],
-      availability = null,
+      availability = "in_stock",
       min_price = null,
       max_price = null,
       sort_by = "relevance",
     }) => {
       try {
-        // Normalize an inverted price range instead of sending Shopify a
-        // contradictory filter that would always return zero results.
-        if (min_price != null && max_price != null && min_price > max_price) {
+        // Treat zero as the omitted side of a range when callers send default
+        // min/max values alongside one real bound. A lone max_price: 0 remains
+        // valid, while 0..0 means no price filter.
+        if (Number(min_price) === 0 && Number(max_price) > 0) {
+          min_price = null;
+        } else if (Number(max_price) === 0 && Number(min_price) > 0) {
+          max_price = null;
+        } else if (
+          min_price != null &&
+          max_price != null &&
+          min_price > max_price
+        ) {
+          // Normalize an inverted non-zero price range instead of sending
+          // Shopify a contradictory filter that would always return zero
+          // results.
           [min_price, max_price] = [max_price, min_price];
         }
 

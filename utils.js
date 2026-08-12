@@ -608,6 +608,27 @@ const resolveSearchFilters = (
 // (the common case, e.g. "makeup brushes") should keep Shopify's normal
 // fuzzy/loose relevance matching, since forcing an exact-phrase match there
 // would make simple searches far too strict.
+const normalizeSearchPriceBounds = (min_price, max_price) => {
+  const hasMin = min_price != null && min_price !== "";
+  const hasMax = max_price != null && max_price !== "";
+  const minIsZero = hasMin && Number(min_price) === 0;
+  const maxIsZero = hasMax && Number(max_price) === 0;
+
+  if (minIsZero && maxIsZero) {
+    return { min_price: null, max_price: null };
+  }
+
+  if (minIsZero && hasMax && Number(max_price) > 0) {
+    return { min_price: null, max_price };
+  }
+
+  if (maxIsZero && hasMin && Number(min_price) > 0) {
+    return { min_price, max_price: null };
+  }
+
+  return { min_price, max_price };
+};
+
 const buildShopifySearchQuery = ({
   query = "",
   product_type = null,
@@ -618,6 +639,7 @@ const buildShopifySearchQuery = ({
   availability = null,
 } = {}) => {
   const clauses = [];
+  ({ min_price, max_price } = normalizeSearchPriceBounds(min_price, max_price));
 
   const hasStructuredClause = Boolean(
     product_type ||
@@ -677,6 +699,8 @@ const buildSearchCacheKey = ({
   sort_by,
   full_details,
 }) => {
+  ({ min_price, max_price } = normalizeSearchPriceBounds(min_price, max_price));
+
   const hasStructuredFilters =
     Boolean(product_type) ||
     Boolean(vendor) ||
