@@ -21,7 +21,6 @@ const {
   callShopifyApi,
   callBackendAPI,
   formatProducts,
-  extractSearchTerms,
   fetchRelatedProducts,
   getProductSortConfig,
   storeMetadata,
@@ -38,9 +37,6 @@ const {
   formatRefundStatus,
   ShopifyExchangeManager,
   getExchangePolicyEligibility,
-  resolveSearchFilters,
-  buildShopifySearchQuery,
-  buildSearchCacheKey,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
@@ -71,28 +67,45 @@ const createMcpServer = () => {
   // ######### 1. Search Products #########
   server.tool(
     "search_products",
-    `Search for products based on the user's query with advanced filtering and sorting options.
-    Returns a list of products with their details, including name, price, stock status, and image URL.
+    `Search for products based on the customer's request using product, price,
+    availability, tag, brand, category, and sorting filters.
 
-    Use the structured filters below whenever the customer's request maps to them - they run
-    server-side on Shopify and are far more precise than cramming everything into "query".
-    Reserve "query" for descriptive/free-text intent that isn't a category, brand, or attribute
-    tag (e.g. "vitamin c", "oily skin", "noise cancelling").
+    Use structured filters whenever the customer's request maps to them. These filters
+    are processed server-side and are more precise than putting everything into "query".
+
+    IMPORTANT SEARCH RULES:
+
+    1. Use "query" only for the main product/search intent.
+      Examples:
+      - "travel bags"
+      - "laptop"
+      - "running shoes"
+      - "vitamin c serum"
+
+    2. Use "product_type" when the customer specifies a product type/category.
+
+    3. Use "vendor" only when the customer explicitly specifies a brand/vendor.
+
+    4. Use "tags" for store attributes such as audience, occasion, feature,
+      material, skin type, concern, etc., when they correspond to store tags.
+
+    If the customer asks for a variant option that does not exist in the store
+    metadata, do not invent it and do not pass it as a variant filter.
+    The agent should handle unavailable variant options before calling this tool.
 
     Parameters:
-    @param {string} query: Free-text search keywords (product name, description terms, descriptive attributes)
-    @param {string} session_id: Session ID
-    @param {string} store_code: Store name or code
-    @param {boolean} full_details: Whether to return full product details including variants, images, and URLs
-    @param {number} page_size: Number of products to return (default: 15)
-    @param {string} product_type: Category/type filter, e.g. "Perfume", "Sunscreen" (matched against the store's real types/collections)
-    @param {string} vendor: Brand filter, e.g. "Chanel" - only when the customer names a specific brand
-    @param {string[]} tags: Attribute filters as store tags - gender/audience, skin/hair type or concern, material, occasion, feature, dietary preference, etc.
-    @param {string} availability: "in_stock" | "out_of_stock" | "all" (default: all)
-    @param {number} min_price: Minimum price filter (optional)
-    @param {number} max_price: Maximum price filter (optional)
-    @param {string} sort_by: "relevance" | "price_asc" | "price_desc" | "newest" | "best_selling" (default: relevance)
-    `,
+    @param {string} query: Main free-text product search intent.
+    @param {string} session_id: Session ID.
+    @param {string} store_code: Store name or code.
+    @param {boolean} full_details: Whether to return full product details including variants, images, and URLs.
+    @param {number} page_size: Number of products to return.
+    @param {string} product_type: Product type/category filter.
+    @param {string} vendor: Brand/vendor filter.
+    @param {string[]} tags: Store tag filters.
+    @param {string} availability: "in_stock" | "out_of_stock" | "all".
+    @param {number} min_price: Minimum price filter.
+    @param {number} max_price: Maximum price filter.
+    @param {string} sort_by: "relevance" | "price_asc" | "price_desc" | "newest" | "best_selling".`,
     {
       query: z
         .string()
@@ -181,82 +194,49 @@ const createMcpServer = () => {
       sort_by = "relevance",
     }) => {
       try {
-        // Treat zero as the omitted side of a range when callers send default
-        // min/max values alongside one real bound. A lone max_price: 0 remains
-        // valid, while 0..0 means no price filter.
-        if (Number(min_price) === 0 && Number(max_price) > 0) {
-          min_price = null;
-        } else if (Number(max_price) === 0 && Number(min_price) > 0) {
-          max_price = null;
-        } else if (
-          min_price != null &&
-          max_price != null &&
-          min_price > max_price
-        ) {
-          // Normalize an inverted non-zero price range instead of sending
-          // Shopify a contradictory filter that would always return zero
-          // results.
-          [min_price, max_price] = [max_price, min_price];
-        }
-
-        // Ground caller-supplied product_type/tags against the store's real
-        // catalogue so we only ever emit filter clauses for values the store
-        // actually carries. Unmatched terms fall back to free-text keywords
-        // instead of silently zeroing out the search.
-        let groundedType = null;
-        let groundedVendor = vendor || null;
-        let groundedTags = [];
-        let extraKeywords = [];
-
-        if (product_type || vendor || (tags && tags.length > 0)) {
-          const metadata = await storeMetadata();
-          const resolved = resolveSearchFilters(
-            { product_type, vendor, tags },
-            metadata,
-          );
-          groundedType = resolved.product_type;
-          groundedVendor = resolved.vendor;
-          groundedTags = resolved.tags;
-          extraKeywords = resolved.extraKeywords;
-        }
-
+        const searchClauses = [];
         const { sortKey, reverse } = getProductSortConfig(sort_by);
 
-        // Keep the caller's genuine free-text query separate from
-        // extraKeywords (terms that FAILED to ground against real store
-        // data). extraKeywords is the least reliable signal — verified live
-        // against this store that an ungrounded multi-word phrase combined
-        // with a product_type: clause can silently zero out results even
-        // when the type filter alone would have matched (e.g. "oily skin"
-        // has no tag in this store, so combining it with product_type:
-        // Sunscreen returned 0 results even though the sunscreen itself
-        // exists). It's relaxed away first, before the grounded, trustworthy
-        // structured filters.
-        const baseFilters = {
-          query,
-          extraKeywords,
-          product_type: groundedType,
-          vendor: groundedVendor,
-          tags: groundedTags,
-          min_price,
-          max_price,
-          availability,
-        };
+        if (query?.trim()) {
+          searchClauses.push(query.trim());
+        }
 
-        // Merge query + extraKeywords into the single free-text string
-        // buildShopifySearchQuery expects.
-        const toSearchParams = (filters) => ({
-          ...filters,
-          query: [filters.query, ...(filters.extraKeywords || [])]
+        if (product_type?.trim()) {
+          searchClauses.push(`product_type:${product_type.trim()}`);
+        }
+
+        if (vendor?.trim()) {
+          searchClauses.push(`vendor:${vendor.trim()}`);
+        }
+
+        if (availability && availability !== "all") {
+          searchClauses.push(
+            `available_for_sale:${availability === "in_stock"}`,
+          );
+        }
+
+        if (min_price != null && min_price >= 0) {
+          searchClauses.push(`variants.price:>=${min_price}`);
+        }
+
+        if (max_price != null && max_price >= 0) {
+          searchClauses.push(`variants.price:<=${max_price}`);
+        }
+
+        if (Array.isArray(tags) && tags.length > 0) {
+          tags
             .filter(Boolean)
-            .join(" "),
-        });
+            .map((tag) => tag.trim())
+            .filter(Boolean)
+            .forEach((tag) => {
+              searchClauses.push(`tag:${JSON.stringify(tag)}`);
+            });
+        }
 
-        const cacheKey = buildSearchCacheKey({
-          ...toSearchParams(baseFilters),
-          sort_by,
-          full_details,
-        });
+        const searchQuery = searchClauses.join(" ");
+
+        const cacheKey = `product_search:${searchQuery}:${sortKey}:${reverse}`;
+
         const cached = await getCache(cacheKey);
         if (cached) {
           logProductViewEvents(cached.products, session_id, store_code);
@@ -270,148 +250,69 @@ const createMcpServer = () => {
           };
         }
 
-        // Progressively relax the least-reliable filters first if the fully-
-        // filtered search comes back empty, so one overly-specific guess
-        // doesn't zero out results a looser match would have found. Skips a
-        // step when relaxing it wouldn't change the query (e.g. plain
-        // free-text searches with no structured filters at all), so the
-        // common case still makes a single Shopify call.
-        const relaxationSteps = [
-          baseFilters,
-          { ...baseFilters, extraKeywords: [] },
-          { ...baseFilters, extraKeywords: [], tags: [] },
-          {
-            ...baseFilters,
-            extraKeywords: [],
-            tags: [],
-            vendor: null,
-            product_type: null,
+        const searchResponse = await callShopifyApi("POST", "", {
+          query: productSearchByQuery,
+          variables: {
+            search: searchQuery,
+            sortKey,
+            reverse,
+            first: page_size,
           },
-        ];
+        });
 
-        let searchResponse = null;
-        let lastTriedQuery = null;
+        const rawProducts = searchResponse?.data?.products?.edges;
 
-        for (const step of relaxationSteps) {
-          const searchQuery = buildShopifySearchQuery(toSearchParams(step));
-          if (searchQuery === lastTriedQuery) continue;
-          lastTriedQuery = searchQuery;
-
-          const resp = await callShopifyApi("POST", "", {
-            query: productSearchByQuery,
-            variables: {
-              search: searchQuery,
-              sortKey,
-              reverse,
-              first: page_size,
-            },
-          });
-
-          if (resp?.data?.products?.edges?.length > 0) {
-            searchResponse = resp;
-            break;
-          }
-        }
-
-        // Format the products data to be returned
-        let formattedProducts = searchResponse
-          ? formatProducts(
-              searchResponse.data.products.edges,
-              session_id,
-              store_code,
-              full_details,
-            )
-          : [];
-
-        // Final response object to be returned, which may include related products if found.
-        const result = {
-          products: formattedProducts,
-        };
-
-        // If no products found with any structured relaxation, fall back to
-        // LLM-based keyword expansion as the last resort.
-        if (result?.products?.length === 0) {
-          const keywords = await extractSearchTerms(query);
-          console.log(
-            `No products found for this query "${query}", retrying with keywords - [${keywords}]...`,
-          );
-
-          for (let kw of keywords) {
-            const searchQuery = buildShopifySearchQuery({
-              query: kw,
-              min_price,
-              max_price,
-            });
-
-            const gQuery = {
-              query: productSearchByQuery,
-              variables: {
-                search: searchQuery,
-                sortKey: sortKey,
-                reverse: reverse,
-                first: page_size,
-              },
-            };
-
-            const kwResponse = await callShopifyApi("POST", "", gQuery);
-
-            if (
-              kwResponse?.data?.products?.edges &&
-              kwResponse?.data?.products?.edges?.length > 0
-            ) {
-              const formattedProducts = formatProducts(
-                kwResponse.data.products.edges,
-                session_id,
-                store_code,
-                full_details,
-              );
-
-              result.products = formattedProducts;
-              break;
-            }
-          }
-        }
-
-        if (result?.products?.length === 0) {
+        if (!rawProducts || !rawProducts.length) {
           return {
             content: [
               {
                 type: "text",
-                text: "No products found for the query: ",
+                text: "No products found",
               },
             ],
           };
         }
 
+        // Format the products data to be returned
+        let formattedProducts = formatProducts(
+          rawProducts,
+          session_id,
+          store_code,
+          full_details,
+        );
+
+        const result = {
+          products: formattedProducts,
+        };
+
         // Fetch related products for the found products to provide more comprehensive results.
         // Existing product IDs
         const existingProductIds = result.products.map((p) => String(p.id));
+        const relatedProductIds = new Set();
 
-        for (let p of result.products) {
-          console.log("Fetching related products for ID:", p.id);
+        for (const productId of existingProductIds) {
+          if (relatedProductIds.size >= 5) {
+            break;
+          }
 
-          const relatedProducts = await fetchRelatedProducts(p.id);
+          console.log("Fetching related products for ID:", productId);
 
-          console.log(`Related products for ${p.id}:`, relatedProducts);
+          const relatedProductsData = await fetchRelatedProducts(productId);
 
-          if (relatedProducts && relatedProducts?.length > 0) {
-            // Remove:
-            // 1. duplicate IDs
-            // 2. IDs already present in products
-            const cleanedRelatedProducts = [
-              ...new Set(
-                relatedProducts.filter(
-                  (id) => !existingProductIds.includes(String(id)),
-                ),
-              ),
-            ];
+          if (!Array.isArray(relatedProductsData)) {
+            continue;
+          }
 
-            if (cleanedRelatedProducts.length > 0) {
-              result.relatedProducts = cleanedRelatedProducts;
+          for (const relatedProductId of relatedProductsData) {
+            if (relatedProductIds.size >= 5) {
               break;
             }
+
+            relatedProductIds.add(relatedProductId);
           }
         }
+
+        result.relatedProducts = [...relatedProductIds];
 
         try {
           await setCache(cacheKey, result);
@@ -428,6 +329,7 @@ const createMcpServer = () => {
           ],
         };
       } catch (error) {
+        console.log("Product searching error, Error:", error);
         return {
           content: [
             {
