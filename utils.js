@@ -221,13 +221,14 @@ const getVariantDiscount = (variant) => {
   const compare = parseFloat(variant.compareAtPriceV2?.amount || 0);
 
   if (compare && compare > price) {
+    const savings = compare - price;
     const discount = ((compare - price) / compare) * 100;
 
     return {
       original_price: compare,
       discounted_price: price,
       discount_percentage: Math.round(discount),
-      savings: compare - price,
+      savings: Number(savings.toFixed(2)),
     };
   }
 
@@ -242,35 +243,74 @@ const formatProducts = (
   session_id,
   store_code,
   full_details = false,
+  only_discounted = false,
 ) => {
   try {
-    return products.map(({ node }) => {
-      const productId = node.id.split("/").pop();
-      const productName = node.title;
-      const productCategory = node?.category?.name;
+    return products
+      .map(({ node }) => {
+        const productId = node.id.split("/").pop();
+        const productName = node.title;
+        const productCategory = node?.category?.name;
 
-      // Log product view event to backend for analytics
-      callBackendAPI(widget_key, "POST", "/chat/bot-events/", {
-        thread_id: session_id,
-        event_type: "view_product",
-        store_code: store_code,
-        product_id: productId,
-        product_name: productName,
-        category: productCategory || "",
-      });
+        const baseProduct = {
+          id: productId,
+          name: productName,
+          category: productCategory,
+          price: `${getCurrencySymbol(node.priceRange?.minVariantPrice?.currencyCode)}${node.priceRange?.minVariantPrice?.amount || 0}`,
+          description: node.description || "",
+          available_for_sale: node.availableForSale,
+          warranty: node?.metafield?.value || null,
+        };
 
-      const baseProduct = {
-        id: productId,
-        name: productName,
-        category: productCategory,
-        price: `${getCurrencySymbol(node.priceRange?.minVariantPrice?.currencyCode)}${node.priceRange?.minVariantPrice?.amount || 0}`,
-        description: node.description || "",
-        available_for_sale: node.availableForSale,
-      };
+        const variants = node.variants?.edges || [];
+        const firstVariant = variants[0]?.node;
+        const price = parseFloat(
+          firstVariant?.priceV2?.amount ||
+            node.priceRange?.minVariantPrice?.amount ||
+            0,
+        );
+        const compareAtPrice = parseFloat(
+          firstVariant?.compareAtPriceV2?.amount || 0,
+        );
 
-      if (!full_details) {
-        return baseProduct;
-      }
+        const hasDiscount = compareAtPrice > price && price > 0;
+        const discountPercentage = hasDiscount
+          ? Math.round(((compareAtPrice - price) / compareAtPrice) * 100)
+          : 0;
+
+        if (only_discounted && !hasDiscount) return null;
+
+        baseProduct.discount_percentage = discountPercentage
+          ? `${discountPercentage}%`
+          : null;
+
+        // Log product view event to backend for analytics
+        callBackendAPI(widget_key, "POST", "/chat/bot-events/", {
+          thread_id: session_id,
+          event_type: "view_product",
+          store_code: store_code,
+          product_id: productId,
+          product_name: productName,
+          category: productCategory || "",
+        });
+
+        if (!full_details) {
+          const variantOptions = {};
+          variants.forEach(({ node: v }) => {
+            (v.selectedOptions || []).forEach(({ name, value }) => {
+              if (!variantOptions[name]) {
+                variantOptions[name] = [];
+              }
+              if (!variantOptions[name].includes(value)) {
+                variantOptions[name].push(value);
+              }
+            });
+          });
+
+          baseProduct.variant_options = variantOptions;
+
+          return baseProduct;
+        }
 
       return {
         ...baseProduct,
@@ -280,24 +320,26 @@ const formatProducts = (
         variants: node.variants?.edges?.map(({ node: v }) => {
           const discount = getVariantDiscount(v);
 
-          return {
-            variant_id: v.id.split("/").pop(),
-            variant_name: v.title,
+            return {
+              variant_id: v.id.split("/").pop(),
+              variant_name: v.title,
 
-            variant_price: `${getCurrencySymbol(v.priceV2?.currencyCode)}${v.priceV2?.amount || 0}`,
+              variant_price: `${getCurrencySymbol(v.priceV2?.currencyCode)}${v.priceV2?.amount || 0}`,
 
-            compare_at_price: v.compareAtPriceV2?.amount
-              ? `${getCurrencySymbol(v.compareAtPriceV2?.currencyCode)}${v.compareAtPriceV2.amount}`
-              : null,
+              compare_at_price: v.compareAtPriceV2?.amount
+                ? `${getCurrencySymbol(v.compareAtPriceV2?.currencyCode)}${v.compareAtPriceV2.amount}`
+                : null,
 
-            discount: discount,
+              discount: discount,
 
-            available_for_sale: v.availableForSale,
-            options: v.selectedOptions,
-          };
-        }),
-      };
-    });
+              available_for_sale: v.availableForSale,
+              options: v.selectedOptions,
+            };
+          }),
+        };
+      })
+      .filter(Boolean)
+      .slice(0, 10);
   } catch (err) {
     console.error("Error formatting products, error:", err);
     return [];
@@ -385,80 +427,6 @@ const storeMetadata = async (
       collections: [],
       categories: [],
     };
-  }
-};
-
-// Utility function to extract relevant search terms from a user query using OpenAI's language model. It uses the store metadata to generate more accurate and relevant search terms that can be used to query the product catalog.
-const extractSearchTerms = async (
-  query,
-  base_url,
-  storefront_token,
-  admin_token,
-  store_code,
-) => {
-  if (!query || typeof query !== "string") {
-    return [];
-  }
-
-  try {
-    const metadata = await storeMetadata(
-      base_url,
-      storefront_token,
-      admin_token,
-      store_code,
-    );
-
-    const prompt = `You are an eCommerce search query generator.
-
-    Given a user query and store catalog metadata, generate 3-4 short search queries to find relevant products.
-
-    Rules:
-    - Each query should contain a maximum of 2 words and can also be a single-word query.
-    - Queries must look like real ecommerce catalog searches
-    - Use catalog metadata to pick accurate product type terms
-    - Never use conversational language
-    - Return ONLY a JSON array of strings, nothing else
-
-    Store Catalog Metadata:
-    - Product Types: ${metadata.types.filter(Boolean).join(", ") || "N/A"}
-    - Collections: ${metadata.collections.filter(Boolean).join(", ") || "N/A"}
-    - Categories: ${metadata.categories.filter(Boolean).join(", ") || "N/A"}
-    - Tags: ${metadata.tags.filter(Boolean).slice(0, 50).join(", ") || "N/A"}
-
-    User Query: "${query}"
-
-    Return format: ["query1", "query2", "query3"]`;
-
-    const response = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: OPENAI_MODEL,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.3,
-        max_tokens: 100,
-      },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
-        timeout: 10000,
-      },
-    );
-
-    const content = response?.data?.choices?.[0]?.message?.content?.trim();
-    const cleaned = content.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(cleaned);
-
-    if (!Array.isArray(parsed)) return [];
-
-    return parsed
-      .filter((q) => typeof q === "string" && q.trim().length > 0)
-      .map((q) => q.trim().toLowerCase())
-      .slice(0, 4);
-  } catch (error) {
-    console.error("extractSearchTerms Error:", error);
-    return [];
   }
 };
 
@@ -560,154 +528,6 @@ const groundTerm = (term, candidates = []) => {
   });
 
   return partial || null;
-};
-
-// Utility function to resolve caller-supplied product_type/vendor/tags
-// against the store's real catalogue metadata (fetched via storeMetadata()),
-// so search_products only ever emits Shopify filter clauses for values the
-// store actually carries. Terms with no close match are never silently
-// dropped — they're returned as extraKeywords so the intent still reaches
-// Shopify via free-text search instead of zeroing out the results.
-const resolveSearchFilters = (
-  { product_type, vendor, tags = [] },
-  metadata = {},
-) => {
-  const types = metadata?.types || [];
-  const collections = metadata?.collections || [];
-  const allTags = metadata?.tags || [];
-
-  const extraKeywords = [];
-
-  let resolvedType = null;
-  if (product_type) {
-    resolvedType =
-      groundTerm(product_type, types) || groundTerm(product_type, collections);
-    if (!resolvedType) extraKeywords.push(product_type);
-  }
-
-  const resolvedTags = [];
-  for (const tag of tags || []) {
-    const match = groundTerm(tag, allTags);
-    if (match) resolvedTags.push(match);
-    else if (tag) extraKeywords.push(tag);
-  }
-
-  return {
-    product_type: resolvedType,
-    vendor: vendor || null,
-    tags: resolvedTags,
-    extraKeywords,
-  };
-};
-
-// Utility function to build a Shopify product search query string from
-// structured filter inputs, combining free-text keywords with field-
-// qualified clauses. Shopify ANDs space-separated terms/clauses by default,
-// so a query like `"vitamin c" product_type:"Serum" tag:"Men" variants.price:<=8000`
-// narrows on all of them at once instead of relying on fuzzy full-text
-// matching alone.
-//
-// Empirically verified against a live store: an UNQUOTED multi-word free-text
-// term combined with a product_type: clause only loosely influences ranking
-// rather than acting as a hard filter (e.g. "vitamin c product_type:Serum"
-// also returned an unrelated hair serum). Quoting the free text as an exact
-// phrase makes it a real AND'd filter instead. This is only safe to do when
-// at least one other structured clause is present — a lone free-text query
-// (the common case, e.g. "makeup brushes") should keep Shopify's normal
-// fuzzy/loose relevance matching, since forcing an exact-phrase match there
-// would make simple searches far too strict.
-const buildShopifySearchQuery = ({
-  query = "",
-  product_type = null,
-  vendor = null,
-  tags = [],
-  min_price = null,
-  max_price = null,
-  availability = null,
-} = {}) => {
-  const clauses = [];
-
-  const hasStructuredClause = Boolean(
-    product_type ||
-    vendor ||
-    (tags && tags.length > 0) ||
-    min_price != null ||
-    max_price != null ||
-    availability,
-  );
-
-  const freeText = String(query || "").trim();
-  if (freeText) {
-    clauses.push(hasStructuredClause ? quoteSearchValue(freeText) : freeText);
-  }
-
-  if (product_type) {
-    clauses.push(`product_type:${quoteSearchValue(product_type)}`);
-  }
-
-  if (vendor) {
-    clauses.push(`vendor:${quoteSearchValue(vendor)}`);
-  }
-
-  for (const tag of tags || []) {
-    if (tag) clauses.push(`tag:${quoteSearchValue(tag)}`);
-  }
-
-  if (min_price != null && min_price !== "") {
-    clauses.push(`variants.price:>=${min_price}`);
-  }
-
-  if (max_price != null && max_price !== "") {
-    clauses.push(`variants.price:<=${max_price}`);
-  }
-
-  if (availability === "in_stock") clauses.push("available_for_sale:true");
-  if (availability === "out_of_stock") clauses.push("available_for_sale:false");
-
-  return clauses.join(" ").trim();
-};
-
-// Utility function to build a stable, filter-aware cache key for
-// search_products. SemanticCache (cache.js) only does an exact-match lookup
-// when the key contains the `filter_by_` marker — otherwise it falls
-// through to an LLM similarity judge that only ever sees the key string. Any
-// structured filter MUST be folded into that marker, or two searches that
-// differ only by filters (e.g. tag:Men vs tag:Women) but have similar
-// free-text could be judged "similar" and collide on the wrong cached result.
-const buildSearchCacheKey = ({
-  query,
-  product_type,
-  vendor,
-  tags = [],
-  min_price,
-  max_price,
-  availability,
-  sort_by,
-  full_details,
-  store_code,
-}) => {
-  const hasStructuredFilters =
-    Boolean(product_type) ||
-    Boolean(vendor) ||
-    (tags && tags.length > 0) ||
-    min_price != null ||
-    max_price != null ||
-    Boolean(availability) ||
-    (sort_by && sort_by !== "relevance");
-
-  const descriptor = [
-    product_type || "",
-    vendor || "",
-    [...(tags || [])].sort().join(","),
-    min_price ?? "",
-    max_price ?? "",
-    availability || "",
-    sort_by || "",
-  ].join("|");
-
-  const filterKey = hasStructuredFilters ? `filter_by_${descriptor}` : "";
-
-  return `search:${query}:${filterKey}:${full_details ? "full" : "brief"}:store:${store_code}`;
 };
 
 // Utility function to parse space input and convert dimensions to centimeters. This can be used to filter products based on available space by extracting dimensions from product descriptions and converting them to a standard unit for comparison.
@@ -997,8 +817,74 @@ const getReturnStatus = (o) => {
   return { allowed: true };
 };
 
+// Utility function to calculate the total refunded amount for an order by summing up the amounts of all successful refund transactions. This can be used to display the total refunded amount to customers or for internal accounting purposes.
+function getRefundedAmount(order) {
+  return (order.refunds || []).reduce((total, refund) => {
+    const refundTotal = (refund.transactions || [])
+      .filter((t) => t.kind === "refund" && t.status === "success")
+      .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+
+    return total + refundTotal;
+  }, 0);
+}
+
+// Utility function to determine the refund status of an order based on its financial status. It categorizes the order as fully refunded, partially refunded, or not refunded, and provides a corresponding message for each status.
+function getRefundStatus(order) {
+  switch ((order.financial_status || "").toLowerCase()) {
+    case "refunded":
+      return {
+        status: "refunded",
+        message: "Order has been fully refunded.",
+      };
+
+    case "partially_refunded":
+      return {
+        status: "partially_refunded",
+        message: "Order has been partially refunded.",
+      };
+
+    default:
+      return {
+        status: "not_refunded",
+        message: "No refund has been issued.",
+      };
+  }
+}
+
+// Utility function to format a delivery date string into a more human-readable format (e.g., "12 Jan 2024").
+const formatDeliveryDate = (dateString) => {
+  if (!dateString) return null;
+
+  const date = new Date(dateString);
+
+  return date.toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+};
+
+// Utility function to fetch fulfillment data for a specific order from Shopify's API.
+const getOrderFulfillmentData = async (order_id) => {
+  try {
+    const fulfillmentData = await callShopifyApi(
+      "GET",
+      "/admin/api/2025-01/orders/" + order_id + "/fulfillment_orders.json",
+    );
+
+    if (fulfillmentData && fulfillmentData?.fulfillment_orders?.length) {
+      return fulfillmentData.fulfillment_orders[0];
+    }
+
+    return null;
+  } catch (error) {
+    console.log("Error fetching order fulfillment status:", error);
+    return null;
+  }
+};
+
 // Utility function to format order details received from Shopify API, including calculating cancel and return eligibility based on order status and timestamps. This can be used to provide customers with clear information about their orders and their options for cancellation or returns.
-const formatOrder = (o) => {
+const formatOrder = async (o) => {
   const cancelStatus = getCancelStatus(o);
   const returnStatus = getReturnStatus(o);
 
@@ -1040,14 +926,29 @@ const formatOrder = (o) => {
   const topLevelFulfillmentCreatedAt =
     firstActiveFulfillment?.created_at || null;
 
+  // Fetch delivery time
+  const orderFulfillment = await getOrderFulfillmentData(o.id);
+  const expectedDeliveryDate = formatDeliveryDate(
+    orderFulfillment?.delivery_method?.max_delivery_date_time ||
+      orderFulfillment?.delivery_method?.min_delivery_date_time,
+  );
+
   const formattedOrder = {
     // order_number is the human-readable number shown to customers (e.g. 1074).
     // USE shopify_order_id (the large numeric ID) for ALL Shopify API / exchange_items calls.
     order_number: o.order_number,
     shopify_order_id: o.id,
     email: o.email,
+    expected_delivery_date: expectedDeliveryDate,
     financial_status: o.financial_status,
     fulfillment_status: o.fulfillment_status,
+
+    // Refund info
+    refund_status: getRefundStatus(o),
+    refunded_amount: `${getCurrencySymbol(o.presentment_currency)}${getRefundedAmount(o)}`,
+    has_refund: (o.refunds || []).length > 0,
+    refund_count: (o.refunds || []).length,
+
     shipment_status: shipmentStatus,
     created_at: o.created_at,
     // ⚠ USE THIS — NOT created_at — as the fulfillment_created_at argument for exchange_items.
@@ -1967,7 +1868,6 @@ module.exports = {
   callShopifyApi,
   callBackendAPI,
   formatProducts,
-  extractSearchTerms,
   fetchRelatedProducts,
   getProductSortConfig,
   storeMetadata,
@@ -1987,7 +1887,4 @@ module.exports = {
   isConsumableProductType,
   quoteSearchValue,
   groundTerm,
-  resolveSearchFilters,
-  buildShopifySearchQuery,
-  buildSearchCacheKey,
 };
