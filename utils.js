@@ -14,8 +14,6 @@ dotenv.config();
 
 const MCP_NAME = process.env.MCP_NAME;
 const MCP_VERSION = process.env.MCP_VERSION;
-const SMTP_USER = process.env.SMTP_USER;
-const SMTP_PASS = process.env.SMTP_PASS;
 const BACKEND_API_URL = process.env.BACKEND_API_URL;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL;
@@ -23,8 +21,6 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL;
 const allEnvironmentVariables = {
   MCP_NAME,
   MCP_VERSION,
-  SMTP_USER,
-  SMTP_PASS,
   BACKEND_API_URL,
   OPENAI_API_KEY,
   OPENAI_MODEL,
@@ -1859,8 +1855,6 @@ module.exports = {
   // envs
   MCP_NAME,
   MCP_VERSION,
-  SMTP_USER,
-  SMTP_PASS,
   BACKEND_API_URL,
   OPENAI_API_KEY,
   OPENAI_MODEL,

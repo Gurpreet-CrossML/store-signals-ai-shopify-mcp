@@ -5,7 +5,6 @@ const {
 const { z } = require("zod");
 const express = require("express");
 const cors = require("cors");
-const nodemailer = require("nodemailer");
 const {
   productSearchByQuery,
   productByIdQuery,
@@ -16,8 +15,6 @@ const {
 const {
   MCP_NAME,
   MCP_VERSION,
-  SMTP_USER,
-  SMTP_PASS,
   callShopifyApi,
   callBackendAPI,
   formatProducts,
@@ -41,17 +38,6 @@ const {
 
 const { getCache, setCache } = require("./cache");
 
-// Configure Nodemailer transporter for sending OTP emails using SMTP credentials from environment variables.
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false,
-  auth: {
-    user: SMTP_USER,
-    pass: SMTP_PASS,
-  },
-});
-
 const createMcpServer = (configs = {}) => {
   const {
     baseUrl,
@@ -72,7 +58,7 @@ const createMcpServer = (configs = {}) => {
     !widgetKey
   ) {
     throw new Error(
-      "createMcpServer: missing required config (baseUrl / adminAccessToken / adminAccessToken / storeCode / sessionId)",
+      "createMcpServer: missing required config (baseUrl / storefrontAccessToken / adminAccessToken / storeCode / sessionId / widgetKey)",
     );
   }
 
@@ -918,163 +904,6 @@ const createMcpServer = (configs = {}) => {
               type: "text",
               text: `Error fetching available discounts: ${error.message}`,
             },
-          ],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  // ######### 7. Send OTP #########
-  server.tool(
-    "send_otp",
-    `Send a verification OTP to the provided email.
-  This tool is strictly used for order tracking verification.
-
-  Parameters:
-  @param {string} email - User email to receive OTP
-  `,
-    {
-      email: z.string().email().describe("User email address"),
-    },
-    async ({ email }) => {
-      try {
-        const verificationStatus = await callBackendAPI(
-          widgetKey,
-          "POST",
-          "/chat/email/verify-status/",
-          { thread_id: sessionId, email: email },
-        );
-        if (verificationStatus && verificationStatus?.is_verified) {
-          return {
-            content: [
-              { type: "text", text: "Your email is already verified." },
-            ],
-            isError: false,
-          };
-        }
-
-        // Check customer existence (Admin API only)
-        const customerResponse = await callShopifyApi(
-          baseUrl,
-          storefrontAccessToken,
-          adminAccessToken,
-          "GET",
-          `/admin/api/2024-01/customers/search.json?query=email:${encodeURIComponent(email)}`,
-        );
-
-        // Prevent email enumeration
-        if (
-          !customerResponse?.customers?.length ||
-          customerResponse?.customers?.length === 0
-        ) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "No account found with this email.",
-              },
-            ],
-          };
-        }
-
-        const otpResponse = await callBackendAPI(
-          widgetKey,
-          "POST",
-          "/chat/otp/generate/",
-          {
-            thread_id: sessionId,
-            email: email,
-          },
-        );
-
-        if (!otpResponse || !otpResponse?.otp) {
-          return {
-            content: [
-              { type: "text", text: "Failed to send otp, please try again." },
-            ],
-            isError: true,
-          };
-        }
-
-        // Send email
-        await transporter.sendMail({
-          from: `"Shopify Support" <${process.env.SMTP_USER}>`,
-          to: email,
-          subject: "Your verification code",
-          text: `Your verification code is ${otpResponse?.otp}. It will expire in ${otpResponse?.expires_in_seconds} seconds.`,
-        });
-
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                // "If an account exists with this email, a verification code has been sent.",
-                "A 6-digit verification code has been sent to your email.",
-            },
-          ],
-        };
-      } catch (error) {
-        console.error("Send OTP error:", error);
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Unable to send verification code right now.",
-            },
-          ],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  // ######### 8. Verify OTP #########
-  server.tool(
-    "verify_otp",
-    `Verify an OTP sent for order tracking email verification.
-
-  Parameters:
-  @param {string} email - User email used for verification
-  @param {string} otp_code - 6 digit OTP
-  `,
-    {
-      email: z.string().email().describe("User email"),
-      otp_code: z.string().length(6).describe("6 digit OTP"),
-    },
-    async ({ email, otp_code }) => {
-      try {
-        const payload = {
-          thread_id: sessionId,
-          email: email,
-          otp: otp_code,
-        };
-        const verificationResponse = await callBackendAPI(
-          widgetKey,
-          "POST",
-          "/chat/otp/verify/",
-          payload,
-        );
-
-        if (!verificationResponse || !verificationResponse?.is_verified) {
-          return {
-            content: [
-              { type: "text", text: "Invalid or expired verification code." },
-            ],
-            isError: true,
-          };
-        }
-
-        return {
-          content: [{ type: "text", text: "Verification successful." }],
-          verified: true,
-        };
-      } catch (error) {
-        console.error("Verify OTP error:", error);
-        return {
-          content: [
-            { type: "text", text: "Verification failed. Please try again." },
           ],
           isError: true,
         };
