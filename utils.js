@@ -308,13 +308,13 @@ const formatProducts = (
           return baseProduct;
         }
 
-      return {
-        ...baseProduct,
-        image: node.images?.edges?.[0]?.node?.url || null,
-        product_url:
-          node.onlineStoreUrl || `${base_url}/products/${node?.handle}`,
-        variants: node.variants?.edges?.map(({ node: v }) => {
-          const discount = getVariantDiscount(v);
+        return {
+          ...baseProduct,
+          image: node.images?.edges?.[0]?.node?.url || null,
+          product_url:
+            node.onlineStoreUrl || `${base_url}/products/${node?.handle}`,
+          variants: node.variants?.edges?.map(({ node: v }) => {
+            const discount = getVariantDiscount(v);
 
             return {
               variant_id: v.id.split("/").pop(),

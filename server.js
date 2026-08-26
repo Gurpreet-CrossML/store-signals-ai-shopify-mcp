@@ -259,12 +259,12 @@ const createMcpServer = (configs = {}) => {
         }
 
         const searchResponse = await callShopifyApi(
-            baseUrl,
-            storefrontAccessToken,
-            adminAccessToken,
-            "POST",
-            "",
-            {
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "POST",
+          "",
+          {
             query: productSearchByQuery,
             variables: {
               search: searchQuery,
@@ -273,7 +273,7 @@ const createMcpServer = (configs = {}) => {
               first: page_size,
             },
           },
-          );
+        );
 
         const rawProducts = searchResponse?.data?.products?.edges;
 
@@ -290,8 +290,8 @@ const createMcpServer = (configs = {}) => {
 
         // Format the products data to be returned
         let formattedProducts = formatProducts(
-              baseUrl,
-              widgetKey,
+          baseUrl,
+          widgetKey,
           rawProducts,
           sessionId,
           storeCode,
