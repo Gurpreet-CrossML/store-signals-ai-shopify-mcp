@@ -58,6 +58,7 @@ const productSearchByQuery = `query getProducts($search: String!, $sortKey: Prod
                 currencyCode
               }
               availableForSale
+              quantityAvailable
               currentlyNotInStock
               selectedOptions {
                 name
@@ -128,7 +129,7 @@ const productByIdQuery = `query getProductById($id: ID!) {
                     id title
                     priceV2 { amount currencyCode }
                     compareAtPriceV2 { amount currencyCode }
-                    availableForSale currentlyNotInStock
+                    availableForSale quantityAvailable currentlyNotInStock
                     selectedOptions { name value }
                 }
             }
