@@ -31,7 +31,6 @@
     "express": "^5.1.0",
     "https": "^1.0.0",
     "lint": "^1.2.2",
-    "nodemailer": "^7.0.5",
     "zod": "^3.25.76"
   },
   "devDependencies": {

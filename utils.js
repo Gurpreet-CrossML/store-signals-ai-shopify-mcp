@@ -12,30 +12,18 @@ const { getCache, setCache } = require("./cache");
 // Load environment variables from .env file
 dotenv.config();
 
-const SHOPIFY_BASE_URL = process.env.SHOPIFY_BASE_URL;
-const SHOPIFY_STOREFRONT_API_TOKEN = process.env.SHOPIFY_STOREFRONT_API_TOKEN;
-const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const MCP_NAME = process.env.MCP_NAME;
 const MCP_VERSION = process.env.MCP_VERSION;
-const SMTP_USER = process.env.SMTP_USER;
-const SMTP_PASS = process.env.SMTP_PASS;
 const BACKEND_API_URL = process.env.BACKEND_API_URL;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL;
-const WIDGET_KEY = process.env.WIDGET_KEY;
 
 const allEnvironmentVariables = {
   MCP_NAME,
   MCP_VERSION,
-  SHOPIFY_BASE_URL,
-  SHOPIFY_STOREFRONT_API_TOKEN,
-  SHOPIFY_ACCESS_TOKEN,
-  SMTP_USER,
-  SMTP_PASS,
   BACKEND_API_URL,
   OPENAI_API_KEY,
   OPENAI_MODEL,
-  WIDGET_KEY,
 };
 
 // Validate environment variables
@@ -85,6 +73,9 @@ const SHOPIFY_SORT_MAPPING = {
 
 // Utility function to call Shopify API
 const callShopifyApi = async (
+  base_url,
+  storefront_token,
+  admin_token,
   method = "GET",
   endpoint = "",
   data = null,
@@ -92,18 +83,18 @@ const callShopifyApi = async (
 ) => {
   try {
     let url = isAdmin
-      ? `${SHOPIFY_BASE_URL}/admin/api/2025-10/graphql.json`
-      : `${SHOPIFY_BASE_URL}/api/2025-01/graphql.json`;
+      ? `${base_url}/admin/api/2025-10/graphql.json`
+      : `${base_url}/api/2025-01/graphql.json`;
     if (endpoint) {
-      url = `${SHOPIFY_BASE_URL}${endpoint}`;
+      url = `${base_url}${endpoint}`;
     }
 
     console.log(`Calling Shopify API: ${method} - ${url}`);
 
     const headers = {
       "Content-Type": "application/json",
-      "X-Shopify-Storefront-Access-Token": SHOPIFY_STOREFRONT_API_TOKEN,
-      "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+      "X-Shopify-Storefront-Access-Token": storefront_token,
+      "X-Shopify-Access-Token": admin_token,
     };
 
     const config = {
@@ -130,7 +121,7 @@ const callShopifyApi = async (
 };
 
 // Utility function to call the backend API
-const callBackendAPI = async (method, endpoint, data = {}) => {
+const callBackendAPI = async (widget_key, method, endpoint, data = {}) => {
   try {
     const url = `${BACKEND_API_URL}${endpoint}`;
 
@@ -140,7 +131,7 @@ const callBackendAPI = async (method, endpoint, data = {}) => {
       method,
       url,
       headers: {
-        "X-Widget-Key": WIDGET_KEY,
+        "X-Widget-Key": widget_key,
       },
       timeout: 15000,
       data: data,
@@ -189,7 +180,12 @@ function toCm(value, unit) {
 }
 
 // Save viewed products to backend for analytics
-const logProductViewEvents = async (products, session_id, store_code) => {
+const logProductViewEvents = async (
+  widget_key,
+  products,
+  session_id,
+  store_code,
+) => {
   if (!Array.isArray(products) || !session_id || !store_code) {
     return;
   }
@@ -201,7 +197,7 @@ const logProductViewEvents = async (products, session_id, store_code) => {
         .pop();
       if (!productId) return Promise.resolve();
 
-      return callBackendAPI("POST", "/chat/bot-events/", {
+      return callBackendAPI(widget_key, "POST", "/chat/bot-events/", {
         thread_id: session_id,
         event_type: "view_product",
         store_code,
@@ -237,6 +233,8 @@ const getVariantDiscount = (variant) => {
 
 // Utility function to format products data received from Shopify API, and also log product view events to the backend for analytics.
 const formatProducts = (
+  base_url,
+  widget_key,
   products,
   session_id,
   store_code,
@@ -283,7 +281,7 @@ const formatProducts = (
           : null;
 
         // Log product view event to backend for analytics
-        callBackendAPI("POST", "/chat/bot-events/", {
+        callBackendAPI(widget_key, "POST", "/chat/bot-events/", {
           thread_id: session_id,
           event_type: "view_product",
           store_code: store_code,
@@ -314,8 +312,7 @@ const formatProducts = (
           ...baseProduct,
           image: node.images?.edges?.[0]?.node?.url || null,
           product_url:
-            node.onlineStoreUrl ||
-            `${SHOPIFY_BASE_URL}/products/${node?.handle}`,
+            node.onlineStoreUrl || `${base_url}/products/${node?.handle}`,
           variants: node.variants?.edges?.map(({ node: v }) => {
             const discount = getVariantDiscount(v);
 
@@ -346,8 +343,13 @@ const formatProducts = (
 };
 
 // Utility function to fetch store metadata like product tags, types, collections, and categories. This metadata can be used for various purposes like improving search relevance, generating search queries, etc.
-const storeMetadata = async () => {
-  const cacheKey = "store_metadata";
+const storeMetadata = async (
+  base_url,
+  storefront_token,
+  admin_token,
+  store_code,
+) => {
+  const cacheKey = `store_metadata:store:${store_code}`;
 
   try {
     const cachedMetadata = await getCache(cacheKey);
@@ -359,7 +361,14 @@ const storeMetadata = async () => {
       query: storeMetadataQuery,
     };
 
-    const result = await callShopifyApi("POST", "", graphqlQuery);
+    const result = await callShopifyApi(
+      base_url,
+      storefront_token,
+      admin_token,
+      "POST",
+      "",
+      graphqlQuery,
+    );
 
     if (result.errors) {
       return {
@@ -417,71 +426,13 @@ const storeMetadata = async () => {
   }
 };
 
-// Utility function to extract relevant search terms from a user query using OpenAI's language model. It uses the store metadata to generate more accurate and relevant search terms that can be used to query the product catalog.
-const extractSearchTerms = async (query) => {
-  if (!query || typeof query !== "string") {
-    return [];
-  }
-
-  try {
-    const metadata = await storeMetadata();
-
-    const prompt = `You are an eCommerce search query generator.
-
-    Given a user query and store catalog metadata, generate 3-4 short search queries to find relevant products.
-
-    Rules:
-    - Each query should contain a maximum of 2 words and can also be a single-word query.
-    - Queries must look like real ecommerce catalog searches
-    - Use catalog metadata to pick accurate product type terms
-    - Never use conversational language
-    - Return ONLY a JSON array of strings, nothing else
-
-    Store Catalog Metadata:
-    - Product Types: ${metadata.types.filter(Boolean).join(", ") || "N/A"}
-    - Collections: ${metadata.collections.filter(Boolean).join(", ") || "N/A"}
-    - Categories: ${metadata.categories.filter(Boolean).join(", ") || "N/A"}
-    - Tags: ${metadata.tags.filter(Boolean).slice(0, 50).join(", ") || "N/A"}
-
-    User Query: "${query}"
-
-    Return format: ["query1", "query2", "query3"]`;
-
-    const response = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: OPENAI_MODEL,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.3,
-        max_tokens: 100,
-      },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
-        timeout: 10000,
-      },
-    );
-
-    const content = response?.data?.choices?.[0]?.message?.content?.trim();
-    const cleaned = content.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(cleaned);
-
-    if (!Array.isArray(parsed)) return [];
-
-    return parsed
-      .filter((q) => typeof q === "string" && q.trim().length > 0)
-      .map((q) => q.trim().toLowerCase())
-      .slice(0, 4);
-  } catch (error) {
-    console.error("extractSearchTerms Error:", error);
-    return [];
-  }
-};
-
 // Utility function to fetch related products for a given product ID using Shopify's product recommendations API. This can be used to provide additional product suggestions to users based on the products they are viewing or have shown interest in.
-const fetchRelatedProducts = async (product_id) => {
+const fetchRelatedProducts = async (
+  product_id,
+  base_url,
+  storefront_token,
+  admin_token,
+) => {
   try {
     if (!product_id) return [];
 
@@ -493,7 +444,14 @@ const fetchRelatedProducts = async (product_id) => {
     };
 
     // Call Shopify API
-    const searchResponse = await callShopifyApi("POST", "", graphqlQuery);
+    const searchResponse = await callShopifyApi(
+      base_url,
+      storefront_token,
+      admin_token,
+      "POST",
+      "",
+      graphqlQuery,
+    );
 
     const recommendations = searchResponse?.data?.productRecommendations || [];
 
@@ -1037,15 +995,15 @@ const formatOrder = async (o) => {
  *   Step 2: apply mutations     → addVariant | setQuantity | removeLineItem
  *   Step 3: orderEditCommit     → persist changes and optionally notify customer
  *
- * Derives the shop domain from SHOPIFY_BASE_URL (e.g. https://xxx.myshopify.com)
- * and the access token from SHOPIFY_ACCESS_TOKEN — both already defined in .env.
+ * Derives the shop domain from base_url (e.g. https://xxx.myshopify.com)
+ * and the access token from admin_token — both already defined in .env.
  */
 class ShopifyOrderEditor {
-  constructor() {
-    // Parse hostname from SHOPIFY_BASE_URL (e.g. "https://blushora-pdczux7n.myshopify.com")
-    const baseUrl = SHOPIFY_BASE_URL || "";
+  constructor(base_url, admin_token) {
+    // Parse hostname from base_url (e.g. "https://blushora-pdczux7n.myshopify.com")
+    const baseUrl = base_url || "";
     this.shopDomain = baseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
-    this.accessToken = SHOPIFY_ACCESS_TOKEN;
+    this.accessToken = admin_token;
     this.apiVersion = process.env.SHOPIFY_API_VERSION || "2024-04";
     this.graphqlEndpoint = `https://${this.shopDomain}/admin/api/${this.apiVersion}/graphql.json`;
   }
@@ -1204,10 +1162,10 @@ class ShopifyOrderEditor {
  *   Step 3: returnProcess
  */
 class ShopifyExchangeManager {
-  constructor() {
-    const baseUrl = SHOPIFY_BASE_URL || "";
+  constructor(base_url, admin_token) {
+    const baseUrl = base_url || "";
     this.shopDomain = baseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
-    this.accessToken = SHOPIFY_ACCESS_TOKEN;
+    this.accessToken = admin_token;
     this.apiVersion = process.env.SHOPIFY_API_VERSION || "2025-04"; // Use latest
     this.graphqlEndpoint = `https://${this.shopDomain}/admin/api/${this.apiVersion}/graphql.json`;
   }
@@ -1484,20 +1442,29 @@ const formatOrderTransactions = (order, transactions) => {
 // Returns an array of results — one entry per product name — each containing either the matched
 // product(s) or an indicator that no match was found.
 const searchProductsByNames = async (
+  base_url,
+  storefront_token,
+  admin_token,
+  store_code,
+  widget_key,
   product_names,
   session_id,
-  store_code,
   full_details = false,
 ) => {
   const results = [];
 
   for (const name of product_names) {
     try {
-      const cacheKey = `search:${name}:${full_details ? "full" : "brief"}`;
+      const cacheKey = `search:${name}:${full_details ? "full" : "brief"}:store:${store_code}`;
       const cached = await getCache(cacheKey);
 
       if (cached) {
-        logProductViewEvents(cached.products, session_id, store_code);
+        logProductViewEvents(
+          widget_key,
+          cached.products,
+          session_id,
+          store_code,
+        );
         results.push({
           product_name: name,
           product_detail:
@@ -1518,12 +1485,21 @@ const searchProductsByNames = async (
         },
       };
 
-      const searchResponse = await callShopifyApi("POST", "", graphqlQuery);
+      const searchResponse = await callShopifyApi(
+        base_url,
+        storefront_token,
+        admin_token,
+        "POST",
+        "",
+        graphqlQuery,
+      );
 
       let formattedProducts = [];
 
       if (searchResponse?.data?.products?.edges?.length > 0) {
         formattedProducts = formatProducts(
+          base_url,
+          widget_key,
           searchResponse.data.products.edges,
           session_id,
           store_code,
@@ -1718,10 +1694,14 @@ const isConsumableProductType = (productType = "") => {
 // Returns:
 //   { eligible, days_allowed, days_since_fulfillment, days_remaining, reason }
 const getExchangePolicyEligibility = async (
+  base_url,
+  storefront_token,
+  admin_token,
+  store_code,
   fulfillment_created_at,
   product_type = "",
 ) => {
-  const POLICY_CACHE_KEY = "store_exchange_policy_parsed";
+  const POLICY_CACHE_KEY = `store_exchange_policy_parsed:store:${store_code}`;
 
   // Step 1: Check consumable type FIRST — no API call needed.
   const consumable = isConsumableProductType(product_type);
@@ -1740,9 +1720,16 @@ const getExchangePolicyEligibility = async (
 
   if (!parsedPolicy) {
     try {
-      const policyResponse = await callShopifyApi("POST", "", {
-        query: `query { shop { refundPolicy { body } } }`,
-      });
+      const policyResponse = await callShopifyApi(
+        base_url,
+        storefront_token,
+        admin_token,
+        "POST",
+        "",
+        {
+          query: `query { shop { refundPolicy { body } } }`,
+        },
+      );
 
       const policyBody = policyResponse?.data?.shop?.refundPolicy?.body || "";
 
@@ -1868,20 +1855,13 @@ module.exports = {
   // envs
   MCP_NAME,
   MCP_VERSION,
-  SHOPIFY_BASE_URL,
-  SHOPIFY_STOREFRONT_API_TOKEN,
-  SHOPIFY_ACCESS_TOKEN,
-  SMTP_USER,
-  SMTP_PASS,
   BACKEND_API_URL,
   OPENAI_API_KEY,
   OPENAI_MODEL,
-  WIDGET_KEY,
   // helpers
   callShopifyApi,
   callBackendAPI,
   formatProducts,
-  extractSearchTerms,
   fetchRelatedProducts,
   getProductSortConfig,
   storeMetadata,
