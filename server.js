@@ -109,7 +109,7 @@ const createMcpServer = (configs = {}) => {
     @param {string} product_type: Product type/category filter.
     @param {string} vendor: Brand/vendor filter.
     @param {string[]} tags: Store tag filters.
-    @param {string} availability: "in_stock" | "out_of_stock" | "all".
+    @param {string} availability: "in_stock" | "all".
     @param {number} min_price: Minimum price filter.
     @param {number} max_price: Maximum price filter.
     @param {string} sort_by: "relevance" | "price_asc" | "price_desc" | "newest" | "best_selling".`,
