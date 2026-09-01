@@ -150,7 +150,7 @@ const createMcpServer = (configs = {}) => {
             "falls back to free-text search instead of zeroing out the results.",
         ),
       availability: z
-        .enum(["in_stock", "out_of_stock", "all"])
+        .enum(["in_stock", "all"])
         .optional()
         .describe(
           "Stock filter. Defaults to showing both in-stock and out-of-stock products when omitted.",
