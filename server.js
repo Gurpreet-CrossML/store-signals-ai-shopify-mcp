@@ -1378,7 +1378,6 @@ const createMcpServer = (configs = {}) => {
   Parameters:
   @param {string} email       - Customer email associated with the order
   @param {string} order_id    - Short order number (e.g. "1026")
-  @param {string} session_id  - Session identifier
   `,
     {
       email: z
@@ -1884,8 +1883,6 @@ const createMcpServer = (configs = {}) => {
 
     Parameters:
     @param {string} query: Search query for discounted products
-    @param {string} session_id: Session ID
-    @param {string} store_code: Store name or code
     @param {string} [sort_key]: Sort key. Supported values: relevance(default), price_asc, price_desc, newest, best_selling, featured.
     @param {number} [min_price] - Only return products priced greater than or equal to this value.
     @param {number} [max_price] - Only return products priced less than or equal to this value.
@@ -1895,20 +1892,11 @@ const createMcpServer = (configs = {}) => {
         .string()
         .optional()
         .describe("Search query for discounted products"),
-      session_id: z.string().describe("Session ID"),
-      store_code: z.string().describe("Store name/code"),
       sort_key: z.string().optional().describe("Sort key for the product list"),
       min_price: z.number().optional().describe("Minimum product price"),
       max_price: z.number().optional().describe("Maximum product price"),
     },
-    async ({
-      query,
-      session_id,
-      store_code,
-      sort_key,
-      min_price,
-      max_price,
-    }) => {
+    async ({ query, sort_key, min_price, max_price }) => {
       try {
         const priceFilters = [];
 
@@ -1941,7 +1929,12 @@ const createMcpServer = (configs = {}) => {
 
         const cached = await getCache(cacheKey);
         if (cached) {
-          logProductViewEvents(cached.products, session_id, store_code);
+          logProductViewEvents(
+            widgetKey,
+            cached.products,
+            sessionId,
+            storeCode,
+          );
           return {
             content: [
               {
@@ -1964,14 +1957,23 @@ const createMcpServer = (configs = {}) => {
           },
         };
 
-        const response = await callShopifyApi("POST", "", graphqlQuery);
+        const response = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "POST",
+          "",
+          graphqlQuery,
+        );
 
         const products = response?.data?.products?.edges || [];
 
         const formattedProducts = formatProducts(
+          baseUrl,
+          widgetKey,
           products,
-          session_id,
-          store_code,
+          sessionId,
+          storeCode,
           false,
           true,
         );
