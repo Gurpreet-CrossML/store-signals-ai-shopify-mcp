@@ -10,7 +10,10 @@
     "format:fix": "prettier . --write",
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "node server.js",
-    "build": "echo \"There is nothing to build\""
+    "build": "echo \"There is nothing to build\"",
+    "start": "node --env-file=.env server.js",
+    "serve": "node --env-file=.env server.js",
+    "postbuild": "chmod +x bin/postbuild.sh && ./bin/postbuild.sh"
   },
   "keywords": [
     "shopify",

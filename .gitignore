@@ -144,3 +144,6 @@ vite.config.ts.timestamp-*
 
 # Vscode
 .vscode/
+
+# amplify hosting
+.amplify-hosting/
