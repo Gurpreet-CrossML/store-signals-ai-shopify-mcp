@@ -191,7 +191,7 @@ const createMcpServer = (configs = {}) => {
       product_type = null,
       vendor = null,
       tags = [],
-      availability = "in_stock",
+      availability = "all",
       min_price = null,
       max_price = null,
       sort_by = "relevance",
