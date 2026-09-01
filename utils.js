@@ -140,7 +140,11 @@ const callBackendAPI = async (widget_key, method, endpoint, data = {}) => {
     const response = await axios(config);
     return response?.data?.data;
   } catch (err) {
-    console.error("Error calling backend API, error:", err?.response?.data);
+    console.error(
+      "Error calling backend API:",
+      err?.response?.data || err?.message || err,
+    );
+
     return null;
   }
 };
