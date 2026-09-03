@@ -930,7 +930,9 @@ const createMcpServer = (configs = {}) => {
       order_id: z
         .string()
         .trim()
-        .describe("Order ID (e.g. '1026'). Optional if you just want to fetch recent orders.")
+        .describe(
+          "Order ID (e.g. '1026'). Optional if you just want to fetch recent orders.",
+        )
         .optional(),
     },
     async ({ email, order_id }) => {
@@ -944,7 +946,11 @@ const createMcpServer = (configs = {}) => {
         );
 
         // No orders
-        if (!response || !Array.isArray(response.orders) || response.orders.length === 0) {
+        if (
+          !response ||
+          !Array.isArray(response.orders) ||
+          response.orders.length === 0
+        ) {
           return {
             content: [
               {
@@ -987,7 +993,7 @@ const createMcpServer = (configs = {}) => {
           // order_id is missing, return only the latest order
           const latestOrder = orders[0];
           const formattedOrder = await formatOrder(latestOrder);
-  
+
           return {
             content: [
               {
