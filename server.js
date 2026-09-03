@@ -914,12 +914,12 @@ const createMcpServer = (configs = {}) => {
   // ######### 9. Get Order Detail #########
   server.tool(
     "get_order_detail",
-    `Fetch a specific order by order number and email.
-  Returns a single order object.
+    `Fetch a specific order by order number and email, OR fetch recent orders if no order number is provided.
+  Returns a single order object or an array of recent orders.
 
   Parameters:
   @param {string} email: Order identifier (e.g. "test@example.com")
-  @param {string} order_id: Order identifier (e.g. "1026")
+  @param {string} order_id: Order identifier (e.g. "1026"). Leave empty to get recent orders.
   `,
     {
       email: z
@@ -930,8 +930,8 @@ const createMcpServer = (configs = {}) => {
       order_id: z
         .string()
         .trim()
-        .min(4, "Order ID is required")
-        .describe("Order ID (e.g. '1026')"),
+        .describe("Order ID (e.g. '1026'). Optional if you just want to fetch recent orders.")
+        .optional(),
     },
     async ({ email, order_id }) => {
       try {
@@ -944,12 +944,12 @@ const createMcpServer = (configs = {}) => {
         );
 
         // No orders
-        if (!response || !Array.isArray(response.orders)) {
+        if (!response || !Array.isArray(response.orders) || response.orders.length === 0) {
           return {
             content: [
               {
                 type: "text",
-                text: "We couldn’t found your order with this email.",
+                text: "We couldn’t find any orders with this email.",
               },
             ],
             isError: true,
@@ -958,30 +958,45 @@ const createMcpServer = (configs = {}) => {
 
         const orders = response?.orders;
 
-        const currentOrder = orders.find((o) => o?.order_number == order_id);
+        if (order_id) {
+          const currentOrder = orders.find((o) => o?.order_number == order_id);
 
-        if (!currentOrder) {
+          if (!currentOrder) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `We couldn’t locate order #${order_id}. Please verify the order ID and try again.`,
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const formattedOrder = await formatOrder(currentOrder);
+
           return {
             content: [
               {
                 type: "text",
-                text: `We couldn’t locate order #${order_id}. Please verify the order ID and try again.`,
+                text: JSON.stringify(formattedOrder, null, 2),
               },
             ],
-            isError: true,
+          };
+        } else {
+          // order_id is missing, return only the latest order
+          const latestOrder = orders[0];
+          const formattedOrder = await formatOrder(latestOrder);
+  
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(formattedOrder, null, 2),
+              },
+            ],
           };
         }
-
-        const formattedOrder = await formatOrder(currentOrder);
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(formattedOrder, null, 2),
-            },
-          ],
-        };
       } catch (error) {
         return {
           content: [
