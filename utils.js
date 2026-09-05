@@ -1865,7 +1865,10 @@ ${policyBody.slice(0, 4000)}`;
  * @param {string} [identity.surname] - Customer surname / last name
  * @returns {Object} Verification result containing { verified, matchedField|failedField, message }
  */
-const verifyOrderIdentity = (order, { email, phone, zip_code, surname } = {}) => {
+const verifyOrderIdentity = (
+  order,
+  { email, phone, zip_code, surname } = {},
+) => {
   // 1. Email check (Priority 1)
   if (email && typeof email === "string" && email.trim()) {
     const targetEmail = email.trim().toLowerCase();
@@ -1897,7 +1900,9 @@ const verifyOrderIdentity = (order, { email, phone, zip_code, surname } = {}) =>
 
     const isPhoneMatch = orderPhones.some((p) => {
       if (!p || !targetPhone) return false;
-      return p === targetPhone || p.endsWith(targetPhone) || targetPhone.endsWith(p);
+      return (
+        p === targetPhone || p.endsWith(targetPhone) || targetPhone.endsWith(p)
+      );
     });
 
     if (isPhoneMatch) {
@@ -1907,7 +1912,11 @@ const verifyOrderIdentity = (order, { email, phone, zip_code, surname } = {}) =>
 
   // 3. Zip / Postal Code check (Priority 3)
   if (zip_code && typeof zip_code === "string" && zip_code.trim()) {
-    const cleanZip = (str) => String(str || "").trim().toLowerCase().replace(/\s+/g, "");
+    const cleanZip = (str) =>
+      String(str || "")
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, "");
     const targetZip = cleanZip(zip_code);
     const orderZips = [
       order.shipping_address?.zip,
