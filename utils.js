@@ -1854,6 +1854,121 @@ ${policyBody.slice(0, 4000)}`;
   };
 };
 
+/**
+ * Verify guest identity fields against order details in priority order: Email > Phone > Zip > Surname.
+ *
+ * @param {Object} order - Raw Shopify order object
+ * @param {Object} identity - Identity fields provided by customer
+ * @param {string} [identity.email] - Customer email
+ * @param {string} [identity.phone] - Customer phone number
+ * @param {string} [identity.zip_code] - Customer zip or postal code
+ * @param {string} [identity.surname] - Customer surname / last name
+ * @returns {Object} Verification result containing { verified, matchedField|failedField, message }
+ */
+const verifyOrderIdentity = (
+  order,
+  { email, phone, zip_code, surname } = {},
+) => {
+  // 1. Email check (Priority 1)
+  if (email && typeof email === "string" && email.trim()) {
+    const targetEmail = email.trim().toLowerCase();
+    const orderEmails = [
+      order.email,
+      order.contact_email,
+      order.customer?.email,
+    ]
+      .filter(Boolean)
+      .map((e) => String(e).trim().toLowerCase());
+
+    if (orderEmails.includes(targetEmail)) {
+      return { verified: true, matchedField: "email" };
+    }
+  }
+
+  // 2. Phone check (Priority 2)
+  if (phone && typeof phone === "string" && phone.trim()) {
+    const cleanPhone = (str) => String(str || "").replace(/\D/g, "");
+    const targetPhone = cleanPhone(phone);
+    const orderPhones = [
+      order.phone,
+      order.customer?.phone,
+      order.shipping_address?.phone,
+      order.billing_address?.phone,
+    ]
+      .filter(Boolean)
+      .map(cleanPhone);
+
+    const isPhoneMatch = orderPhones.some((p) => {
+      if (!p || !targetPhone) return false;
+      return (
+        p === targetPhone || p.endsWith(targetPhone) || targetPhone.endsWith(p)
+      );
+    });
+
+    if (isPhoneMatch) {
+      return { verified: true, matchedField: "phone" };
+    }
+  }
+
+  // 3. Zip / Postal Code check (Priority 3)
+  if (zip_code && typeof zip_code === "string" && zip_code.trim()) {
+    const cleanZip = (str) =>
+      String(str || "")
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, "");
+    const targetZip = cleanZip(zip_code);
+    const orderZips = [
+      order.shipping_address?.zip,
+      order.billing_address?.zip,
+      order.customer?.default_address?.zip,
+    ]
+      .filter(Boolean)
+      .map(cleanZip);
+
+    if (orderZips.includes(targetZip)) {
+      return { verified: true, matchedField: "zip_code" };
+    }
+  }
+
+  // 4. Surname check (Priority 4)
+  if (surname && typeof surname === "string" && surname.trim()) {
+    const targetSurname = surname.trim().toLowerCase();
+    const orderSurnames = [
+      order.customer?.last_name,
+      order.shipping_address?.last_name,
+      order.billing_address?.last_name,
+    ]
+      .filter(Boolean)
+      .map((s) => String(s).trim().toLowerCase());
+
+    if (orderSurnames.includes(targetSurname)) {
+      return { verified: true, matchedField: "surname" };
+    }
+  }
+
+  // If none of the provided identity fields matched the order
+  const provided = [];
+  if (email) provided.push(`email (${email})`);
+  if (phone) provided.push(`phone (${phone})`);
+  if (zip_code) provided.push(`zip code (${zip_code})`);
+  if (surname) provided.push(`surname (${surname})`);
+
+  if (provided.length > 0) {
+    return {
+      verified: false,
+      failedField: "all",
+      message: `The provided identity information (${provided.join(", ")}) does not match our records for order #${order.order_number}.`,
+    };
+  }
+
+  return {
+    verified: false,
+    failedField: "none",
+    message: `Please provide an identity verification field (Email, Phone number, Zip/postal code, or Surname) along with order #${order.order_number}.`,
+  };
+};
+
 // Export environment variables and utility functions
 module.exports = {
   // envs
@@ -1882,6 +1997,7 @@ module.exports = {
   formatRefundStatus,
   ShopifyExchangeManager,
   getExchangePolicyEligibility,
+  verifyOrderIdentity,
   isConsumableProductType,
   quoteSearchValue,
   groundTerm,
