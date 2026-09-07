@@ -47,6 +47,7 @@ const createMcpServer = (configs = {}) => {
     storeCode,
     sessionId,
     widgetKey,
+    customerEmail,
   } = configs;
 
   // fail fast if the backend forgot to send required creds
@@ -969,9 +970,7 @@ const createMcpServer = (configs = {}) => {
             `/admin/api/2024-04/orders.json?name=%23${encodeURIComponent(cleanOrderId)}&status=any`,
           );
 
-          if (response?.orders && response.orders.length > 0) {
-            orders = response.orders;
-          } else {
+          if (!response?.orders?.length) {
             // Try without hash prefix
             response = await callShopifyApi(
               baseUrl,
@@ -980,9 +979,8 @@ const createMcpServer = (configs = {}) => {
               "GET",
               `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
             );
-            if (response?.orders && response.orders.length > 0) {
-              orders = response.orders;
-            } else if (email) {
+
+            if (!response?.orders?.length && email) {
               // Fallback to email query
               response = await callShopifyApi(
                 baseUrl,
@@ -991,11 +989,10 @@ const createMcpServer = (configs = {}) => {
                 "GET",
                 `/admin/api/2024-04/orders.json?email=${encodeURIComponent(email)}&status=any`,
               );
-              if (response?.orders && response.orders.length > 0) {
-                orders = response.orders;
-              }
             }
           }
+
+          orders = response?.orders || [];
 
           const currentOrder = orders.find(
             (o) =>
@@ -1016,9 +1013,9 @@ const createMcpServer = (configs = {}) => {
             };
           }
 
-          // Perform guest identity verification
+          // Perform guest identity verification (or use authenticated email for logged-in users)
           const verification = verifyOrderIdentity(currentOrder, {
-            email,
+            email: email || customerEmail,
             phone,
             zip_code,
             surname,
@@ -1046,49 +1043,12 @@ const createMcpServer = (configs = {}) => {
               },
             ],
           };
-        } else if (email) {
-          // Logged-in user fetching recent orders without specifying order_id
-          const response = await callShopifyApi(
-            baseUrl,
-            storefrontAccessToken,
-            adminAccessToken,
-            "GET",
-            `/admin/api/2024-04/orders.json?email=${encodeURIComponent(email)}&status=any`,
-          );
-
-          if (
-            !response ||
-            !Array.isArray(response.orders) ||
-            response.orders.length === 0
-          ) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: "We couldn’t find any orders with this email.",
-                },
-              ],
-              isError: true,
-            };
-          }
-
-          const latestOrder = response.orders[0];
-          const formattedOrder = await formatOrder(latestOrder);
-
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(formattedOrder, null, 2),
-              },
-            ],
-          };
         } else {
           return {
             content: [
               {
                 type: "text",
-                text: "Order ID is mandatory for guest user verification.",
+                text: "Order ID is mandatory for user verification.",
               },
             ],
             isError: true,
@@ -1127,8 +1087,8 @@ const createMcpServer = (configs = {}) => {
       email: z
         .string()
         .trim()
-        .email()
-        .describe("Order email (e.g. 'test@example.com')"),
+        .describe("Order email (e.g. 'test@example.com'). Optional for logged-in users.")
+        .optional(),
       reason: z.string().describe("Cancellation reason"),
     },
     async ({ order_id, email, reason }) => {
@@ -1138,7 +1098,7 @@ const createMcpServer = (configs = {}) => {
           storefrontAccessToken,
           adminAccessToken,
           "GET",
-          `/admin/api/2024-04/orders.json?name=%23${order_id}&status=any&email=${encodeURIComponent(email)}`,
+          `/admin/api/2024-04/orders.json?name=%23${order_id}&status=any`,
         );
 
         const orders = response?.orders || [];
@@ -1402,8 +1362,8 @@ const createMcpServer = (configs = {}) => {
       email: z
         .string()
         .trim()
-        .email()
-        .describe("Order email (e.g. 'test@example.com')"),
+        .describe("Order email (e.g. 'test@example.com'). Optional.")
+        .optional(),
       order_id: z
         .string()
         .trim()
@@ -1413,19 +1373,26 @@ const createMcpServer = (configs = {}) => {
     async ({ email, order_id }) => {
       try {
         // Find order
-        const orderResponse = await callShopifyApi(
+        let orderResponse = await callShopifyApi(
           baseUrl,
           storefrontAccessToken,
           adminAccessToken,
           "GET",
-          `/admin/api/2024-04/orders.json?email=${encodeURIComponent(
-            email,
-          )}&status=any`,
+          `/admin/api/2024-04/orders.json?name=%23${order_id}&status=any`,
         );
 
-        const currentOrder = orderResponse?.orders?.find(
-          (o) => String(o.order_number) === String(order_id),
-        );
+        let currentOrder = orderResponse?.orders?.[0];
+        if (!currentOrder) {
+          // Try without hash prefix
+          orderResponse = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "GET",
+            `/admin/api/2024-04/orders.json?name=${order_id}&status=any`,
+          );
+          currentOrder = orderResponse?.orders?.[0];
+        }
 
         if (!currentOrder) {
           return {
@@ -1495,8 +1462,8 @@ const createMcpServer = (configs = {}) => {
       email: z
         .string()
         .trim()
-        .email()
-        .describe("Order email (e.g. 'test@example.com')"),
+        .describe("Order email (e.g. 'test@example.com'). Optional.")
+        .optional(),
       order_id: z
         .string()
         .trim()
@@ -1506,29 +1473,27 @@ const createMcpServer = (configs = {}) => {
     async ({ email, order_id }) => {
       try {
         //1. Find the order via REST (same pattern as get_order_detail)
-        const ordersResponse = await callShopifyApi(
+        let ordersResponse = await callShopifyApi(
           baseUrl,
           storefrontAccessToken,
           adminAccessToken,
           "GET",
-          `/admin/api/2024-04/orders.json?email=${encodeURIComponent(email)}&status=any`,
+          `/admin/api/2024-04/orders.json?name=%23${order_id}&status=any`,
         );
 
-        if (!ordersResponse || !Array.isArray(ordersResponse.orders)) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "We couldn't find any orders associated with this email.",
-              },
-            ],
-            isError: true,
-          };
+        let restOrder = ordersResponse?.orders?.[0];
+        
+        if (!restOrder) {
+          // Try without hash prefix
+          ordersResponse = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "GET",
+            `/admin/api/2024-04/orders.json?name=${order_id}&status=any`,
+          );
+          restOrder = ordersResponse?.orders?.[0];
         }
-
-        const restOrder = ordersResponse.orders.find(
-          (o) => String(o.order_number) === String(order_id),
-        );
 
         if (!restOrder) {
           return {
@@ -2122,6 +2087,77 @@ const createMcpServer = (configs = {}) => {
     },
   );
 
+
+  // ######### 18. Get Latest Order #########
+  server.tool(
+    "get_latest_order",
+    `Fetch the most recent order for the currently logged-in user.
+    Takes no parameters. This tool will automatically use the authenticated user's email.
+    Use this ONLY when the customer is logged in and asks for their recent order.`,
+    {},
+    async () => {
+      try {
+        if (!customerEmail) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "No logged-in user email found. Cannot fetch latest order for guest users.",
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const response = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "GET",
+          `/admin/api/2024-04/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
+        );
+
+        if (
+          !response ||
+          !Array.isArray(response.orders) ||
+          response.orders.length === 0
+        ) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "We couldn’t find any orders for your account.",
+              },
+            ],
+            isError: false,
+          };
+        }
+
+        const latestOrder = response.orders[0];
+        const formattedOrder = await formatOrder(latestOrder);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(formattedOrder, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error fetching latest order: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
   // ********************************** End of MCP Tools **********************************
 
   return server;
@@ -2152,6 +2188,7 @@ app.post("/mcp", async (req, res) => {
       storeCode: req.headers["x-store-code"],
       sessionId: req.headers["x-session-id"],
       widgetKey: req.headers["x-widget-key"],
+      customerEmail: req.headers["x-customer-email"],
     };
 
     const server = createMcpServer(configs);
