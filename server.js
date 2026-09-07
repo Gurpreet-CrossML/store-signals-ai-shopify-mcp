@@ -967,19 +967,8 @@ const createMcpServer = (configs = {}) => {
             storefrontAccessToken,
             adminAccessToken,
             "GET",
-            `/admin/api/2024-04/orders.json?name=%23${encodeURIComponent(cleanOrderId)}&status=any`,
+            `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
           );
-
-          if (!response?.orders?.length) {
-            // Try without hash prefix
-            response = await callShopifyApi(
-              baseUrl,
-              storefrontAccessToken,
-              adminAccessToken,
-              "GET",
-              `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
-            );
-          }
 
           orders = response?.orders || [];
 
@@ -1084,12 +1073,13 @@ const createMcpServer = (configs = {}) => {
     },
     async ({ order_id, email, reason }) => {
       try {
+        const cleanOrderId = String(order_id).replace(/^#/, "").trim();
         const response = await callShopifyApi(
           baseUrl,
           storefrontAccessToken,
           adminAccessToken,
           "GET",
-          `/admin/api/2024-04/orders.json?name=%23${order_id}&status=any`,
+          `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
         );
 
         const orders = response?.orders || [];
@@ -1359,26 +1349,16 @@ const createMcpServer = (configs = {}) => {
     async ({ order_id }) => {
       try {
         // Find order
+        const cleanOrderId = String(order_id).replace(/^#/, "").trim();
         let orderResponse = await callShopifyApi(
           baseUrl,
           storefrontAccessToken,
           adminAccessToken,
           "GET",
-          `/admin/api/2024-04/orders.json?name=%23${order_id}&status=any`,
+          `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
         );
 
         let currentOrder = orderResponse?.orders?.[0];
-        if (!currentOrder) {
-          // Try without hash prefix
-          orderResponse = await callShopifyApi(
-            baseUrl,
-            storefrontAccessToken,
-            adminAccessToken,
-            "GET",
-            `/admin/api/2024-04/orders.json?name=${order_id}&status=any`,
-          );
-          currentOrder = orderResponse?.orders?.[0];
-        }
 
         if (!currentOrder) {
           return {
@@ -1454,27 +1434,16 @@ const createMcpServer = (configs = {}) => {
     async ({ order_id }) => {
       try {
         //1. Find the order via REST (same pattern as get_order_detail)
+        const cleanOrderId = String(order_id).replace(/^#/, "").trim();
         let ordersResponse = await callShopifyApi(
           baseUrl,
           storefrontAccessToken,
           adminAccessToken,
           "GET",
-          `/admin/api/2024-04/orders.json?name=%23${order_id}&status=any`,
+          `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
         );
 
         let restOrder = ordersResponse?.orders?.[0];
-
-        if (!restOrder) {
-          // Try without hash prefix
-          ordersResponse = await callShopifyApi(
-            baseUrl,
-            storefrontAccessToken,
-            adminAccessToken,
-            "GET",
-            `/admin/api/2024-04/orders.json?name=${order_id}&status=any`,
-          );
-          restOrder = ordersResponse?.orders?.[0];
-        }
 
         if (!restOrder) {
           return {
