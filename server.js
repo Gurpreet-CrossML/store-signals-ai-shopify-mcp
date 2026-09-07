@@ -132,8 +132,8 @@ const createMcpServer = (configs = {}) => {
         .optional()
         .describe(
           "Product category/type, e.g. 'Perfume', 'Sunscreen', 'Serum'. Matched against the " +
-            "store's real product types/collections (see get_store_meta_info) - pass the " +
-            "customer's category word even if casing or plurality differs.",
+          "store's real product types/collections (see get_store_meta_info) - pass the " +
+          "customer's category word even if casing or plurality differs.",
         ),
       vendor: z
         .string()
@@ -146,10 +146,10 @@ const createMcpServer = (configs = {}) => {
         .optional()
         .describe(
           "Attribute filters as store tags. Use for gender/audience (e.g. 'Men', 'Women', " +
-            "'Unisex'), skin/hair type or concern (e.g. 'Oily Skin', 'Anti-Aging'), material, " +
-            "occasion, feature, dietary preference, etc. Pass the customer's own words - they're " +
-            "matched against the store's real tags, and anything with no close match automatically " +
-            "falls back to free-text search instead of zeroing out the results.",
+          "'Unisex'), skin/hair type or concern (e.g. 'Oily Skin', 'Anti-Aging'), material, " +
+          "occasion, feature, dietary preference, etc. Pass the customer's own words - they're " +
+          "matched against the store's real tags, and anything with no close match automatically " +
+          "falls back to free-text search instead of zeroing out the results.",
         ),
       availability: z
         .enum(["in_stock", "all"])
@@ -182,8 +182,8 @@ const createMcpServer = (configs = {}) => {
         .optional()
         .describe(
           'Sort order: "relevance" (default), "price_asc", "price_desc", "newest", or ' +
-            '"best_selling". Use "best_selling" for "best" / "most popular" requests - no ' +
-            "rating data is available, so this is the closest available signal.",
+          '"best_selling". Use "best_selling" for "best" / "most popular" requests - no ' +
+          "rating data is available, so this is the closest available signal.",
         ),
     },
     async ({
@@ -385,7 +385,7 @@ const createMcpServer = (configs = {}) => {
         .min(1)
         .describe(
           "One or more product IDs. Accepts plain numeric IDs ('123456789') " +
-            "or full GIDs ('gid://shopify/Product/123456789').",
+          "or full GIDs ('gid://shopify/Product/123456789').",
         ),
     },
     async ({ product_ids }) => {
@@ -450,13 +450,13 @@ const createMcpServer = (configs = {}) => {
 
         const formattedFetched = fetchedResults.length
           ? formatProducts(
-              baseUrl,
-              widgetKey,
-              fetchedResults.map((node) => ({ node })),
-              sessionId,
-              storeCode,
-              true,
-            )
+            baseUrl,
+            widgetKey,
+            fetchedResults.map((node) => ({ node })),
+            sessionId,
+            storeCode,
+            true,
+          )
           : [];
 
         // cache fetched products
@@ -979,17 +979,6 @@ const createMcpServer = (configs = {}) => {
               "GET",
               `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
             );
-
-            if (!response?.orders?.length && email) {
-              // Fallback to email query
-              response = await callShopifyApi(
-                baseUrl,
-                storefrontAccessToken,
-                adminAccessToken,
-                "GET",
-                `/admin/api/2024-04/orders.json?email=${encodeURIComponent(email)}&status=any`,
-              );
-            }
           }
 
           orders = response?.orders || [];
@@ -1222,7 +1211,7 @@ const createMcpServer = (configs = {}) => {
         .string()
         .describe(
           "Shopify Order ID (long ID). Accepts plain numeric ID ('18693365366829') " +
-            "or full GID ('gid://shopify/Order/18693365366829'). DO NOT PASS SHORT ORDER ID like '1012'.",
+          "or full GID ('gid://shopify/Order/18693365366829'). DO NOT PASS SHORT ORDER ID like '1012'.",
         ),
       changes: z
         .array(
@@ -1359,18 +1348,13 @@ const createMcpServer = (configs = {}) => {
   @param {string} order_id
   `,
     {
-      email: z
-        .string()
-        .trim()
-        .describe("Order email (e.g. 'test@example.com'). Optional.")
-        .optional(),
       order_id: z
         .string()
         .trim()
         .min(4, "Order ID is required")
         .describe("Order ID (e.g. '1026')"),
     },
-    async ({ email, order_id }) => {
+    async ({ order_id }) => {
       try {
         // Find order
         let orderResponse = await callShopifyApi(
@@ -1459,18 +1443,13 @@ const createMcpServer = (configs = {}) => {
   @param {string} order_id    - Short order number (e.g. "1026")
   `,
     {
-      email: z
-        .string()
-        .trim()
-        .describe("Order email (e.g. 'test@example.com'). Optional.")
-        .optional(),
       order_id: z
         .string()
         .trim()
         .min(4, "Order ID is required")
         .describe("Order ID (e.g. '1026')"),
     },
-    async ({ email, order_id }) => {
+    async ({ order_id }) => {
       try {
         //1. Find the order via REST (same pattern as get_order_detail)
         let ordersResponse = await callShopifyApi(
@@ -1482,7 +1461,7 @@ const createMcpServer = (configs = {}) => {
         );
 
         let restOrder = ordersResponse?.orders?.[0];
-        
+
         if (!restOrder) {
           // Try without hash prefix
           ordersResponse = await callShopifyApi(
@@ -1663,8 +1642,8 @@ const createMcpServer = (configs = {}) => {
         .string()
         .describe(
           "ISO-8601 created_at timestamp from fulfillments[0].created_at in the order response " +
-            "(e.g. '2026-06-22T02:53:43-04:00'). This is the date the order was actually " +
-            "shipped/fulfilled — the exchange window is calculated from this date, NOT from order.created_at.",
+          "(e.g. '2026-06-22T02:53:43-04:00'). This is the date the order was actually " +
+          "shipped/fulfilled — the exchange window is calculated from this date, NOT from order.created_at.",
         ),
       return_items: z
         .array(
@@ -1674,7 +1653,7 @@ const createMcpServer = (configs = {}) => {
               .transform((val) => String(val))
               .describe(
                 "FulfillmentLineItem GID returned by get_fulfillment_line_item_id, " +
-                  "e.g. 'gid://shopify/FulfillmentLineItem/456'",
+                "e.g. 'gid://shopify/FulfillmentLineItem/456'",
               ),
             quantity: z
               .number()
@@ -1696,8 +1675,8 @@ const createMcpServer = (configs = {}) => {
               ])
               .describe(
                 "Shopify return reason. Defaults to 'UNKNOWN' if omitted. " +
-                  "Use SIZE_TOO_SMALL / SIZE_TOO_LARGE for size issues, COLOR for wrong color, " +
-                  "STYLE for wrong variant, WRONG_ITEM for wrong product, UNWANTED for change of mind.",
+                "Use SIZE_TOO_SMALL / SIZE_TOO_LARGE for size issues, COLOR for wrong color, " +
+                "STYLE for wrong variant, WRONG_ITEM for wrong product, UNWANTED for change of mind.",
               ),
           }),
         )
@@ -1725,7 +1704,7 @@ const createMcpServer = (configs = {}) => {
         .string()
         .describe(
           "productType of the item being exchanged (e.g. 'Laptop Bags'). " +
-            "Used to detect consumable/non-returnable product types. Pass empty string if unknown.",
+          "Used to detect consumable/non-returnable product types. Pass empty string if unknown.",
         ),
       staff_note: z
         .string()
@@ -1766,8 +1745,8 @@ const createMcpServer = (configs = {}) => {
         if (!fulfillment_created_at) {
           console.warn(
             "[exchange_items] ⚠ fulfillment_created_at is missing. " +
-              "Pass the 'fulfillment_created_at' field from get_order_detail. " +
-              "Policy window check will be skipped (fail-open).",
+            "Pass the 'fulfillment_created_at' field from get_order_detail. " +
+            "Policy window check will be skipped (fail-open).",
           );
         }
 
@@ -1843,7 +1822,7 @@ const createMcpServer = (configs = {}) => {
             order_id: order_id,
             return_items: JSON.stringify(return_items),
             exchange_items: JSON.stringify(exchange_items),
-          }).catch(() => {});
+          }).catch(() => { });
         }
 
         return {
@@ -1892,13 +1871,13 @@ const createMcpServer = (configs = {}) => {
         .string()
         .describe(
           "ISO-8601 created_at from fulfillments[0].created_at in the order response " +
-            "(e.g. '2026-06-22T02:53:43-04:00'). The exchange window is measured from this date.",
+          "(e.g. '2026-06-22T02:53:43-04:00'). The exchange window is measured from this date.",
         ),
       product_type: z
         .string()
         .describe(
           "productType of the item being exchanged (e.g. 'Laptop Bags'). " +
-            "Pass empty string '' when only checking the time window (product type not yet known).",
+          "Pass empty string '' when only checking the time window (product type not yet known).",
         ),
     },
     async ({ fulfillment_created_at, product_type = "" }) => {
