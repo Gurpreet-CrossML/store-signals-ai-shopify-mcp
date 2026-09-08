@@ -34,6 +34,7 @@ const {
   formatRefundStatus,
   ShopifyExchangeManager,
   getExchangePolicyEligibility,
+  verifyOrderIdentity,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
@@ -46,6 +47,7 @@ const createMcpServer = (configs = {}) => {
     storeCode,
     sessionId,
     widgetKey,
+    customerEmail,
   } = configs;
 
   // fail fast if the backend forgot to send required creds
@@ -914,74 +916,127 @@ const createMcpServer = (configs = {}) => {
   // ######### 9. Get Order Detail #########
   server.tool(
     "get_order_detail",
-    `Fetch a specific order by order number and email.
-  Returns a single order object.
+    `Fetch a specific order by order number and one identity verification field (email, phone, zip/postal code, or surname), OR fetch recent orders if no order number is provided (for logged-in users).
+  Returns a single order object or an error message if verification fails.
 
   Parameters:
-  @param {string} email: Order identifier (e.g. "test@example.com")
-  @param {string} order_id: Order identifier (e.g. "1026")
+  @param {string} order_id    - Short order number (e.g. "1026"). Optional if fetching recent orders for a logged-in user.
+  @param {string} email: Customer email (optional)
+  @param {string} phone: Customer phone number (optional)
+  @param {string} zip_code: Customer zip/postal code (optional)
+  @param {string} surname: Customer surname / last name (optional)
+
+  CRITICAL RULES FOR AI AGENTS:
+  1. NEVER guess or invent ANY of the parameters above.
+  2. If the user is a guest, you MUST explicitly ask the user for their email or phone number BEFORE calling this tool.
+  3. If you do not have a real email, phone, zip_code, or surname provided by the user, DO NOT call this tool.
   `,
     {
       email: z
         .string()
         .trim()
-        .email()
-        .describe("Order email (e.g. 'test@example.com')"),
+        .describe("Order email (e.g. 'test@example.com')")
+        .optional(),
       order_id: z
         .string()
         .trim()
-        .min(4, "Order ID is required")
-        .describe("Order ID (e.g. '1026')"),
+        .describe(
+          "Order ID (e.g. '1026'). Optional if fetching recent orders for a logged-in user.",
+        )
+        .optional(),
+      phone: z
+        .string()
+        .trim()
+        .describe("Phone number associated with the order")
+        .optional(),
+      zip_code: z
+        .string()
+        .trim()
+        .describe("Zip or postal code associated with the order")
+        .optional(),
+      surname: z
+        .string()
+        .trim()
+        .describe("Customer surname / last name associated with the order")
+        .optional(),
     },
-    async ({ email, order_id }) => {
+    async ({ email, order_id, phone, zip_code, surname }) => {
       try {
-        const response = await callShopifyApi(
-          baseUrl,
-          storefrontAccessToken,
-          adminAccessToken,
-          "GET",
-          `/admin/api/2024-04/orders.json?email=${encodeURIComponent(email)}&status=any`,
-        );
+        let orders = [];
 
-        // No orders
-        if (!response || !Array.isArray(response.orders)) {
+        // 1. Fetch from Shopify by Order ID if provided
+        if (order_id) {
+          const cleanOrderId = String(order_id).replace(/^#/, "").trim();
+          let response = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "GET",
+            `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
+          );
+
+          orders = response?.orders || [];
+
+          const currentOrder = orders.find(
+            (o) =>
+              o?.order_number == cleanOrderId ||
+              o?.name == `#${cleanOrderId}` ||
+              o?.name == cleanOrderId,
+          );
+
+          if (!currentOrder) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `We couldn’t locate order #${cleanOrderId}. Please verify the order ID and try again.`,
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          // Perform guest identity verification (or use authenticated email for logged-in users)
+          const verification = verifyOrderIdentity(currentOrder, {
+            email: email || customerEmail,
+            phone,
+            zip_code,
+            surname,
+          });
+
+          if (!verification.verified) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: verification.message,
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const formattedOrder = await formatOrder(currentOrder);
+
           return {
             content: [
               {
                 type: "text",
-                text: "We couldn’t found your order with this email.",
+                text: JSON.stringify(formattedOrder, null, 2),
+              },
+            ],
+          };
+        } else {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Order ID is mandatory for user verification.",
               },
             ],
             isError: true,
           };
         }
-
-        const orders = response?.orders;
-
-        const currentOrder = orders.find((o) => o?.order_number == order_id);
-
-        if (!currentOrder) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `We couldn’t locate order #${order_id}. Please verify the order ID and try again.`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        const formattedOrder = await formatOrder(currentOrder);
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(formattedOrder, null, 2),
-            },
-          ],
-        };
       } catch (error) {
         return {
           content: [
@@ -1015,18 +1070,21 @@ const createMcpServer = (configs = {}) => {
       email: z
         .string()
         .trim()
-        .email()
-        .describe("Order email (e.g. 'test@example.com')"),
+        .describe(
+          "Order email (e.g. 'test@example.com'). Optional for logged-in users.",
+        )
+        .optional(),
       reason: z.string().describe("Cancellation reason"),
     },
     async ({ order_id, email, reason }) => {
       try {
+        const cleanOrderId = String(order_id).replace(/^#/, "").trim();
         const response = await callShopifyApi(
           baseUrl,
           storefrontAccessToken,
           adminAccessToken,
           "GET",
-          `/admin/api/2024-04/orders.json?name=%23${order_id}&status=any&email=${encodeURIComponent(email)}`,
+          `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
         );
 
         const orders = response?.orders || [];
@@ -1284,46 +1342,99 @@ const createMcpServer = (configs = {}) => {
 
   Parameters:
   @param {string} email
-  @param {string} order_id
+  @param {string} order_id: Order ID / order number (e.g. "1026"). Optional if fetching recent orders for a logged-in user.
+  @param {string} phone: Customer phone number (optional)
+  @param {string} zip_code: Customer zip/postal code (optional)
+  @param {string} surname: Customer surname / last name (optional)
   `,
     {
-      email: z
-        .string()
-        .trim()
-        .email()
-        .describe("Order email (e.g. 'test@example.com')"),
       order_id: z
         .string()
         .trim()
-        .min(4, "Order ID is required")
-        .describe("Order ID (e.g. '1026')"),
+        .describe(
+          "Order ID (e.g. '1026'). Optional if fetching recent orders for a logged-in user.",
+        )
+        .optional(),
+      email: z.string().trim().optional(),
+      phone: z.string().trim().optional(),
+      zip_code: z.string().trim().optional(),
+      surname: z.string().trim().optional(),
     },
-    async ({ email, order_id }) => {
+    async ({ order_id, email, phone, zip_code, surname }) => {
       try {
-        // Find order
-        const orderResponse = await callShopifyApi(
-          baseUrl,
-          storefrontAccessToken,
-          adminAccessToken,
-          "GET",
-          `/admin/api/2024-04/orders.json?email=${encodeURIComponent(
-            email,
-          )}&status=any`,
-        );
+        let currentOrder = null;
 
-        const currentOrder = orderResponse?.orders?.find(
-          (o) => String(o.order_number) === String(order_id),
-        );
+        // 1. Fetch from Shopify by Order ID if provided
+        if (order_id) {
+          const cleanOrderId = String(order_id).replace(/^#/, "").trim();
+          let orderResponse = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "GET",
+            `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
+          );
 
-        if (!currentOrder) {
+          currentOrder = orderResponse?.orders?.[0];
+
+          if (!currentOrder) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `We couldn’t locate order #${order_id}.`,
+                },
+              ],
+              isError: false,
+            };
+          }
+        } else if (customerEmail) {
+          let response = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "GET",
+            `/admin/api/2024-04/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
+          );
+          if (
+            !response ||
+            !Array.isArray(response.orders) ||
+            response.orders.length === 0
+          ) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "We couldn’t find any orders for your account.",
+                },
+              ],
+              isError: false,
+            };
+          }
+          currentOrder = response.orders[0];
+        } else {
           return {
             content: [
               {
                 type: "text",
-                text: `We couldn’t locate order #${order_id}.`,
+                text: "Order ID is mandatory for user verification.",
               },
             ],
-            isError: true,
+            isError: false,
+          };
+        }
+
+        const verification = verifyOrderIdentity(currentOrder, {
+          email: email || customerEmail,
+          phone,
+          zip_code,
+          surname,
+        });
+
+        if (!verification.verified) {
+          return {
+            content: [{ type: "text", text: verification.message }],
+            isError: false,
           };
         }
 
@@ -1377,58 +1488,106 @@ const createMcpServer = (configs = {}) => {
 
   Parameters:
   @param {string} email       - Customer email associated with the order
-  @param {string} order_id    - Short order number (e.g. "1026")
+  @param {string} order_id    - Short order number (e.g. "1026"). Optional if fetching recent orders for a logged-in user.
+  @param {string} phone: Customer phone number (optional)
+  @param {string} zip_code: Customer zip/postal code (optional)
+  @param {string} surname: Customer surname / last name (optional)
+
+  CRITICAL RULES FOR AI AGENTS:
+  1. NEVER guess or invent ANY of the parameters above.
+  2. If the user is a guest, you MUST explicitly ask the user for their email or phone number BEFORE calling this tool.
+  3. If you do not have a real email, phone, zip_code, or surname provided by the user, DO NOT call this tool.
   `,
     {
-      email: z
-        .string()
-        .trim()
-        .email()
-        .describe("Order email (e.g. 'test@example.com')"),
       order_id: z
         .string()
         .trim()
-        .min(4, "Order ID is required")
-        .describe("Order ID (e.g. '1026')"),
+        .describe(
+          "Order ID (e.g. '1026'). Optional if fetching recent orders for a logged-in user.",
+        )
+        .optional(),
+      email: z.string().trim().optional(),
+      phone: z.string().trim().optional(),
+      zip_code: z.string().trim().optional(),
+      surname: z.string().trim().optional(),
     },
-    async ({ email, order_id }) => {
+    async ({ order_id, email, phone, zip_code, surname }) => {
       try {
-        //1. Find the order via REST (same pattern as get_order_detail)
-        const ordersResponse = await callShopifyApi(
-          baseUrl,
-          storefrontAccessToken,
-          adminAccessToken,
-          "GET",
-          `/admin/api/2024-04/orders.json?email=${encodeURIComponent(email)}&status=any`,
-        );
+        let restOrder = null;
+        if (order_id) {
+          //1. Find the order via REST (same pattern as get_order_detail)
+          const cleanOrderId = String(order_id).replace(/^#/, "").trim();
+          let ordersResponse = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "GET",
+            `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
+          );
 
-        if (!ordersResponse || !Array.isArray(ordersResponse.orders)) {
+          restOrder = ordersResponse?.orders?.[0];
+
+          if (!restOrder) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `We couldn't locate order #${order_id}. Please verify the order number and try again.`,
+                },
+              ],
+              isError: false,
+            };
+          }
+        } else if (customerEmail) {
+          let response = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "GET",
+            `/admin/api/2024-04/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
+          );
+          if (
+            !response ||
+            !Array.isArray(response.orders) ||
+            response.orders.length === 0
+          ) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "We couldn’t find any orders for your account.",
+                },
+              ],
+              isError: false,
+            };
+          }
+          restOrder = response.orders[0];
+        } else {
           return {
             content: [
               {
                 type: "text",
-                text: "We couldn't find any orders associated with this email.",
+                text: "Order ID is mandatory for user verification.",
               },
             ],
-            isError: true,
+            isError: false,
           };
         }
 
-        const restOrder = ordersResponse.orders.find(
-          (o) => String(o.order_number) === String(order_id),
-        );
+        const verification = verifyOrderIdentity(restOrder, {
+          email: email || customerEmail,
+          phone,
+          zip_code,
+          surname,
+        });
 
-        if (!restOrder) {
+        if (!verification.verified) {
           return {
-            content: [
-              {
-                type: "text",
-                text: `We couldn't locate order #${order_id}. Please verify the order number and try again.`,
-              },
-            ],
-            isError: true,
+            content: [{ type: "text", text: verification.message }],
+            isError: false,
           };
         }
+
         const shopifyOrderGid = `gid://shopify/Order/${restOrder.id}`;
 
         const graphqlResponse = await callShopifyApi(
@@ -2010,6 +2169,76 @@ const createMcpServer = (configs = {}) => {
     },
   );
 
+  // ######### 18. Get Latest Order #########
+  server.tool(
+    "get_latest_order",
+    `Fetch the most recent order for the currently logged-in user.
+    Takes no parameters. This tool will automatically use the authenticated user's email.
+    Use this ONLY when the customer is logged in and asks for their recent order.`,
+    {},
+    async () => {
+      try {
+        if (!customerEmail) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "No logged-in user email found. Cannot fetch latest order for guest users.",
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const response = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "GET",
+          `/admin/api/2024-04/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
+        );
+
+        if (
+          !response ||
+          !Array.isArray(response.orders) ||
+          response.orders.length === 0
+        ) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "We couldn’t find any orders for your account.",
+              },
+            ],
+            isError: false,
+          };
+        }
+
+        const latestOrder = response.orders[0];
+        const formattedOrder = await formatOrder(latestOrder);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(formattedOrder, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error fetching latest order: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
   // ********************************** End of MCP Tools **********************************
 
   return server;
@@ -2040,6 +2269,7 @@ app.post("/mcp", async (req, res) => {
       storeCode: req.headers["x-store-code"],
       sessionId: req.headers["x-session-id"],
       widgetKey: req.headers["x-widget-key"],
+      customerEmail: req.headers["x-customer-email"],
     };
 
     const server = createMcpServer(configs);
