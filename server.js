@@ -116,6 +116,7 @@ const createMcpServer = (configs = {}) => {
     {
       query: z
         .string()
+        .optional()
         .describe(
           "Free-text search keywords (product name, description terms, or descriptive attributes not covered by product_type/tags - e.g. 'vitamin c', 'oily skin', 'wireless').",
         ),
@@ -357,6 +358,123 @@ const createMcpServer = (configs = {}) => {
             {
               type: "text",
               text: `Error searching products: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+  // ######### get_collection_price_bounds #########
+  server.tool(
+    "get_collection_price_bounds",
+    `Fetch the minimum and maximum price for a specific product collection/type.
+  Use this to generate price ranges dynamically.`,
+    {
+      collection: z
+        .string()
+        .describe(
+          "The name of the collection or product type (e.g. 'Men', 'Shoes').",
+        ),
+    },
+    async ({ collection }) => {
+      try {
+        const cleanName = collection.trim();
+        const singularName = cleanName.replace(/s$/i, '').replace(/es$/i, '');
+        const queryStr = `product_type:\\"${cleanName}\\" OR product_type:\\"${singularName}\\" OR tag:\\"${cleanName}\\" OR tag:\\"${singularName}\\"`;
+
+        // Find min price
+        const minQuery = {
+          query: `
+            query {
+              products(first: 1, sortKey: PRICE, reverse: false, query: "${queryStr}") {
+                edges {
+                  node {
+                    priceRange {
+                      minVariantPrice {
+                        amount
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          `,
+        };
+
+        // Find max price
+        const maxQuery = {
+          query: `
+            query {
+              products(first: 1, sortKey: PRICE, reverse: true, query: "${queryStr}") {
+                edges {
+                  node {
+                    priceRange {
+                      maxVariantPrice {
+                        amount
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          `,
+        };
+
+        const [minResult, maxResult] = await Promise.all([
+          callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "POST",
+            "",
+            minQuery,
+          ),
+          callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "POST",
+            "",
+            maxQuery,
+          ),
+        ]);
+
+        const leastPrice = parseFloat(
+          minResult?.data?.products?.edges?.[0]?.node?.priceRange
+            ?.minVariantPrice?.amount || 0,
+        );
+        const maxPrice = parseFloat(
+          maxResult?.data?.products?.edges?.[0]?.node?.priceRange
+            ?.maxVariantPrice?.amount || 0,
+        );
+
+        console.log("=== get_collection_price_bounds DEBUG ===");
+        console.log("Collection Requested:", collection);
+        console.log("GraphQL Query String:", queryStr);
+        console.log("Min Product Edge Found:", JSON.stringify(minResult?.data?.products?.edges?.[0] || null, null, 2));
+        console.log("Max Product Edge Found:", JSON.stringify(maxResult?.data?.products?.edges?.[0] || null, null, 2));
+        console.log("Extracted Bounds -> least_price:", leastPrice, "| max_price:", maxPrice);
+        console.log("=========================================");
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                { least_price: leastPrice, max_price: maxPrice },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error fetching price bounds: ${error.message}`,
             },
           ],
           isError: true,
