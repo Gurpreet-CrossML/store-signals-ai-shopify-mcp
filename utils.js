@@ -1965,7 +1965,7 @@ const verifyOrderIdentity = (
   return {
     verified: false,
     failedField: "none",
-    message: `Please provide an identity verification field (Email, Phone number, Zip/postal code, or Surname) along with order #${order.order_number}.`,
+    message: `Missing identity verification. You must provide exactly one verification field along with order #${order.order_number}.`,
   };
 };
 
