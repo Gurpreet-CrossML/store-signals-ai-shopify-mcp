@@ -1351,7 +1351,9 @@ const createMcpServer = (configs = {}) => {
       order_id: z
         .string()
         .trim()
-        .describe("Order ID (e.g. '1026'). Optional if fetching recent orders for a logged-in user.")
+        .describe(
+          "Order ID (e.g. '1026'). Optional if fetching recent orders for a logged-in user.",
+        )
         .optional(),
       email: z.string().trim().optional(),
       phone: z.string().trim().optional(),
@@ -1394,7 +1396,11 @@ const createMcpServer = (configs = {}) => {
             "GET",
             `/admin/api/2024-04/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
           );
-          if (!response || !Array.isArray(response.orders) || response.orders.length === 0) {
+          if (
+            !response ||
+            !Array.isArray(response.orders) ||
+            response.orders.length === 0
+          ) {
             return {
               content: [
                 {
@@ -1496,7 +1502,9 @@ const createMcpServer = (configs = {}) => {
       order_id: z
         .string()
         .trim()
-        .describe("Order ID (e.g. '1026'). Optional if fetching recent orders for a logged-in user.")
+        .describe(
+          "Order ID (e.g. '1026'). Optional if fetching recent orders for a logged-in user.",
+        )
         .optional(),
       email: z.string().trim().optional(),
       phone: z.string().trim().optional(),
@@ -1538,7 +1546,11 @@ const createMcpServer = (configs = {}) => {
             "GET",
             `/admin/api/2024-04/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
           );
-          if (!response || !Array.isArray(response.orders) || response.orders.length === 0) {
+          if (
+            !response ||
+            !Array.isArray(response.orders) ||
+            response.orders.length === 0
+          ) {
             return {
               content: [
                 {
