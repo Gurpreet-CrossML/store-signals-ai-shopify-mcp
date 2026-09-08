@@ -920,11 +920,16 @@ const createMcpServer = (configs = {}) => {
   Returns a single order object or an error message if verification fails.
 
   Parameters:
-  @param {string} email: Order email (e.g. "test@example.com")
-  @param {string} order_id: Order ID / order number (e.g. "1026"). Required for guest users.
+  @param {string} order_id    - Short order number (e.g. "1026"). Optional if fetching recent orders for a logged-in user.
+  @param {string} email: Customer email (optional)
   @param {string} phone: Customer phone number (optional)
   @param {string} zip_code: Customer zip/postal code (optional)
   @param {string} surname: Customer surname / last name (optional)
+
+  CRITICAL RULES FOR AI AGENTS:
+  1. NEVER guess or invent ANY of the parameters above.
+  2. If the user is a guest, you MUST explicitly ask the user for their email or phone number BEFORE calling this tool.
+  3. If you do not have a real email, phone, zip_code, or surname provided by the user, DO NOT call this tool.
   `,
     {
       email: z
@@ -1337,38 +1342,93 @@ const createMcpServer = (configs = {}) => {
 
   Parameters:
   @param {string} email
-  @param {string} order_id
+  @param {string} order_id: Order ID / order number (e.g. "1026"). Optional if fetching recent orders for a logged-in user.
+  @param {string} phone: Customer phone number (optional)
+  @param {string} zip_code: Customer zip/postal code (optional)
+  @param {string} surname: Customer surname / last name (optional)
   `,
     {
       order_id: z
         .string()
         .trim()
-        .min(4, "Order ID is required")
-        .describe("Order ID (e.g. '1026')"),
+        .describe("Order ID (e.g. '1026'). Optional if fetching recent orders for a logged-in user.")
+        .optional(),
+      email: z.string().trim().optional(),
+      phone: z.string().trim().optional(),
+      zip_code: z.string().trim().optional(),
+      surname: z.string().trim().optional(),
     },
-    async ({ order_id }) => {
+    async ({ order_id, email, phone, zip_code, surname }) => {
       try {
-        // Find order
-        const cleanOrderId = String(order_id).replace(/^#/, "").trim();
-        let orderResponse = await callShopifyApi(
-          baseUrl,
-          storefrontAccessToken,
-          adminAccessToken,
-          "GET",
-          `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
-        );
+        let currentOrder = null;
 
-        let currentOrder = orderResponse?.orders?.[0];
+        // 1. Fetch from Shopify by Order ID if provided
+        if (order_id) {
+          const cleanOrderId = String(order_id).replace(/^#/, "").trim();
+          let orderResponse = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "GET",
+            `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
+          );
 
-        if (!currentOrder) {
+          currentOrder = orderResponse?.orders?.[0];
+
+          if (!currentOrder) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `We couldn’t locate order #${order_id}.`,
+                },
+              ],
+              isError: false,
+            };
+          }
+        } else if (customerEmail) {
+          let response = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "GET",
+            `/admin/api/2024-04/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
+          );
+          if (!response || !Array.isArray(response.orders) || response.orders.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "We couldn’t find any orders for your account.",
+                },
+              ],
+              isError: false,
+            };
+          }
+          currentOrder = response.orders[0];
+        } else {
           return {
             content: [
               {
                 type: "text",
-                text: `We couldn’t locate order #${order_id}.`,
+                text: "Order ID is mandatory for user verification.",
               },
             ],
-            isError: true,
+            isError: false,
+          };
+        }
+
+        const verification = verifyOrderIdentity(currentOrder, {
+          email: email || customerEmail,
+          phone,
+          zip_code,
+          surname,
+        });
+
+        if (!verification.verified) {
+          return {
+            content: [{ type: "text", text: verification.message }],
+            isError: false,
           };
         }
 
@@ -1422,40 +1482,100 @@ const createMcpServer = (configs = {}) => {
 
   Parameters:
   @param {string} email       - Customer email associated with the order
-  @param {string} order_id    - Short order number (e.g. "1026")
+  @param {string} order_id    - Short order number (e.g. "1026"). Optional if fetching recent orders for a logged-in user.
+  @param {string} phone: Customer phone number (optional)
+  @param {string} zip_code: Customer zip/postal code (optional)
+  @param {string} surname: Customer surname / last name (optional)
+
+  CRITICAL RULES FOR AI AGENTS:
+  1. NEVER guess or invent ANY of the parameters above.
+  2. If the user is a guest, you MUST explicitly ask the user for their email or phone number BEFORE calling this tool.
+  3. If you do not have a real email, phone, zip_code, or surname provided by the user, DO NOT call this tool.
   `,
     {
       order_id: z
         .string()
         .trim()
-        .min(4, "Order ID is required")
-        .describe("Order ID (e.g. '1026')"),
+        .describe("Order ID (e.g. '1026'). Optional if fetching recent orders for a logged-in user.")
+        .optional(),
+      email: z.string().trim().optional(),
+      phone: z.string().trim().optional(),
+      zip_code: z.string().trim().optional(),
+      surname: z.string().trim().optional(),
     },
-    async ({ order_id }) => {
+    async ({ order_id, email, phone, zip_code, surname }) => {
       try {
-        //1. Find the order via REST (same pattern as get_order_detail)
-        const cleanOrderId = String(order_id).replace(/^#/, "").trim();
-        let ordersResponse = await callShopifyApi(
-          baseUrl,
-          storefrontAccessToken,
-          adminAccessToken,
-          "GET",
-          `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
-        );
+        let restOrder = null;
+        if (order_id) {
+          //1. Find the order via REST (same pattern as get_order_detail)
+          const cleanOrderId = String(order_id).replace(/^#/, "").trim();
+          let ordersResponse = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "GET",
+            `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
+          );
 
-        let restOrder = ordersResponse?.orders?.[0];
+          restOrder = ordersResponse?.orders?.[0];
 
-        if (!restOrder) {
+          if (!restOrder) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `We couldn't locate order #${order_id}. Please verify the order number and try again.`,
+                },
+              ],
+              isError: false,
+            };
+          }
+        } else if (customerEmail) {
+          let response = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "GET",
+            `/admin/api/2024-04/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
+          );
+          if (!response || !Array.isArray(response.orders) || response.orders.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "We couldn’t find any orders for your account.",
+                },
+              ],
+              isError: false,
+            };
+          }
+          restOrder = response.orders[0];
+        } else {
           return {
             content: [
               {
                 type: "text",
-                text: `We couldn't locate order #${order_id}. Please verify the order number and try again.`,
+                text: "Order ID is mandatory for user verification.",
               },
             ],
-            isError: true,
+            isError: false,
           };
         }
+
+        const verification = verifyOrderIdentity(restOrder, {
+          email: email || customerEmail,
+          phone,
+          zip_code,
+          surname,
+        });
+
+        if (!verification.verified) {
+          return {
+            content: [{ type: "text", text: verification.message }],
+            isError: false,
+          };
+        }
+
         const shopifyOrderGid = `gid://shopify/Order/${restOrder.id}`;
 
         const graphqlResponse = await callShopifyApi(
