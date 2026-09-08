@@ -380,7 +380,7 @@ const createMcpServer = (configs = {}) => {
     async ({ collection }) => {
       try {
         const cleanName = collection.trim();
-        const singularName = cleanName.replace(/s$/i, '').replace(/es$/i, '');
+        const singularName = cleanName.replace(/s$/i, "").replace(/es$/i, "");
         const queryStr = `product_type:\\"${cleanName}\\" OR product_type:\\"${singularName}\\" OR tag:\\"${cleanName}\\" OR tag:\\"${singularName}\\"`;
 
         // Find min price
@@ -452,9 +452,28 @@ const createMcpServer = (configs = {}) => {
         console.log("=== get_collection_price_bounds DEBUG ===");
         console.log("Collection Requested:", collection);
         console.log("GraphQL Query String:", queryStr);
-        console.log("Min Product Edge Found:", JSON.stringify(minResult?.data?.products?.edges?.[0] || null, null, 2));
-        console.log("Max Product Edge Found:", JSON.stringify(maxResult?.data?.products?.edges?.[0] || null, null, 2));
-        console.log("Extracted Bounds -> least_price:", leastPrice, "| max_price:", maxPrice);
+        console.log(
+          "Min Product Edge Found:",
+          JSON.stringify(
+            minResult?.data?.products?.edges?.[0] || null,
+            null,
+            2,
+          ),
+        );
+        console.log(
+          "Max Product Edge Found:",
+          JSON.stringify(
+            maxResult?.data?.products?.edges?.[0] || null,
+            null,
+            2,
+          ),
+        );
+        console.log(
+          "Extracted Bounds -> least_price:",
+          leastPrice,
+          "| max_price:",
+          maxPrice,
+        );
         console.log("=========================================");
 
         return {
