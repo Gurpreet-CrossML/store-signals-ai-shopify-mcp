@@ -3,6 +3,7 @@ const dotenv = require("dotenv");
 const https = require("https");
 const {
   storeMetadataQuery,
+  storeMetadataQueryLegacy,
   relatedProductsQuery,
   productSearchByQuery,
   getReturnableFulfillmentsQuery,
@@ -346,6 +347,34 @@ const formatProducts = (
   }
 };
 
+// Groups leaf categories under their immediate parent (ancestors[0] -
+// Shopify orders the chain immediate-parent-first, root last; using the
+// wrong end collapses everything into one root-level bucket).
+const buildCategoryTree = (categoryNodes = []) => {
+  const treeMap = new Map();
+
+  for (const cat of categoryNodes) {
+    if (!cat?.name) continue;
+
+    const ancestors = Array.isArray(cat.ancestors) ? cat.ancestors : [];
+    const parentName = ancestors.length ? ancestors[0]?.name : null;
+
+    if (!parentName || parentName === cat.name) continue;
+
+    if (!treeMap.has(parentName)) {
+      treeMap.set(parentName, new Set());
+    }
+    treeMap.get(parentName).add(cat.name);
+  }
+
+  return [...treeMap.entries()]
+    .map(([category, subCategories]) => ({
+      category,
+      sub_categories: [...subCategories].sort(),
+    }))
+    .sort((a, b) => a.category.localeCompare(b.category));
+};
+
 // Utility function to fetch store metadata like product tags, types, collections, and categories. This metadata can be used for various purposes like improving search relevance, generating search queries, etc.
 const storeMetadata = async (
   base_url,
@@ -353,7 +382,9 @@ const storeMetadata = async (
   admin_token,
   store_code,
 ) => {
-  const cacheKey = `store_metadata:store:${store_code}`;
+  // Bumped to v2: the shape gained `category_tree`, so a stale cached v1
+  // entry (flat-only) should not be served under the same key.
+  const cacheKey = `store_metadata:v2:store:${store_code}`;
 
   try {
     const cachedMetadata = await getCache(cacheKey);
@@ -361,18 +392,34 @@ const storeMetadata = async (
       return cachedMetadata;
     }
 
-    const graphqlQuery = {
-      query: storeMetadataQuery,
-    };
-
-    const result = await callShopifyApi(
+    let result = await callShopifyApi(
       base_url,
       storefront_token,
       admin_token,
       "POST",
       "",
-      graphqlQuery,
+      { query: storeMetadataQuery },
     );
+
+    // The taxonomy ancestry fields (`ancestors`/`isLeaf`) may not be
+    // available on every store's Shopify plan/API version. Rather than
+    // let that zero out tags/types/collections too, retry once with the
+    // legacy shape - category_tree just comes back empty in that case.
+    if (result.errors) {
+      console.warn(
+        "storeMetadata: primary query errored, retrying without taxonomy ancestry:",
+        JSON.stringify(result.errors),
+      );
+
+      result = await callShopifyApi(
+        base_url,
+        storefront_token,
+        admin_token,
+        "POST",
+        "",
+        { query: storeMetadataQueryLegacy },
+      );
+    }
 
     if (result.errors) {
       return {
@@ -380,6 +427,7 @@ const storeMetadata = async (
         types: [],
         collections: [],
         categories: [],
+        category_tree: [],
       };
     }
 
@@ -392,21 +440,26 @@ const storeMetadata = async (
     const collections =
       result?.data?.collections?.edges?.map((item) => item?.node?.title) || [];
 
+    const categoryNodes = (
+      result?.data?.products?.edges?.map((item) => item?.node?.category) || []
+    ).filter(Boolean);
+
     const categories = [
-      ...new Set(
-        (
-          result?.data?.products?.edges?.map(
-            (item) => item?.node?.category?.name,
-          ) || []
-        ).filter(Boolean),
-      ),
+      ...new Set(categoryNodes.map((cat) => cat?.name).filter(Boolean)),
     ];
+
+    // Real category -> sub-categories grouping sourced from Shopify's own
+    // taxonomy ancestry - never synthesized by the calling agent. Use this
+    // (not `categories`) to present selectable sub-category options for a
+    // broad category query, and `collections` for the vague/gifting flow.
+    const categoryTree = buildCategoryTree(categoryNodes);
 
     const metadata = {
       tags,
       types,
       collections,
       categories,
+      category_tree: categoryTree,
     };
 
     try {
@@ -426,6 +479,7 @@ const storeMetadata = async (
       types: [],
       collections: [],
       categories: [],
+      category_tree: [],
     };
   }
 };
@@ -1980,10 +2034,12 @@ module.exports = {
   // helpers
   callShopifyApi,
   callBackendAPI,
+  getCurrencySymbol,
   formatProducts,
   fetchRelatedProducts,
   getProductSortConfig,
   storeMetadata,
+  buildCategoryTree,
   logProductViewEvents,
   parseSpaceInput,
   extractDimensions,

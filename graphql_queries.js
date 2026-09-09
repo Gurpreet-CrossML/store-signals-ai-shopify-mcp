@@ -98,6 +98,48 @@ const storeMetadataQuery = `query {
         edges {
         node {
             category {
+            id
+            name
+            ancestors {
+              id
+              name
+            }
+            }
+        }
+        }
+    }
+}`;
+
+// Fallback for storeMetadataQuery — used only when the primary query above
+// errors (e.g. `ancestors` unsupported on the store's Shopify plan or API
+// version). Identical except it requests just the category leaf name, so
+// tags/types/collections still come back even when the taxonomy ancestry
+// field doesn't; `category_tree` is simply left empty in that case.
+const storeMetadataQueryLegacy = `query {
+    productTags(first: 250) {
+        edges {
+        node
+        }
+    }
+
+    productTypes(first: 250) {
+        edges {
+        node
+        }
+    }
+
+    collections(first: 250) {
+        edges {
+        node {
+            title
+        }
+        }
+    }
+
+    products(first: 250) {
+        edges {
+        node {
+            category {
             name
             }
         }
@@ -420,6 +462,7 @@ const refundQuery = `
 module.exports = {
   productSearchByQuery,
   storeMetadataQuery,
+  storeMetadataQueryLegacy,
   relatedProductsQuery,
   productByIdQuery,
   productSortQuery,

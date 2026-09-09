@@ -17,6 +17,7 @@ const {
   MCP_VERSION,
   callShopifyApi,
   callBackendAPI,
+  getCurrencySymbol,
   formatProducts,
   fetchRelatedProducts,
   getProductSortConfig,
@@ -370,20 +371,44 @@ const createMcpServer = (configs = {}) => {
   // ######### get_collection_price_bounds #########
   server.tool(
     "get_collection_price_bounds",
-    `Fetch the minimum and maximum price for a specific product collection/type.
-  Use this to generate price ranges dynamically.`,
+    `Fetch the minimum and maximum price across one or more product
+  collections/categories/types combined, in the store's real currency.
+  Use this to generate ONE set of price ranges dynamically.
+
+  Pass ALL collections/categories the customer selected in a single call via
+  "collections" - e.g. ["MakeUp", "Wellness"] - to get ONE combined price
+  range covering all of them together. NEVER call this once per item: price
+  should only ever be asked ONCE, regardless of how many collections or
+  sub-categories were selected.
+
+  Returns { least_price, max_price, currency_code, currency_symbol }. ALWAYS
+  use the returned currency_symbol when presenting price buckets to the
+  customer - never assume "$" or any other hardcoded currency.`,
     {
-      collection: z
-        .string()
+      collections: z
+        .union([z.string(), z.array(z.string()).min(1)])
         .describe(
-          "The name of the collection or product type (e.g. 'Men', 'Shoes').",
+          "One or more collection/category/product-type names (e.g. 'Men' or ['MakeUp', 'Wellness']). " +
+            "Pass all selected items together as an array to get a single combined price range.",
         ),
     },
-    async ({ collection }) => {
+    async ({ collections }) => {
       try {
-        const cleanName = collection.trim();
-        const singularName = cleanName.replace(/s$/i, "").replace(/es$/i, "");
-        const queryStr = `product_type:\\"${cleanName}\\" OR product_type:\\"${singularName}\\" OR tag:\\"${cleanName}\\" OR tag:\\"${singularName}\\"`;
+        const names = (Array.isArray(collections) ? collections : [collections])
+          .map((c) => String(c || "").trim())
+          .filter(Boolean);
+
+        const queryStr = names
+          .flatMap((name) => {
+            const singularName = name.replace(/s$/i, "").replace(/es$/i, "");
+            return [
+              `product_type:\\"${name}\\"`,
+              `product_type:\\"${singularName}\\"`,
+              `tag:\\"${name}\\"`,
+              `tag:\\"${singularName}\\"`,
+            ];
+          })
+          .join(" OR ");
 
         // Find min price
         const minQuery = {
@@ -395,6 +420,7 @@ const createMcpServer = (configs = {}) => {
                     priceRange {
                       minVariantPrice {
                         amount
+                        currencyCode
                       }
                     }
                   }
@@ -414,6 +440,7 @@ const createMcpServer = (configs = {}) => {
                     priceRange {
                       maxVariantPrice {
                         amount
+                        currencyCode
                       }
                     }
                   }
@@ -450,9 +477,16 @@ const createMcpServer = (configs = {}) => {
           maxResult?.data?.products?.edges?.[0]?.node?.priceRange
             ?.maxVariantPrice?.amount || 0,
         );
+        const currencyCode =
+          minResult?.data?.products?.edges?.[0]?.node?.priceRange
+            ?.minVariantPrice?.currencyCode ||
+          maxResult?.data?.products?.edges?.[0]?.node?.priceRange
+            ?.maxVariantPrice?.currencyCode ||
+          null;
+        const currencySymbol = getCurrencySymbol(currencyCode);
 
         console.log("=== get_collection_price_bounds DEBUG ===");
-        console.log("Collection Requested:", collection);
+        console.log("Collections Requested:", names);
         console.log("GraphQL Query String:", queryStr);
         console.log(
           "Min Product Edge Found:",
@@ -483,7 +517,12 @@ const createMcpServer = (configs = {}) => {
             {
               type: "text",
               text: JSON.stringify(
-                { least_price: leastPrice, max_price: maxPrice },
+                {
+                  least_price: leastPrice,
+                  max_price: maxPrice,
+                  currency_code: currencyCode,
+                  currency_symbol: currencySymbol,
+                },
                 null,
                 2,
               ),
@@ -780,7 +819,30 @@ const createMcpServer = (configs = {}) => {
   server.tool(
     "get_store_meta_info",
     `Fetch metadata about the store's product catalog.
-  Returns product tags, types, collections, and categories available in the store.
+  Returns product tags, types, collections, categories, and a category_tree - all
+  sourced from real Shopify data. Use this to build a guided, step-by-step
+  filtering flow instead of inventing categories or asking for a price range
+  up front.
+
+  - category_tree: [{ category, sub_categories: [...] }] - REAL category ->
+    sub-category groupings derived from the store's own Shopify taxonomy
+    (never synthesized). When the customer names a broad category that
+    matches a "category" entry here, present its "sub_categories" as the
+    next selectable step (e.g. Skincare -> Serums / Moisturisers /
+    Cleansers) - do not guess sub-categories yourself.
+  - collections: flat list of the store's collections. Use these as the
+    FIRST step of selectable options only for vague/open-ended or
+    gifting-style queries (e.g. "suggest a gift", "what should I get for my
+    mom") that name no product, category, or sub-category at all.
+  - categories: flat list of leaf category names (for reference/matching).
+  - types / tags: the store's real product_type and tag values - ground any
+    product_type or tags filter passed to search_products against these.
+
+  Do NOT ask for a price range when the customer's query is direct (names a
+  specific product, category, or sub-category) - go straight to
+  search_products instead. Only offer a price-range step in the vague/
+  gifting flow, after collection/sub-category narrowing, and never ask again
+  once the customer has already supplied a price range in this conversation.
   `,
     async () => {
       try {
