@@ -7,7 +7,7 @@
 //   The `first` value is passed dynamically from the search_products tool
 //   in server.js (default: 15) — giving the calling agent's own
 //   audience/budget/attribute post-filtering enough surviving candidates.
-const productSearchByQuery = `query getProducts($search: String!, $sortKey: ProductSortKeys!, $reverse: Boolean!, $first: Int!) {
+const productSearchByQuery = `query getProducts($search: String!, $sortKey: ProductSortKeys, $reverse: Boolean, $first: Int!) {
   products(first: $first, query: $search, sortKey:$sortKey, reverse:$reverse) {
     edges {
       node {

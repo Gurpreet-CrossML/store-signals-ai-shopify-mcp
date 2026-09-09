@@ -1483,8 +1483,6 @@ const searchProductsByNames = async (
         query: productSearchByQuery,
         variables: {
           search: name,
-          sortKey: "RELEVANCE",
-          reverse: true,
           first: 1,
         },
       };
