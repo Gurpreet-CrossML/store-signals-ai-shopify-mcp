@@ -98,48 +98,6 @@ const storeMetadataQuery = `query {
         edges {
         node {
             category {
-            id
-            name
-            ancestors {
-              id
-              name
-            }
-            }
-        }
-        }
-    }
-}`;
-
-// Fallback for storeMetadataQuery — used only when the primary query above
-// errors (e.g. `ancestors` unsupported on the store's Shopify plan or API
-// version). Identical except it requests just the category leaf name, so
-// tags/types/collections still come back even when the taxonomy ancestry
-// field doesn't; `category_tree` is simply left empty in that case.
-const storeMetadataQueryLegacy = `query {
-    productTags(first: 250) {
-        edges {
-        node
-        }
-    }
-
-    productTypes(first: 250) {
-        edges {
-        node
-        }
-    }
-
-    collections(first: 250) {
-        edges {
-        node {
-            title
-        }
-        }
-    }
-
-    products(first: 250) {
-        edges {
-        node {
-            category {
             name
             }
         }
@@ -173,6 +131,126 @@ const productByIdQuery = `query getProductById($id: ID!) {
                     compareAtPriceV2 { amount currencyCode }
                     availableForSale quantityAvailable currentlyNotInStock
                     selectedOptions { name value }
+                }
+            }
+        }
+    }
+}`;
+
+// ---------------------------------------------------------------------------
+// Queries backing get_filter_options.
+//
+// Collection membership is NOT expressible in the Storefront `products(query:)`
+// search syntax (it only supports product_type, tag, title, vendor, variants.price
+// and a few others - a `collection:"X"` clause is silently treated as free text).
+// So anything collection-scoped has to go through the `collection(handle:)` root
+// field instead, which is what these queries do.
+// ---------------------------------------------------------------------------
+
+// Collection titles paired with the handles needed to address them.
+const collectionsListQuery = `query {
+    collections(first: 250) {
+        edges {
+        node {
+            id
+            title
+            handle
+        }
+        }
+    }
+}`;
+
+// Admin-API variant of the collections list, adding the real product count per
+// collection in ONE call. The Storefront API exposes no count at all, so
+// ranking there would mean paging every collection's products just to size it.
+// Falls back to `collectionsListQuery` when the admin scope isn't granted.
+const collectionsWithCountsQuery = `query {
+    collections(first: 250) {
+        edges {
+        node {
+            id
+            title
+            handle
+            productsCount {
+                count
+            }
+        }
+        }
+    }
+}`;
+
+// Lightweight facet scan of one collection: only the fields needed to rank
+// categories by real product count and compute true price bounds. Deliberately
+// omits images/variants/descriptions so a few hundred products stay cheap.
+const collectionFacetsQuery = `query getCollectionFacets($handle: String!, $first: Int!, $after: String, $filters: [ProductFilter!]) {
+    collection(handle: $handle) {
+        id
+        title
+        handle
+        products(first: $first, after: $after, filters: $filters) {
+            pageInfo { hasNextPage endCursor }
+            edges {
+            node {
+                id
+                title
+                productType
+                category { name }
+                availableForSale
+                priceRange {
+                    minVariantPrice { amount currencyCode }
+                    maxVariantPrice { amount currencyCode }
+                }
+            }
+            }
+        }
+    }
+}`;
+
+// Same lightweight shape, but store-wide via the normal product search - used
+// when no collection is in play.
+const productFacetsQuery = `query getProductFacets($search: String, $first: Int!, $after: String) {
+    products(first: $first, query: $search, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        edges {
+        node {
+            id
+            title
+            productType
+            category { name }
+            availableForSale
+            priceRange {
+                minVariantPrice { amount currencyCode }
+                maxVariantPrice { amount currencyCode }
+            }
+        }
+        }
+    }
+}`;
+
+// Batch hydrate of full product details for a set of IDs, so the facet scan can
+// stay lightweight and only the handful of products actually being shown get the
+// expensive fields. Same selection set as productByIdQuery, so the result feeds
+// straight into formatProducts.
+const productsByIdsQuery = `query getProductsByIds($ids: [ID!]!) {
+    nodes(ids: $ids) {
+        ... on Product {
+            id title handle productType category { name } availableForSale onlineStoreUrl
+            description descriptionHtml
+            metafield(namespace: "custom", key: "warranty") {
+              value
+              type
+            }
+            images(first: 5) { edges { node { url altText } } }
+            priceRange { minVariantPrice { amount currencyCode } }
+            variants(first: 20) {
+                edges {
+                node {
+                        id title
+                        priceV2 { amount currencyCode }
+                        compareAtPriceV2 { amount currencyCode }
+                        availableForSale quantityAvailable currentlyNotInStock
+                        selectedOptions { name value }
+                    }
                 }
             }
         }
@@ -462,9 +540,13 @@ const refundQuery = `
 module.exports = {
   productSearchByQuery,
   storeMetadataQuery,
-  storeMetadataQueryLegacy,
   relatedProductsQuery,
   productByIdQuery,
+  collectionsListQuery,
+  collectionsWithCountsQuery,
+  collectionFacetsQuery,
+  productFacetsQuery,
+  productsByIdsQuery,
   productSortQuery,
   discountQuery,
   refundQuery,

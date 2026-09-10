@@ -8,6 +8,11 @@ const cors = require("cors");
 const {
   productSearchByQuery,
   productByIdQuery,
+  collectionsListQuery,
+  collectionsWithCountsQuery,
+  collectionFacetsQuery,
+  productFacetsQuery,
+  productsByIdsQuery,
   productSortQuery,
   discountQuery,
   refundQuery,
@@ -36,6 +41,26 @@ const {
   ShopifyExchangeManager,
   getExchangePolicyEligibility,
   verifyOrderIdentity,
+  groundTerm,
+  FACET_SCAN_MAX,
+  PAGE_SIZE,
+  singularize,
+  normalizeLabel,
+  splitSelections,
+  parsePriceFilter,
+  generatePriceBuckets,
+  summarizePriceRange,
+  rankCategories,
+  productMatchesCategory,
+  fetchCollectionIndex,
+  resolveCollection,
+  scanCollection,
+  scanSearch,
+  categorySearchClause,
+  interleave,
+  hydrateProducts,
+  offerableCollections,
+  jsonResult,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
@@ -368,7 +393,34 @@ const createMcpServer = (configs = {}) => {
       }
     },
   );
-  // ######### get_collection_price_bounds #########
+
+  // ######### 1b. Get Filter Options #########
+  //
+  // The whole progressive-filter flow lives in this one tool. The agent's only
+  // job is to fill in { collection, category, price } and hand it over; every
+  // decision that used to leak into prompt instructions - which Shopify field a
+  // term belongs to, whether a category is real, how to rank or bucket options -
+  // is resolved here against live catalogue data instead.
+  //
+  // Collection membership deliberately goes through the `collection(handle:)`
+  // root field rather than a search clause: the Storefront `products(query:)`
+  // syntax has no `collection:` field, so such a clause is silently demoted to
+  // free text and quietly returns the wrong products.
+
+  // Shopify auto-creates these; they are not real merchandising choices.
+  const NON_FILTERABLE = /\b(home\s*page|frontpage|front\s*page|example)\b/i;
+  // Answers that mean "don't narrow", not a real selection.
+  const DECLINE_VALUE =
+    /^(show all|show me all|all|any|any price|anything|none|no preference|skip)$/i;
+  const MAX_COLLECTIONS = 8;
+  // A collection this much smaller than the store's biggest is a niche shelf,
+  // not a department worth offering as an opening choice.
+  const COLLECTION_TAIL_SHARE = 0.05;
+  // ...but never trim so hard the customer is left with almost no choice, which
+  // is what would happen in a store dominated by one giant "All products".
+  const MIN_COLLECTIONS = 4;
+  const MAX_CATEGORIES = 5;
+  const MAX_PRODUCTS = 10;
   server.tool(
     "get_collection_price_bounds",
     `Fetch the minimum and maximum price across one or more product
@@ -496,21 +548,12 @@ const createMcpServer = (configs = {}) => {
             2,
           ),
         );
-        console.log(
-          "Max Product Edge Found:",
-          JSON.stringify(
-            maxResult?.data?.products?.edges?.[0] || null,
-            null,
-            2,
-          ),
-        );
-        console.log(
-          "Extracted Bounds -> least_price:",
+
+        const priceBuckets = generatePriceBuckets(
           leastPrice,
-          "| max_price:",
           maxPrice,
+          currencySymbol,
         );
-        console.log("=========================================");
 
         return {
           content: [
@@ -522,6 +565,7 @@ const createMcpServer = (configs = {}) => {
                   max_price: maxPrice,
                   currency_code: currencyCode,
                   currency_symbol: currencySymbol,
+                  price_buckets: priceBuckets,
                 },
                 null,
                 2,
@@ -819,30 +863,7 @@ const createMcpServer = (configs = {}) => {
   server.tool(
     "get_store_meta_info",
     `Fetch metadata about the store's product catalog.
-  Returns product tags, types, collections, categories, and a category_tree - all
-  sourced from real Shopify data. Use this to build a guided, step-by-step
-  filtering flow instead of inventing categories or asking for a price range
-  up front.
-
-  - category_tree: [{ category, sub_categories: [...] }] - REAL category ->
-    sub-category groupings derived from the store's own Shopify taxonomy
-    (never synthesized). When the customer names a broad category that
-    matches a "category" entry here, present its "sub_categories" as the
-    next selectable step (e.g. Skincare -> Serums / Moisturisers /
-    Cleansers) - do not guess sub-categories yourself.
-  - collections: flat list of the store's collections. Use these as the
-    FIRST step of selectable options only for vague/open-ended or
-    gifting-style queries (e.g. "suggest a gift", "what should I get for my
-    mom") that name no product, category, or sub-category at all.
-  - categories: flat list of leaf category names (for reference/matching).
-  - types / tags: the store's real product_type and tag values - ground any
-    product_type or tags filter passed to search_products against these.
-
-  Do NOT ask for a price range when the customer's query is direct (names a
-  specific product, category, or sub-category) - go straight to
-  search_products instead. Only offer a price-range step in the vague/
-  gifting flow, after collection/sub-category narrowing, and never ask again
-  once the customer has already supplied a price range in this conversation.
+  Returns product tags, types, collections, and categories available in the store.
   `,
     async () => {
       try {
@@ -2437,6 +2458,305 @@ const createMcpServer = (configs = {}) => {
       }
     },
   );
+
+  // ######### get_filter_options #########
+  server.tool(
+    "get_filter_options",
+    `Progressive product filtering. This single tool owns ALL the filtering
+  logic - collection lookup, category ranking, price bounds and the final
+  product search. Fill in the fixed schema below with whatever the customer has
+  chosen so far and pass it straight through. Never reason about taxonomies,
+  product types, tags, or which Shopify field a value belongs to; the tool
+  resolves all of that against live catalogue data.
+
+    { "collection": string | null, "category": string | null, "price": { "min": number, "max": number } | null }
+
+  Which fields are filled in decides what comes back:
+
+  1. collection: null, category: null, price: null
+     -> { collections: [...] } - the store's real, selectable collections.
+     Use for vague / gifting / "what do you sell" openers.
+
+  2. collection: "<name>", category: null, price: null
+     -> { categories: [{ name, count }], has_categories, price_range: {...} }
+     The top ${MAX_CATEGORIES} categories inside that collection, ranked by real
+     product count, plus that collection's true price bounds and ready-made
+     price_buckets. If has_categories is false there is nothing sensible to ask
+     about - go straight to the price step.
+
+  3. anything else (a category and/or a price present)
+     -> { products: [...] } - executes the search and returns the matches.
+
+  Multi-select is supported everywhere: pass several collections or categories
+  as one comma-separated string (e.g. "Skincare, Makeup") and the tool searches
+  each and fairly interleaves the results. Each entry in price_buckets carries
+  its own numeric "min"/"max" - pass those back in "price". "Show all" and
+  similar declines are understood and simply widen the search.`,
+    {
+      collection: z
+        .union([z.string(), z.array(z.string())])
+        .nullable()
+        .optional()
+        .describe(
+          "The collection(s) the customer picked, exactly as offered. Several may be " +
+            "comma-separated. null when they haven't picked one yet.",
+        ),
+      category: z
+        .union([z.string(), z.array(z.string())])
+        .nullable()
+        .optional()
+        .describe(
+          "The category/categories the customer picked, exactly as offered. Several may " +
+            "be comma-separated. null when they haven't picked one yet or chose 'Show all'.",
+        ),
+      // A bucket label is accepted as well as the {min,max} pair, so echoing the
+      // customer's pick straight back can never hard-fail the call.
+      price: z
+        .union([
+          z.object({
+            min: z
+              .number()
+              .nullable()
+              .optional()
+              .describe("Lower bound, inclusive."),
+            max: z
+              .number()
+              .nullable()
+              .optional()
+              .describe("Upper bound, inclusive."),
+          }),
+          z.string(),
+        ])
+        .nullable()
+        .optional()
+        .describe(
+          "The min/max from the price bucket the customer picked (the bucket's own " +
+            "label is also accepted), or null for no price filter.",
+        ),
+    },
+    async ({ collection = null, category = null, price = null }) => {
+      try {
+        const collections = splitSelections(collection);
+        const categories = splitSelections(category);
+        const { min: minPrice, max: maxPrice } = parsePriceFilter(price);
+        const hasPrice = minPrice != null || maxPrice != null;
+
+        const index = await fetchCollectionIndex();
+
+        // ---- Step 1: nothing chosen yet -> offer the store's collections ----
+        if (!collections.length && !categories.length && !hasPrice) {
+          return jsonResult({
+            collections: offerableCollections(index),
+            message:
+              "Nothing selected yet - these are the store's main collections to offer as the first step.",
+          });
+        }
+
+        const seenHandles = new Set();
+        const resolved = collections
+          .map((name) => ({
+            requested: name,
+            hit: resolveCollection(name, index),
+          }))
+          .filter((r) => {
+            if (!r.hit || seenHandles.has(r.hit.handle)) return false;
+            seenHandles.add(r.hit.handle);
+            return true;
+          });
+
+        // ---- Step 2: a collection chosen -> rank its categories + price ----
+        if (collections.length && !categories.length && !hasPrice) {
+          if (!resolved.length) {
+            return jsonResult({
+              collection: collections.join(", "),
+              categories: [],
+              has_categories: false,
+              message:
+                "That collection doesn't exist in this store. Offer the collections list again.",
+              collections: offerableCollections(index),
+            });
+          }
+
+          const scans = await Promise.all(
+            resolved.map((r) => scanCollection(r.hit.handle)),
+          );
+          const nodes = scans.flatMap((s) => s.nodes);
+
+          const topCategories = rankCategories(
+            nodes,
+            resolved.flatMap((r) => [r.hit.title, r.requested]),
+          );
+
+          return jsonResult({
+            collection: resolved.map((r) => r.hit.title).join(", "),
+            categories: topCategories,
+            has_categories: topCategories.length > 0,
+            price_range: summarizePriceRange(nodes),
+            ...(topCategories.length
+              ? {}
+              : {
+                  message:
+                    "No distinct categories in this collection - skip the category step and ask about price.",
+                }),
+          });
+        }
+
+        // ---- Step 3: run the actual search ----
+        // Push the price filter down to Shopify so a narrow budget doesn't
+        // have to be found by paging through the entire collection, and stop
+        // paging as soon as every selected category has enough matches.
+        const priceFilter = [];
+        if (hasPrice) {
+          const bounds = {};
+          if (minPrice != null) bounds.min = minPrice;
+          if (maxPrice != null) bounds.max = maxPrice;
+          priceFilter.push({ price: bounds });
+        }
+
+        let pool;
+        if (resolved.length) {
+          const enough = (nodes) =>
+            categories.length
+              ? categories.every(
+                  (cat) =>
+                    nodes.filter((n) => productMatchesCategory(n, cat))
+                      .length >= MAX_PRODUCTS,
+                )
+              : nodes.length >= MAX_PRODUCTS;
+
+          const scans = await Promise.all(
+            resolved.map((r) =>
+              scanCollection(r.hit.handle, {
+                filters: priceFilter.length ? priceFilter : null,
+                enough,
+              }),
+            ),
+          );
+          pool = scans.flatMap((s) => s.nodes);
+        } else if (categories.length) {
+          pool = await scanSearch(
+            categories.map(categorySearchClause).join(" OR "),
+          );
+        } else {
+          pool = await scanSearch(null);
+        }
+
+        // A product matches when its variant price RANGE overlaps the filter -
+        // the same semantics as Shopify's own price filter. Point-checking
+        // minVariantPrice would drop a multi-variant product whose cheapest
+        // variant sits below the range even though a variant is inside it.
+        const withinPrice = (node) => {
+          if (!hasPrice) return true;
+          const lo = parseFloat(node?.priceRange?.minVariantPrice?.amount);
+          const hi = parseFloat(node?.priceRange?.maxVariantPrice?.amount);
+          const low = Number.isFinite(lo) ? lo : hi;
+          const high = Number.isFinite(hi) ? hi : lo;
+          if (!Number.isFinite(low) || !Number.isFinite(high)) return false;
+          if (minPrice != null && high < minPrice) return false;
+          if (maxPrice != null && low > maxPrice) return false;
+          return true;
+        };
+
+        // Bucket per selected category so every one gets a fair share of the
+        // capped result set; a single bucket when no category was chosen.
+        let buckets;
+        if (categories.length) {
+          buckets = categories.map((cat) =>
+            pool.filter(
+              (n) => productMatchesCategory(n, cat) && withinPrice(n),
+            ),
+          );
+
+          // A collection scan that turned up nothing for SOME chosen categories
+          // is worth one store-wide retry for those missing categories before giving up.
+          if (resolved.length) {
+            const missingCategories = categories.filter(
+              (_, i) => buckets[i].length === 0,
+            );
+            if (missingCategories.length > 0) {
+              const fallback = await scanSearch(
+                missingCategories.map(categorySearchClause).join(" OR "),
+              );
+              categories.forEach((cat, i) => {
+                if (buckets[i].length === 0) {
+                  buckets[i] = fallback.filter(
+                    (n) => productMatchesCategory(n, cat) && withinPrice(n),
+                  );
+                }
+              });
+            }
+          }
+        } else {
+          buckets = [pool.filter(withinPrice)];
+        }
+
+        const selected = interleave(buckets, MAX_PRODUCTS);
+
+        const appliedFilters = {
+          collection: resolved.length
+            ? resolved.map((r) => r.hit.title).join(", ")
+            : null,
+          category: categories.length ? categories.join(", ") : null,
+          price: hasPrice ? { min: minPrice, max: maxPrice } : null,
+        };
+
+        if (!selected.length) {
+          return jsonResult({
+            products: [],
+            applied_filters: appliedFilters,
+            message: "No products matched the given filter criteria.",
+          });
+        }
+
+        const edges = await hydrateProducts(selected);
+        const formattedProducts = formatProducts(
+          baseUrl,
+          widgetKey,
+          edges,
+          sessionId,
+          storeCode,
+          false,
+        );
+
+        const relatedProductIds = new Set();
+        for (const product of formattedProducts) {
+          if (relatedProductIds.size >= 5) break;
+
+          const related = await fetchRelatedProducts(
+            String(product.id),
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+          );
+          if (!Array.isArray(related)) continue;
+
+          for (const id of related) {
+            if (relatedProductIds.size >= 5) break;
+            relatedProductIds.add(id);
+          }
+        }
+
+        return jsonResult({
+          products: formattedProducts,
+          relatedProducts: [...relatedProductIds],
+          applied_filters: appliedFilters,
+          price_range: summarizePriceRange(selected),
+        });
+      } catch (error) {
+        console.error("get_filter_options error:", error);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error processing filter options: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
 
   // ********************************** End of MCP Tools **********************************
 

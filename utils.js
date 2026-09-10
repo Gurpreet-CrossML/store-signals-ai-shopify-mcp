@@ -3,7 +3,6 @@ const dotenv = require("dotenv");
 const https = require("https");
 const {
   storeMetadataQuery,
-  storeMetadataQueryLegacy,
   relatedProductsQuery,
   productSearchByQuery,
   getReturnableFulfillmentsQuery,
@@ -347,34 +346,6 @@ const formatProducts = (
   }
 };
 
-// Groups leaf categories under their immediate parent (ancestors[0] -
-// Shopify orders the chain immediate-parent-first, root last; using the
-// wrong end collapses everything into one root-level bucket).
-const buildCategoryTree = (categoryNodes = []) => {
-  const treeMap = new Map();
-
-  for (const cat of categoryNodes) {
-    if (!cat?.name) continue;
-
-    const ancestors = Array.isArray(cat.ancestors) ? cat.ancestors : [];
-    const parentName = ancestors.length ? ancestors[0]?.name : null;
-
-    if (!parentName || parentName === cat.name) continue;
-
-    if (!treeMap.has(parentName)) {
-      treeMap.set(parentName, new Set());
-    }
-    treeMap.get(parentName).add(cat.name);
-  }
-
-  return [...treeMap.entries()]
-    .map(([category, subCategories]) => ({
-      category,
-      sub_categories: [...subCategories].sort(),
-    }))
-    .sort((a, b) => a.category.localeCompare(b.category));
-};
-
 // Utility function to fetch store metadata like product tags, types, collections, and categories. This metadata can be used for various purposes like improving search relevance, generating search queries, etc.
 const storeMetadata = async (
   base_url,
@@ -382,9 +353,7 @@ const storeMetadata = async (
   admin_token,
   store_code,
 ) => {
-  // Bumped to v2: the shape gained `category_tree`, so a stale cached v1
-  // entry (flat-only) should not be served under the same key.
-  const cacheKey = `store_metadata:v2:store:${store_code}`;
+  const cacheKey = `store_metadata:store:${store_code}`;
 
   try {
     const cachedMetadata = await getCache(cacheKey);
@@ -392,34 +361,18 @@ const storeMetadata = async (
       return cachedMetadata;
     }
 
-    let result = await callShopifyApi(
+    const graphqlQuery = {
+      query: storeMetadataQuery,
+    };
+
+    const result = await callShopifyApi(
       base_url,
       storefront_token,
       admin_token,
       "POST",
       "",
-      { query: storeMetadataQuery },
+      graphqlQuery,
     );
-
-    // The taxonomy ancestry fields (`ancestors`/`isLeaf`) may not be
-    // available on every store's Shopify plan/API version. Rather than
-    // let that zero out tags/types/collections too, retry once with the
-    // legacy shape - category_tree just comes back empty in that case.
-    if (result.errors) {
-      console.warn(
-        "storeMetadata: primary query errored, retrying without taxonomy ancestry:",
-        JSON.stringify(result.errors),
-      );
-
-      result = await callShopifyApi(
-        base_url,
-        storefront_token,
-        admin_token,
-        "POST",
-        "",
-        { query: storeMetadataQueryLegacy },
-      );
-    }
 
     if (result.errors) {
       return {
@@ -427,7 +380,6 @@ const storeMetadata = async (
         types: [],
         collections: [],
         categories: [],
-        category_tree: [],
       };
     }
 
@@ -440,26 +392,21 @@ const storeMetadata = async (
     const collections =
       result?.data?.collections?.edges?.map((item) => item?.node?.title) || [];
 
-    const categoryNodes = (
-      result?.data?.products?.edges?.map((item) => item?.node?.category) || []
-    ).filter(Boolean);
-
     const categories = [
-      ...new Set(categoryNodes.map((cat) => cat?.name).filter(Boolean)),
+      ...new Set(
+        (
+          result?.data?.products?.edges?.map(
+            (item) => item?.node?.category?.name,
+          ) || []
+        ).filter(Boolean),
+      ),
     ];
-
-    // Real category -> sub-categories grouping sourced from Shopify's own
-    // taxonomy ancestry - never synthesized by the calling agent. Use this
-    // (not `categories`) to present selectable sub-category options for a
-    // broad category query, and `collections` for the vague/gifting flow.
-    const categoryTree = buildCategoryTree(categoryNodes);
 
     const metadata = {
       tags,
       types,
       collections,
       categories,
-      category_tree: categoryTree,
     };
 
     try {
@@ -479,7 +426,6 @@ const storeMetadata = async (
       types: [],
       collections: [],
       categories: [],
-      category_tree: [],
     };
   }
 };
@@ -559,6 +505,30 @@ const quoteSearchValue = (value) => {
 // close enough exists — callers should treat null as "not a real facet"
 // and fall back to free-text search rather than emitting a filter clause
 // for a value the store doesn't actually have.
+function levenshteinDistance(a, b) {
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1,
+        );
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
 const groundTerm = (term, candidates = []) => {
   if (!term || !Array.isArray(candidates) || candidates.length === 0) {
     return null;
@@ -568,7 +538,9 @@ const groundTerm = (term, candidates = []) => {
     String(s || "")
       .toLowerCase()
       .trim()
-      .replace(/s$/, "");
+      .replace(/\s+/g, "")
+      .replace(/s$/i, "")
+      .replace(/es$/i, "");
 
   const target = normalize(term);
   if (!target) return null;
@@ -578,10 +550,28 @@ const groundTerm = (term, candidates = []) => {
 
   const partial = candidates.find((c) => {
     const norm = normalize(c);
-    return norm.includes(target) || target.includes(norm);
+    return (
+      norm.length >= 4 &&
+      target.length >= 4 &&
+      (norm.includes(target) || target.includes(norm))
+    );
   });
+  if (partial) return partial;
 
-  return partial || null;
+  let bestCandidate = null;
+  let minDistance = Infinity;
+
+  for (const c of candidates) {
+    const norm = normalize(c);
+    const dist = levenshteinDistance(target, norm);
+    const maxAllowedDist = target.length > 7 ? 2 : target.length > 3 ? 1 : 0;
+    if (dist <= maxAllowedDist && dist < minDistance) {
+      minDistance = dist;
+      bestCandidate = c;
+    }
+  }
+
+  return bestCandidate || null;
 };
 
 // Utility function to parse space input and convert dimensions to centimeters. This can be used to filter products based on available space by extracting dimensions from product descriptions and converting them to a standard unit for comparison.
@@ -2024,6 +2014,497 @@ const verifyOrderIdentity = (
 };
 
 // Export environment variables and utility functions
+
+// Ranking and price bounds must see the WHOLE collection, not its first
+// page - a 250-product window makes "top categories by product count" a
+// property of the sample rather than of the catalogue, and starves the
+// final search on any collection bigger than that. Paged at 250 (the
+// Storefront maximum) and cached, so the cost is paid once per collection.
+const FACET_SCAN_MAX = 2000;
+const PAGE_SIZE = 250;
+
+const singularize = (w) => {
+  if (w.length > 3 && w.endsWith("ies")) return `${w.slice(0, -3)}y`;
+  if (w.length > 4 && w.endsWith("ses")) return w.slice(0, -2);
+  if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss"))
+    return w.slice(0, -1);
+  return w;
+};
+
+// Collapses casing, punctuation, "&"/"and" and plurals so the same concept
+// compares equal no matter which Shopify field it came out of.
+const normalizeLabel = (s) =>
+  String(s || "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean)
+    .map(singularize)
+    .join(" ");
+
+// Accepts an array, or the joined string the checkbox UI sends.
+//
+// A "Show all"-style decline anywhere in the pick clears the whole field:
+// the widget's select-all sends every offered option alongside "Show all",
+// and honouring those would narrow to just the handful that were shown
+// rather than widening the search the way the customer asked.
+//
+// Splits on commas ONLY. Both the widget (which joins with ", ") and the
+// agent's schema always produce comma-separated lists, while a real label
+// can legitimately contain "and" - "Bath and Body" - which splitting on the
+// word would shred into two labels that resolve to the wrong thing or match
+// nothing at all.
+const splitSelections = (value) => {
+  const raw = Array.isArray(value) ? value : [String(value ?? "")];
+  const parts = raw.flatMap((entry) => String(entry ?? "").split(","));
+  const picked = parts.map((v) => v.trim()).filter(Boolean);
+  if (picked.some((v) => DECLINE_VALUE.test(v))) return [];
+
+  // The same pick arriving twice must not double the work it causes.
+  const seen = new Set();
+  return picked.filter((v) => {
+    const key = normalizeLabel(v);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+// Understands both the structured { min, max } and a price-bucket label
+// echoed back verbatim by the widget (e.g. "Under $50", "₹1,000 - ₹2,000").
+const parsePriceFilter = (price) => {
+  if (price == null) return { min: null, max: null };
+
+  if (typeof price === "object") {
+    const min =
+      Number.isFinite(price.min) && price.min >= 0 ? price.min : null;
+    const max =
+      Number.isFinite(price.max) && price.max >= 0 ? price.max : null;
+    return { min, max };
+  }
+
+  const text = String(price).trim();
+  if (!text || DECLINE_VALUE.test(text)) return { min: null, max: null };
+
+  const nums = (text.replace(/,/g, "").match(/\d+(\.\d+)?/g) || []).map(
+    Number,
+  );
+  if (!nums.length) return { min: null, max: null };
+  if (/under|below|less|upto|up to|within/i.test(text))
+    return { min: null, max: nums[0] };
+  if (/above|over|more|greater|plus/i.test(text))
+    return { min: nums[0], max: null };
+  if (nums.length >= 2) return { min: nums[0], max: nums[1] };
+  return { min: null, max: nums[0] };
+};
+
+// Builds 2-3 buckets spanning the real min/max, rounded to a step that suits
+// the magnitude so labels read like prices a shopper would recognise.
+const generatePriceBuckets = (least, highest, sym = "$") => {
+  const format = (n) => `${sym}${Math.round(n).toLocaleString("en-US")}`;
+
+  if (!highest || highest <= 0) return [];
+
+  if (least >= highest) {
+    const boundary = Math.round(highest);
+    return [
+      { label: `Under ${format(boundary)}`, min: null, max: boundary },
+      { label: `${format(boundary)} & above`, min: boundary, max: null },
+    ];
+  }
+
+  const range = highest - least;
+  let step;
+  if (highest <= 50) step = 10;
+  else if (highest <= 200) step = 25;
+  else if (highest <= 1000) step = 100;
+  else if (highest <= 5000) step = 500;
+  else if (highest <= 20000) step = 2500;
+  else step = 5000;
+
+  const roundToStep = (v) => Math.max(step, Math.round(v / step) * step);
+  const b1 = roundToStep(least + range * 0.33);
+  const b2 = Math.max(b1 + step, roundToStep(least + range * 0.66));
+
+  return [
+    { label: `Under ${format(b1)}`, min: null, max: b1 },
+    { label: `${format(b1)} - ${format(b2)}`, min: b1, max: b2 },
+    { label: `${format(b2)} & above`, min: b2, max: null },
+  ];
+};
+
+const summarizePriceRange = (nodes) => {
+  let least = Infinity;
+  let highest = 0;
+  let currencyCode = null;
+
+  for (const node of nodes) {
+    const min = parseFloat(node?.priceRange?.minVariantPrice?.amount);
+    const max = parseFloat(node?.priceRange?.maxVariantPrice?.amount);
+    if (Number.isFinite(min) && min < least) least = min;
+    if (Number.isFinite(max) && max > highest) highest = max;
+    // maxVariantPrice is absent from some selection sets; don't let that
+    // understate the ceiling.
+    if (Number.isFinite(min) && min > highest) highest = min;
+    if (!currencyCode) {
+      currencyCode =
+        node?.priceRange?.minVariantPrice?.currencyCode ||
+        node?.priceRange?.maxVariantPrice?.currencyCode ||
+        null;
+    }
+  }
+
+  const leastPrice = least === Infinity ? 0 : least;
+  const currencySymbol = getCurrencySymbol(currencyCode);
+
+  return {
+    least_price: leastPrice,
+    max_price: highest,
+    currency_code: currencyCode,
+    currency_symbol: currencySymbol,
+    price_buckets: generatePriceBuckets(leastPrice, highest, currencySymbol),
+  };
+};
+
+// Ranks the categories inside a set of products by how many products actually
+// carry them. Shopify exposes two competing labels - the taxonomy
+// `category.name` and the merchant's `productType` - and which one is useful
+// varies per store, so both are counted and the more discriminating one wins
+// rather than a hardcoded preference.
+const rankCategories = (nodes, excludeNames = []) => {
+  const excluded = new Set(excludeNames.map(normalizeLabel).filter(Boolean));
+
+  const summarize = (pick) => {
+    const counts = new Map();
+    for (const node of nodes) {
+      const raw = pick(node);
+      const norm = normalizeLabel(raw);
+      if (!norm || excluded.has(norm)) continue;
+      const entry = counts.get(norm) || { name: raw, count: 0 };
+      entry.count += 1;
+      counts.set(norm, entry);
+    }
+    return [...counts.values()].sort(
+      (a, b) => b.count - a.count || a.name.localeCompare(b.name),
+    );
+  };
+
+  const byCategory = summarize((n) => n?.category?.name);
+  const byType = summarize((n) => n?.productType);
+
+  // A field whose top value covers nearly everything isn't splitting the
+  // collection up - it's restating it. Prefer whichever field discriminates.
+  const topShare = (list) =>
+    list.length && nodes.length ? list[0].count / nodes.length : 1;
+
+  let ranked;
+  if (byCategory.length >= 2 && byType.length >= 2) {
+    ranked = topShare(byCategory) <= topShare(byType) ? byCategory : byType;
+  } else if (byCategory.length >= 2) {
+    ranked = byCategory;
+  } else if (byType.length >= 2) {
+    ranked = byType;
+  } else {
+    ranked = byCategory.length ? byCategory : byType;
+  }
+
+  // Drop a label that covers essentially the whole set - offering it as a
+  // choice narrows nothing.
+  if (ranked.length > 1 && nodes.length) {
+    const discriminating = ranked.filter((c) => c.count / nodes.length < 0.9);
+    if (discriminating.length) ranked = discriminating;
+  }
+
+  return ranked.slice(0, MAX_CATEGORIES);
+};
+
+// True when a product carries the wanted label under either Shopify field -
+// this is what removes the whole product_type-vs-category_tree class of bugs.
+const productMatchesCategory = (node, wanted) => {
+  const want = normalizeLabel(wanted);
+  if (!want) return true;
+
+  for (const raw of [node?.category?.name, node?.productType]) {
+    const norm = normalizeLabel(raw);
+    if (!norm) continue;
+    if (norm === want || norm.includes(want) || want.includes(norm))
+      return true;
+  }
+
+  return normalizeLabel(node?.title).includes(want);
+};
+
+// The store's collections, biggest first.
+//
+// Ranking matters because merchants mix real departments ("Hair") with
+// narrow one-off collections ("Toner") in the same list, and offering all of
+// them makes the opening question long and lopsided. Product count separates
+// the two without any hardcoded knowledge of the store: departments are
+// simply bigger.
+//
+// The count only exists on the Admin API, so that's tried first; a store
+// whose admin scope doesn't allow it falls back to the plain Storefront list
+// in catalogue order, which is still correct, just unranked.
+const fetchCollectionIndex = async () => {
+  const cacheKey = `collection_index:store:${storeCode}`;
+  const cached = await getCache(cacheKey);
+  if (cached) return cached;
+
+  let index = [];
+
+  try {
+    const res = await callShopifyApi(
+      baseUrl,
+      storefrontAccessToken,
+      adminAccessToken,
+      "POST",
+      "",
+      { query: collectionsWithCountsQuery },
+      true, // isAdmin - productsCount is Admin-only
+    );
+
+    if (!res?.errors) {
+      index = (res?.data?.collections?.edges || [])
+        .map((e) => ({
+          title: e?.node?.title,
+          handle: e?.node?.handle,
+          count: e?.node?.productsCount?.count ?? 0,
+        }))
+        .filter((c) => c.title && c.handle && !NON_FILTERABLE.test(c.title))
+        .sort((a, b) => b.count - a.count || a.title.localeCompare(b.title));
+    }
+  } catch (e) {
+    console.warn(
+      "collection counts unavailable, falling back to storefront list:",
+      e?.message || e,
+    );
+  }
+
+  if (!index.length) {
+    const res = await callShopifyApi(
+      baseUrl,
+      storefrontAccessToken,
+      adminAccessToken,
+      "POST",
+      "",
+      { query: collectionsListQuery },
+    );
+
+    index = (res?.data?.collections?.edges || [])
+      .map((e) => ({
+        title: e?.node?.title,
+        handle: e?.node?.handle,
+        count: null,
+      }))
+      .filter((c) => c.title && c.handle && !NON_FILTERABLE.test(c.title));
+  }
+
+  try {
+    await setCache(cacheKey, index);
+  } catch (e) {
+    console.warn("collection index cache set failed:", e?.message || e);
+  }
+
+  return index;
+};
+
+// Maps whatever the customer picked onto a real collection, tolerating
+// casing, plurals and typos.
+const resolveCollection = (name, index) => {
+  const want = normalizeLabel(name);
+  if (!want) return null;
+
+  const exact = index.find(
+    (c) =>
+      normalizeLabel(c.title) === want || normalizeLabel(c.handle) === want,
+  );
+  if (exact) return exact;
+
+  const partial = index.find((c) => {
+    const norm = normalizeLabel(c.title);
+    return norm.includes(want) || want.includes(norm);
+  });
+  if (partial) return partial;
+
+  const grounded = groundTerm(
+    name,
+    index.map((c) => c.title),
+  );
+  return grounded ? index.find((c) => c.title === grounded) || null : null;
+};
+
+// `filters` are pushed down to Shopify (price especially), so a narrow
+// search doesn't have to page through the whole collection to find its
+// matches. `enough` lets a caller stop as soon as it has what it needs.
+const scanCollection = async (handle, options = {}) => {
+  const { filters = null, cap = FACET_SCAN_MAX, enough = null } = options;
+
+  // Only the unfiltered full scan is cacheable - it's the one reused
+  // across the ladder's repeated collection calls.
+  const cacheKey =
+    filters || enough
+      ? null
+      : `collection_facets:store:${storeCode}:${handle}:${cap}`;
+
+  if (cacheKey) {
+    const cached = await getCache(cacheKey);
+    if (cached) return cached;
+  }
+
+  const nodes = [];
+  let after = null;
+  let title = null;
+
+  while (nodes.length < cap) {
+    const res = await callShopifyApi(
+      baseUrl,
+      storefrontAccessToken,
+      adminAccessToken,
+      "POST",
+      "",
+      {
+        query: collectionFacetsQuery,
+        variables: {
+          handle,
+          first: Math.min(PAGE_SIZE, cap - nodes.length),
+          after,
+          filters,
+        },
+      },
+    );
+
+    const col = res?.data?.collection;
+    if (!col) break;
+    title = col.title;
+
+    const conn = col.products;
+    nodes.push(...(conn?.edges || []).map((e) => e?.node).filter(Boolean));
+
+    if (enough && enough(nodes)) break;
+    if (!conn?.pageInfo?.hasNextPage) break;
+    after = conn.pageInfo.endCursor;
+  }
+
+  const scan = { title, nodes };
+  if (cacheKey) {
+    try {
+      await setCache(cacheKey, scan);
+    } catch (e) {
+      console.warn("collection facets cache set failed:", e?.message || e);
+    }
+  }
+  return scan;
+};
+
+const scanSearch = async (searchQuery) => {
+  const res = await callShopifyApi(
+    baseUrl,
+    storefrontAccessToken,
+    adminAccessToken,
+    "POST",
+    "",
+    {
+      query: productFacetsQuery,
+      variables: {
+        search: searchQuery || null,
+        first: PAGE_SIZE,
+        after: null,
+      },
+    },
+  );
+  return (res?.data?.products?.edges || [])
+    .map((e) => e?.node)
+    .filter(Boolean);
+};
+
+// A term can live in product_type, in a tag, or only in the title - so ask
+// for all three rather than betting on one and retrying when it misses.
+const categorySearchClause = (name) => {
+  const safe = JSON.stringify(String(name));
+  return `(product_type:${safe} OR tag:${safe} OR title:${safe} OR ${safe})`;
+};
+
+// Round-robins across per-category buckets so every selected category is
+// represented in the capped result set instead of the first one filling it.
+const interleave = (buckets, limit) => {
+  const queues = buckets.map((b) => [...b]);
+  const picked = [];
+  const seen = new Set();
+  let progressed = true;
+
+  while (picked.length < limit && progressed) {
+    progressed = false;
+    for (const queue of queues) {
+      if (picked.length >= limit) break;
+      while (queue.length) {
+        const node = queue.shift();
+        if (node?.id && !seen.has(node.id)) {
+          seen.add(node.id);
+          picked.push(node);
+          progressed = true;
+          break;
+        }
+      }
+    }
+  }
+
+  return picked;
+};
+
+const hydrateProducts = async (nodes) => {
+  if (!nodes.length) return [];
+
+  const res = await callShopifyApi(
+    baseUrl,
+    storefrontAccessToken,
+    adminAccessToken,
+    "POST",
+    "",
+    {
+      query: productsByIdsQuery,
+      variables: { ids: nodes.map((n) => n.id) },
+    },
+  );
+
+  const byId = new Map(
+    (res?.data?.nodes || []).filter((n) => n && n.id).map((n) => [n.id, n]),
+  );
+
+  // Preserve the interleaved order the ranking produced.
+  return nodes
+    .map((n) => byId.get(n.id))
+    .filter(Boolean)
+    .map((node) => ({ node }));
+};
+
+// The collections worth offering as the opening question: the biggest few,
+// with the long tail of one-off shelves trimmed off. Selection still resolves
+// against the FULL index, so a trimmed collection the customer names by hand
+// still works.
+const offerableCollections = (index) => {
+  const top = index.slice(0, MAX_COLLECTIONS);
+  const largest = top[0]?.count;
+
+  if (typeof largest !== "number" || largest <= 0) {
+    return top.map((c) => c.title);
+  }
+
+  const floor = largest * COLLECTION_TAIL_SHARE;
+  const kept = top.filter(
+    (c, i) => i < MIN_COLLECTIONS || (c.count ?? 0) >= floor,
+  );
+
+  return kept.map((c) => c.title);
+};
+
+const jsonResult = (payload) => ({
+  content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+});
+
+  // ######### get_collection_price_bounds #########
+
 module.exports = {
   // envs
   MCP_NAME,
@@ -2039,7 +2520,6 @@ module.exports = {
   fetchRelatedProducts,
   getProductSortConfig,
   storeMetadata,
-  buildCategoryTree,
   logProductViewEvents,
   parseSpaceInput,
   extractDimensions,
@@ -2057,4 +2537,23 @@ module.exports = {
   isConsumableProductType,
   quoteSearchValue,
   groundTerm,
+  FACET_SCAN_MAX,
+  PAGE_SIZE,
+  singularize,
+  normalizeLabel,
+  splitSelections,
+  parsePriceFilter,
+  generatePriceBuckets,
+  summarizePriceRange,
+  rankCategories,
+  productMatchesCategory,
+  fetchCollectionIndex,
+  resolveCollection,
+  scanCollection,
+  scanSearch,
+  categorySearchClause,
+  interleave,
+  hydrateProducts,
+  offerableCollections,
+  jsonResult
 };
