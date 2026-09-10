@@ -2541,7 +2541,7 @@ const createMcpServer = (configs = {}) => {
         const { min: minPrice, max: maxPrice } = parsePriceFilter(price);
         const hasPrice = minPrice != null || maxPrice != null;
 
-        const index = await fetchCollectionIndex();
+        const index = await fetchCollectionIndex(configs);
 
         // ---- Step 1: nothing chosen yet -> offer the store's collections ----
         if (!collections.length && !categories.length && !hasPrice) {
@@ -2578,7 +2578,7 @@ const createMcpServer = (configs = {}) => {
           }
 
           const scans = await Promise.all(
-            resolved.map((r) => scanCollection(r.hit.handle)),
+            resolved.map((r) => scanCollection(r.hit.handle, {}, configs)),
           );
           const nodes = scans.flatMap((s) => s.nodes);
 
@@ -2626,19 +2626,24 @@ const createMcpServer = (configs = {}) => {
 
           const scans = await Promise.all(
             resolved.map((r) =>
-              scanCollection(r.hit.handle, {
-                filters: priceFilter.length ? priceFilter : null,
-                enough,
-              }),
+              scanCollection(
+                r.hit.handle,
+                {
+                  filters: priceFilter.length ? priceFilter : null,
+                  enough,
+                },
+                configs,
+              ),
             ),
           );
           pool = scans.flatMap((s) => s.nodes);
         } else if (categories.length) {
           pool = await scanSearch(
             categories.map(categorySearchClause).join(" OR "),
+            configs,
           );
         } else {
-          pool = await scanSearch(null);
+          pool = await scanSearch(null, configs);
         }
 
         // A product matches when its variant price RANGE overlaps the filter -
@@ -2676,6 +2681,7 @@ const createMcpServer = (configs = {}) => {
             if (missingCategories.length > 0) {
               const fallback = await scanSearch(
                 missingCategories.map(categorySearchClause).join(" OR "),
+                configs,
               );
               categories.forEach((cat, i) => {
                 if (buckets[i].length === 0) {
@@ -2708,7 +2714,7 @@ const createMcpServer = (configs = {}) => {
           });
         }
 
-        const edges = await hydrateProducts(selected);
+        const edges = await hydrateProducts(selected, configs);
         const formattedProducts = formatProducts(
           baseUrl,
           widgetKey,

@@ -6,6 +6,11 @@ const {
   relatedProductsQuery,
   productSearchByQuery,
   getReturnableFulfillmentsQuery,
+  collectionsListQuery,
+  collectionsWithCountsQuery,
+  collectionFacetsQuery,
+  productFacetsQuery,
+  productsByIdsQuery,
 } = require("./graphql_queries");
 const { getCache, setCache } = require("./cache");
 
@@ -2023,6 +2028,15 @@ const verifyOrderIdentity = (
 const FACET_SCAN_MAX = 2000;
 const PAGE_SIZE = 250;
 
+const NON_FILTERABLE = /\b(home\s*page|frontpage|front\s*page|example)\b/i;
+const DECLINE_VALUE =
+  /^(show all|show me all|all|any|any price|anything|none|no preference|skip)$/i;
+const MAX_COLLECTIONS = 8;
+const COLLECTION_TAIL_SHARE = 0.05;
+const MIN_COLLECTIONS = 4;
+const MAX_CATEGORIES = 5;
+const MAX_PRODUCTS = 10;
+
 const singularize = (w) => {
   if (w.length > 3 && w.endsWith("ies")) return `${w.slice(0, -3)}y`;
   if (w.length > 4 && w.endsWith("ses")) return w.slice(0, -2);
@@ -2174,14 +2188,20 @@ const summarizePriceRange = (nodes) => {
 // varies per store, so both are counted and the more discriminating one wins
 // rather than a hardcoded preference.
 const rankCategories = (nodes, excludeNames = []) => {
-  const excluded = new Set(excludeNames.map(normalizeLabel).filter(Boolean));
+  const excluded = new Set([
+    ...excludeNames.map(normalizeLabel).filter(Boolean),
+    "uncategorized",
+    "uncategorised",
+    "default",
+    "other",
+  ]);
 
   const summarize = (pick) => {
     const counts = new Map();
     for (const node of nodes) {
       const raw = pick(node);
       const norm = normalizeLabel(raw);
-      if (!norm || excluded.has(norm)) continue;
+      if (!norm || excluded.has(norm) || NON_FILTERABLE.test(raw)) continue;
       const entry = counts.get(norm) || { name: raw, count: 0 };
       entry.count += 1;
       counts.set(norm, entry);
@@ -2194,14 +2214,22 @@ const rankCategories = (nodes, excludeNames = []) => {
   const byCategory = summarize((n) => n?.category?.name);
   const byType = summarize((n) => n?.productType);
 
-  // A field whose top value covers nearly everything isn't splitting the
-  // collection up - it's restating it. Prefer whichever field discriminates.
+  const totalCount = (list) => list.reduce((sum, item) => sum + item.count, 0);
+  const totalShare = (list) => (nodes.length ? totalCount(list) / nodes.length : 0);
   const topShare = (list) =>
     list.length && nodes.length ? list[0].count / nodes.length : 1;
 
   let ranked;
   if (byCategory.length >= 2 && byType.length >= 2) {
-    ranked = topShare(byCategory) <= topShare(byType) ? byCategory : byType;
+    const catCoverage = totalShare(byCategory);
+    const typeCoverage = totalShare(byType);
+    if (catCoverage >= typeCoverage + 0.2) {
+      ranked = byCategory;
+    } else if (typeCoverage >= catCoverage + 0.2) {
+      ranked = byType;
+    } else {
+      ranked = topShare(byCategory) <= topShare(byType) ? byCategory : byType;
+    }
   } else if (byCategory.length >= 2) {
     ranked = byCategory;
   } else if (byType.length >= 2) {
@@ -2237,18 +2265,13 @@ const productMatchesCategory = (node, wanted) => {
 };
 
 // The store's collections, biggest first.
-//
-// Ranking matters because merchants mix real departments ("Hair") with
-// narrow one-off collections ("Toner") in the same list, and offering all of
-// them makes the opening question long and lopsided. Product count separates
-// the two without any hardcoded knowledge of the store: departments are
-// simply bigger.
-//
-// The count only exists on the Admin API, so that's tried first; a store
-// whose admin scope doesn't allow it falls back to the plain Storefront list
-// in catalogue order, which is still correct, just unranked.
-const fetchCollectionIndex = async () => {
-  const cacheKey = `collection_index:store:${storeCode}`;
+const fetchCollectionIndex = async ({
+  baseUrl,
+  storefrontAccessToken,
+  adminAccessToken,
+  storeCode,
+} = {}) => {
+  const cacheKey = `collection_index:store:${storeCode || "default"}`;
   const cached = await getCache(cacheKey);
   if (cached) return cached;
 
@@ -2322,9 +2345,14 @@ const resolveCollection = (name, index) => {
   );
   if (exact) return exact;
 
+  const wantWords = want.split(" ");
   const partial = index.find((c) => {
     const norm = normalizeLabel(c.title);
-    return norm.includes(want) || want.includes(norm);
+    const words = norm.split(" ");
+    return (
+      wantWords.every((w) => words.includes(w)) ||
+      words.every((w) => wantWords.includes(w))
+    );
   });
   if (partial) return partial;
 
@@ -2338,7 +2366,11 @@ const resolveCollection = (name, index) => {
 // `filters` are pushed down to Shopify (price especially), so a narrow
 // search doesn't have to page through the whole collection to find its
 // matches. `enough` lets a caller stop as soon as it has what it needs.
-const scanCollection = async (handle, options = {}) => {
+const scanCollection = async (
+  handle,
+  options = {},
+  { baseUrl, storefrontAccessToken, adminAccessToken, storeCode } = {},
+) => {
   const { filters = null, cap = FACET_SCAN_MAX, enough = null } = options;
 
   // Only the unfiltered full scan is cacheable - it's the one reused
@@ -2346,7 +2378,7 @@ const scanCollection = async (handle, options = {}) => {
   const cacheKey =
     filters || enough
       ? null
-      : `collection_facets:store:${storeCode}:${handle}:${cap}`;
+      : `collection_facets:store:${storeCode || "default"}:${handle}:${cap}`;
 
   if (cacheKey) {
     const cached = await getCache(cacheKey);
@@ -2398,7 +2430,10 @@ const scanCollection = async (handle, options = {}) => {
   return scan;
 };
 
-const scanSearch = async (searchQuery) => {
+const scanSearch = async (
+  searchQuery,
+  { baseUrl, storefrontAccessToken, adminAccessToken } = {},
+) => {
   const res = await callShopifyApi(
     baseUrl,
     storefrontAccessToken,
@@ -2433,7 +2468,6 @@ const interleave = (buckets, limit) => {
   const picked = [];
   const seen = new Set();
   let progressed = true;
-
   while (picked.length < limit && progressed) {
     progressed = false;
     for (const queue of queues) {
@@ -2453,7 +2487,10 @@ const interleave = (buckets, limit) => {
   return picked;
 };
 
-const hydrateProducts = async (nodes) => {
+const hydrateProducts = async (
+  nodes,
+  { baseUrl, storefrontAccessToken, adminAccessToken } = {},
+) => {
   if (!nodes.length) return [];
 
   const res = await callShopifyApi(
