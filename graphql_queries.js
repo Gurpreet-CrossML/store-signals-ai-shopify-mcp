@@ -100,6 +100,10 @@ const storeMetadataQuery = `query {
             category {
             name
             }
+            priceRange {
+                minVariantPrice { amount currencyCode }
+                maxVariantPrice { amount currencyCode }
+            }
         }
         }
     }
@@ -416,7 +420,6 @@ const refundQuery = `
   }
 `;
 
-// Export the GraphQL query for use in other modules
 module.exports = {
   productSearchByQuery,
   storeMetadataQuery,

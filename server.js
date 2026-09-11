@@ -128,18 +128,16 @@ const createMcpServer = (configs = {}) => {
           "Whether to return full product details including variants, images, and URLs. Defaults to false.",
         ),
       product_type: z
-        .string()
+        .union([z.string(), z.array(z.string())])
         .optional()
         .describe(
-          "Product category/type, e.g. 'Perfume', 'Sunscreen', 'Serum'. Matched against the " +
-            "store's real product types/collections (see get_store_meta_info) - pass the " +
-            "customer's category word even if casing or plurality differs.",
+          "Product category/type, e.g. 'Perfume', 'Sunscreen', 'Serum'. Can be a single string or an array of strings (searched as OR). 1. ALWAYS use singular form (e.g., 'Foundation', not 'Foundations'). 2. For compound words, ALWAYS pass an array checking both with and without spaces (e.g., ['Eye Shadow', 'Eyeshadow']) to ensure a match.",
         ),
       vendor: z
-        .string()
+        .union([z.string(), z.array(z.string())])
         .optional()
         .describe(
-          "Brand/vendor filter, e.g. 'Chanel'. Only pass when the customer names a specific brand.",
+          "Brand/vendor filter, e.g. 'Chanel'. Can be a single string or an array of strings (searched as OR). Only pass when the customer names a specific brand.",
         ),
       tags: z
         .array(z.string())
@@ -199,6 +197,9 @@ const createMcpServer = (configs = {}) => {
       sort_by = "relevance",
     }) => {
       try {
+        console.log(
+          `\n[MCP search_products] Incoming Args: query="${query}", product_type=${JSON.stringify(product_type)}, tags=${JSON.stringify(tags)}, min_price=${min_price}, max_price=${max_price}`,
+        );
         const searchClauses = [];
         const { sortKey, reverse } = getProductSortConfig(sort_by);
 
@@ -206,12 +207,28 @@ const createMcpServer = (configs = {}) => {
           searchClauses.push(query.trim());
         }
 
-        if (product_type?.trim()) {
-          searchClauses.push(`product_type:${product_type.trim()}`);
+        if (product_type) {
+          if (Array.isArray(product_type)) {
+            const types = product_type
+              .map((t) => `product_type:${JSON.stringify(t.trim())}`)
+              .join(" OR ");
+            if (types) searchClauses.push(`(${types})`);
+          } else if (typeof product_type === "string" && product_type.trim()) {
+            searchClauses.push(
+              `product_type:${JSON.stringify(product_type.trim())}`,
+            );
+          }
         }
 
-        if (vendor?.trim()) {
-          searchClauses.push(`vendor:${vendor.trim()}`);
+        if (vendor) {
+          if (Array.isArray(vendor)) {
+            const vendors = vendor
+              .map((v) => `vendor:${JSON.stringify(v.trim())}`)
+              .join(" OR ");
+            if (vendors) searchClauses.push(`(${vendors})`);
+          } else if (typeof vendor === "string" && vendor.trim()) {
+            searchClauses.push(`vendor:${JSON.stringify(vendor.trim())}`);
+          }
         }
 
         if (availability && availability !== "all") {
@@ -239,6 +256,9 @@ const createMcpServer = (configs = {}) => {
         }
 
         const searchQuery = searchClauses.join(" ");
+        console.log(
+          `[MCP search_products] Final Shopify Query: "${searchQuery}"`,
+        );
 
         const cacheKey = `product_search:${searchQuery}:${sortKey}:${reverse}`;
 
@@ -643,7 +663,7 @@ const createMcpServer = (configs = {}) => {
   server.tool(
     "get_store_meta_info",
     `Fetch metadata about the store's product catalog.
-  Returns product tags, types, collections, and categories available in the store.
+  Returns product tags, types, collections, categories, and an overall price_range available in the store.
   `,
     async () => {
       try {

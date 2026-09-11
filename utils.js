@@ -402,11 +402,36 @@ const storeMetadata = async (
       ),
     ];
 
+    let minPrice = Infinity;
+    let maxPrice = -Infinity;
+    let currencyCode = "USD";
+
+    (result?.data?.products?.edges || []).forEach((item) => {
+      const priceRange = item?.node?.priceRange;
+      if (priceRange) {
+        const min = parseFloat(priceRange.minVariantPrice.amount);
+        const max = parseFloat(priceRange.maxVariantPrice.amount);
+        currencyCode = priceRange.minVariantPrice.currencyCode || currencyCode;
+        if (min < minPrice) minPrice = min;
+        if (max > maxPrice) maxPrice = max;
+      }
+    });
+
+    const price_range =
+      minPrice !== Infinity
+        ? {
+            min: minPrice,
+            max: maxPrice,
+            currencyCode,
+          }
+        : null;
+
     const metadata = {
       tags,
       types,
       collections,
       categories,
+      price_range,
     };
 
     try {
