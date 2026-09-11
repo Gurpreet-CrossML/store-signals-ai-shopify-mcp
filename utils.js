@@ -257,7 +257,7 @@ const formatProducts = (
           name: productName,
           category: productCategory,
           price: `${getCurrencySymbol(node.priceRange?.minVariantPrice?.currencyCode)}${node.priceRange?.minVariantPrice?.amount || 0}`,
-          description: node.description || "",
+          description: full_details ? node.description || "" : "",
           available_for_sale: node.availableForSale,
           warranty: node?.metafield?.value || null,
         };
