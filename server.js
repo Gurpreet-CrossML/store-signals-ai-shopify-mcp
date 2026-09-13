@@ -131,7 +131,7 @@ const createMcpServer = (configs = {}) => {
         .union([z.string(), z.array(z.string())])
         .optional()
         .describe(
-          "Product category/type, e.g. 'Perfume', 'Sunscreen', 'Serum'. Can be a single string or an array of strings (searched as OR). 1. ALWAYS use singular form (e.g., 'Foundation', not 'Foundations'). 2. For compound words, ALWAYS pass an array checking both with and without spaces (e.g., ['Eye Shadow', 'Eyeshadow']) to ensure a match.",
+          "Product type, e.g. 'Perfume', 'Sunscreen', 'Serum'. Can be a single string or an array of strings (searched as OR). 1. ALWAYS use singular form (e.g., 'Foundation', not 'Foundations'). 2. For compound words, ALWAYS pass an array checking both with and without spaces (e.g., ['Eye Shadow', 'Eyeshadow']) to ensure a match.",
         ),
       vendor: z
         .union([z.string(), z.array(z.string())])
