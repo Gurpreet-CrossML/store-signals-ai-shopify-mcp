@@ -231,31 +231,13 @@ const createMcpServer = (configs = {}) => {
         if (finalQuery) {
           searchClauses.push(finalQuery);
         }
-          const expandedTypes = new Set();
 
-          typeArray.forEach((t) => {
-            const trimmed = t.trim();
-            if (!trimmed) return;
-
-            expandedTypes.add(trimmed);
-
-            if (trimmed.endsWith("ies")) {
-              expandedTypes.add(trimmed.slice(0, -3) + "y");
-            } else if (trimmed.endsWith("es")) {
-              expandedTypes.add(trimmed.slice(0, -2));
-              expandedTypes.add(trimmed.slice(0, -1));
-            } else if (trimmed.endsWith("s")) {
-              expandedTypes.add(trimmed.slice(0, -1));
-            } else {
-              expandedTypes.add(trimmed + "s");
-              expandedTypes.add(trimmed + "es");
-            }
-          });
-
-          const types = Array.from(expandedTypes)
+        if (typeArray.length > 0) {
+          const types = [...new Set(typeArray)]
             .map((t) => `(product_type:${JSON.stringify(t)} OR ${JSON.stringify(t)})`)
             .join(" OR ");
-          if (types) searchClauses.push(`(${types})`);
+          searchClauses.push(`(${types})`);
+        }
 
         if (vendor?.trim()) {
           searchClauses.push(`vendor:${vendor.trim()}`);

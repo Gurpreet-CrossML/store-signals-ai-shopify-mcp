@@ -3,6 +3,7 @@ const dotenv = require("dotenv");
 const https = require("https");
 const {
   storeMetadataQuery,
+  storeMetadataProductsQuery,
   relatedProductsQuery,
   productSearchByQuery,
   getReturnableFulfillmentsQuery,
@@ -347,6 +348,110 @@ const formatProducts = (
 };
 
 // Utility function to fetch store metadata like product tags, types, collections, and categories. This metadata can be used for various purposes like improving search relevance, generating search queries, etc.
+const buildFilterCatalog = (productNodes, types) => {
+  const clean = (value) => String(value || "").trim();
+  const key = (value) => clean(value).toLocaleLowerCase();
+  
+  // Safely normalize for grouping without breaking words ending in 'ss' (Dress), 'as' (Canvas), 'is', etc.
+  const typeKey = (value) => {
+    const k = key(value);
+    if (k.match(/(ss|as|is|us|os)$/)) return k;
+    if (k.endsWith('ies')) return k.replace(/ies$/, 'y'); // Accessories -> accessory
+    return k.replace(/s$/, ""); // Shirts -> shirt
+  };
+
+  const typeByKey = new Map();
+  for (const type of types.map(clean).filter(Boolean)) {
+    if (!typeByKey.has(typeKey(type))) typeByKey.set(typeKey(type), new Set([type]));
+    else typeByKey.get(typeKey(type)).add(type);
+  }
+
+  // Build choices from taxonomy leaves. A value such as "Face" is excluded
+  // when Shopify also reports it as an ancestor of "Face Wash" or another
+  // more-specific category; panels must not mix hierarchy levels.
+  const groupLeaves = new Map();
+  const ancestorNames = new Set();
+  
+  for (const product of productNodes) {
+    const category = product?.category;
+    // Storefront TaxonomyCategory.ancestors runs from the immediate parent to
+    // the root. Group by that root, never by a coincidental shared word such
+    // as "bag". This keeps Laptop Bags from swallowing every bag type.
+    const ancestors = Array.isArray(category?.ancestors) ? category.ancestors : [];
+    const leaf = clean(category?.name);
+    const type = clean(product?.productType);
+    
+    if (type) {
+      if (!typeByKey.has(typeKey(type))) typeByKey.set(typeKey(type), new Set([type]));
+      else typeByKey.get(typeKey(type)).add(type);
+    }
+    
+    ancestors.forEach((ancestor) => {
+      const name = clean(ancestor?.name);
+      if (name) ancestorNames.add(key(name));
+    });
+    
+    if (!leaf || !type) continue;
+    
+    // Retain every taxonomy branch, not just the root. That lets a request
+    // for Skin Care resolve to its own branch instead of root Beauty, which
+    // also contains hair, makeup, fragrance, and nails.
+    const groupLabels = [...ancestors.map((ancestor) => clean(ancestor?.name)), leaf]
+      .filter(Boolean);
+      
+    for (const group of groupLabels) {
+      if (!groupLeaves.has(group)) groupLeaves.set(group, new Map());
+      const leaves = groupLeaves.get(group);
+      
+      if (!leaves.has(key(leaf))) {
+        leaves.set(key(leaf), { label: leaf, types: new Set() });
+      }
+      
+      // Store the EXACT type string to prevent dropping product matches
+      leaves.get(key(leaf)).types.add(type);
+    }
+  }
+
+  const assigned = new Set();
+  const groups = [...groupLeaves.entries()].map(([label, leaves]) => {
+    const options = [...leaves.values()]
+      .filter((leaf) => !ancestorNames.has(key(leaf.label)))
+      .sort((left, right) => left.label.localeCompare(right.label))
+      .map((leaf) => {
+        const searchTypes = [...leaf.types.values()].sort((a, b) => a.localeCompare(b));
+        // Mark this base type key as assigned so it doesn't show up in ungrouped
+        searchTypes.forEach((type) => assigned.add(typeKey(type)));
+        
+        return {
+          label: leaf.label,
+          // Keep both forms during the widget's string-only transition.
+          search_type: searchTypes[0],
+          search_types: searchTypes,
+        };
+      });
+    return {
+      label,
+      options,
+    };
+  }).filter((group) => group.options.length >= 2);
+
+  const ungrouped = [];
+  for (const [baseKey, typeVariants] of typeByKey.entries()) {
+    if (!assigned.has(baseKey)) {
+      const sortedVariants = [...typeVariants].sort((a, b) => a.localeCompare(b));
+      ungrouped.push({ 
+        label: sortedVariants[0], 
+        search_type: sortedVariants[0],
+        search_types: sortedVariants
+      });
+    }
+  }
+  
+  ungrouped.sort((a, b) => a.label.localeCompare(b.label));
+
+  return { groups, ungrouped_types: ungrouped };
+};
+
 const storeMetadata = async (
   base_url,
   storefront_token,
@@ -392,13 +497,30 @@ const storeMetadata = async (
     const collections =
       result?.data?.collections?.edges?.map((item) => item?.node?.title) || [];
 
+    const productNodes = [];
+    let cursor = null;
+    do {
+      const page = await callShopifyApi(
+        base_url,
+        storefront_token,
+        admin_token,
+        "POST",
+        "",
+        { query: storeMetadataProductsQuery, variables: { cursor } },
+      );
+      if (page?.errors) {
+        throw new Error("Unable to fetch a complete product metadata page");
+      }
+      const connection = page?.data?.products;
+      productNodes.push(...(connection?.edges?.map((item) => item?.node) || []));
+      cursor = connection?.pageInfo?.hasNextPage
+        ? connection.pageInfo.endCursor
+        : null;
+    } while (cursor);
+
     const categories = [
       ...new Set(
-        (
-          result?.data?.products?.edges?.map(
-            (item) => item?.node?.category?.name,
-          ) || []
-        ).filter(Boolean),
+        productNodes.map((item) => item?.category?.name).filter(Boolean),
       ),
     ];
 
@@ -407,6 +529,9 @@ const storeMetadata = async (
       types,
       collections,
       categories,
+      // This is the only customer-facing progressive-filter source. It is
+      // generated per store from categories/product types, never hardcoded.
+      filter_catalog: buildFilterCatalog(productNodes, types),
     };
 
     try {
@@ -519,15 +644,16 @@ const groundTerm = (term, candidates = []) => {
   const target = normalize(term);
   if (!target) return null;
 
-  const exact = candidates.find((c) => normalize(c) === target);
-  if (exact) return exact;
+  const exactMatches = candidates.filter((c) => normalize(c) === target);
+  if (exactMatches.length > 0) return exactMatches;
 
-  const partial = candidates.find((c) => {
+  const partialMatches = candidates.filter((c) => {
     const norm = normalize(c);
     return norm.includes(target) || target.includes(norm);
   });
 
-  return partial || null;
+  if (partialMatches.length > 0) return partialMatches;
+  return null;
 };
 
 // Utility function to parse space input and convert dimensions to centimeters. This can be used to filter products based on available space by extracting dimensions from product descriptions and converting them to a standard unit for comparison.
@@ -1982,6 +2108,7 @@ module.exports = {
   fetchRelatedProducts,
   getProductSortConfig,
   storeMetadata,
+  buildFilterCatalog,
   logProductViewEvents,
   parseSpaceInput,
   extractDimensions,
