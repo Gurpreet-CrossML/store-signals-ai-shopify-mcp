@@ -100,10 +100,6 @@ const storeMetadataQuery = `query {
             category {
             name
             }
-            priceRange {
-                minVariantPrice { amount currencyCode }
-                maxVariantPrice { amount currencyCode }
-            }
         }
         }
     }

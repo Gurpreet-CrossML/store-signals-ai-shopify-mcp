@@ -93,7 +93,7 @@ const createMcpServer = (configs = {}) => {
       - "running shoes"
       - "vitamin c serum"
 
-    2. Use "product_type" when the customer specifies a product type/category.
+    2. Use "product_type" when the customer specifies a product type/category (e.g. "travel bags", "laptop", "Face Moisturizers").
 
     3. Use "vendor" only when the customer explicitly specifies a brand/vendor.
 
@@ -118,6 +118,7 @@ const createMcpServer = (configs = {}) => {
     {
       query: z
         .string()
+        .optional()
         .describe(
           "Free-text search keywords (product name, description terms, or descriptive attributes not covered by product_type/tags - e.g. 'vitamin c', 'oily skin', 'wireless').",
         ),
@@ -196,21 +197,40 @@ const createMcpServer = (configs = {}) => {
       max_price = null,
       sort_by = "relevance",
     }) => {
+      console.log("[MCP search_products] Tool called with arguments:", {
+        query,
+        product_type,
+        vendor,
+        tags,
+        min_price,
+        max_price
+      });
       try {
-        console.log(
-          `\n[MCP search_products] Incoming Args: query="${query}", product_type=${JSON.stringify(product_type)}, tags=${JSON.stringify(tags)}, min_price=${min_price}, max_price=${max_price}`,
-        );
         const searchClauses = [];
         const { sortKey, reverse } = getProductSortConfig(sort_by);
 
-        if (query?.trim()) {
-          searchClauses.push(query.trim());
+        let finalQuery = query?.trim() || "";
+        const typeArray = [product_type].flat().filter(Boolean).flatMap(t => t.split(',').map(s => s.trim()));
+        
+        if (finalQuery && typeArray.length > 0) {
+          const queryLower = finalQuery.toLowerCase();
+          const isCategoryOnly = typeArray.some(t => {
+            const tLower = t.trim().toLowerCase();
+            return queryLower === tLower || 
+                   queryLower === tLower + 's' || 
+                   queryLower + 's' === tLower || 
+                   queryLower === tLower + 'es' || 
+                   queryLower + 'es' === tLower ||
+                   queryLower.replace(/s$/, '') === tLower.replace(/s$/, '');
+          });
+          if (isCategoryOnly) {
+             finalQuery = "";
+          }
         }
 
-        if (product_type) {
-          const typeArray = Array.isArray(product_type)
-            ? product_type
-            : [product_type];
+        if (finalQuery) {
+          searchClauses.push(finalQuery);
+        }
           const expandedTypes = new Set();
 
           typeArray.forEach((t) => {
@@ -233,20 +253,12 @@ const createMcpServer = (configs = {}) => {
           });
 
           const types = Array.from(expandedTypes)
-            .map((t) => `product_type:${JSON.stringify(t)}`)
+            .map((t) => `(product_type:${JSON.stringify(t)} OR ${JSON.stringify(t)})`)
             .join(" OR ");
           if (types) searchClauses.push(`(${types})`);
-        }
 
-        if (vendor) {
-          if (Array.isArray(vendor)) {
-            const vendors = vendor
-              .map((v) => `vendor:${JSON.stringify(v.trim())}`)
-              .join(" OR ");
-            if (vendors) searchClauses.push(`(${vendors})`);
-          } else if (typeof vendor === "string" && vendor.trim()) {
-            searchClauses.push(`vendor:${JSON.stringify(vendor.trim())}`);
-          }
+        if (vendor?.trim()) {
+          searchClauses.push(`vendor:${vendor.trim()}`);
         }
 
         if (availability && availability !== "all") {
@@ -681,7 +693,7 @@ const createMcpServer = (configs = {}) => {
   server.tool(
     "get_store_meta_info",
     `Fetch metadata about the store's product catalog.
-  Returns product tags, types, collections, categories, and an overall price_range available in the store.
+  Returns product tags, types, collections, categories available in the store.
   `,
     async () => {
       try {
