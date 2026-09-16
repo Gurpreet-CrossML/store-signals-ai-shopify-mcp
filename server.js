@@ -203,28 +203,33 @@ const createMcpServer = (configs = {}) => {
         vendor,
         tags,
         min_price,
-        max_price
+        max_price,
       });
       try {
         const searchClauses = [];
         const { sortKey, reverse } = getProductSortConfig(sort_by);
 
         let finalQuery = query?.trim() || "";
-        const typeArray = [product_type].flat().filter(Boolean).flatMap(t => t.split(',').map(s => s.trim()));
-        
+        const typeArray = [product_type]
+          .flat()
+          .filter(Boolean)
+          .flatMap((t) => t.split(",").map((s) => s.trim()));
+
         if (finalQuery && typeArray.length > 0) {
           const queryLower = finalQuery.toLowerCase();
-          const isCategoryOnly = typeArray.some(t => {
+          const isCategoryOnly = typeArray.some((t) => {
             const tLower = t.trim().toLowerCase();
-            return queryLower === tLower || 
-                   queryLower === tLower + 's' || 
-                   queryLower + 's' === tLower || 
-                   queryLower === tLower + 'es' || 
-                   queryLower + 'es' === tLower ||
-                   queryLower.replace(/s$/, '') === tLower.replace(/s$/, '');
+            return (
+              queryLower === tLower ||
+              queryLower === tLower + "s" ||
+              queryLower + "s" === tLower ||
+              queryLower === tLower + "es" ||
+              queryLower + "es" === tLower ||
+              queryLower.replace(/s$/, "") === tLower.replace(/s$/, "")
+            );
           });
           if (isCategoryOnly) {
-             finalQuery = "";
+            finalQuery = "";
           }
         }
 
@@ -234,7 +239,10 @@ const createMcpServer = (configs = {}) => {
 
         if (typeArray.length > 0) {
           const types = [...new Set(typeArray)]
-            .map((t) => `(product_type:${JSON.stringify(t)} OR ${JSON.stringify(t)})`)
+            .map(
+              (t) =>
+                `(product_type:${JSON.stringify(t)} OR ${JSON.stringify(t)})`,
+            )
             .join(" OR ");
           searchClauses.push(`(${types})`);
         }
