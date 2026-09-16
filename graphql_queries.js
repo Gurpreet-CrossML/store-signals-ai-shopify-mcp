@@ -94,15 +94,25 @@ const storeMetadataQuery = `query {
         }
     }
 
-    products(first: 250) {
-        edges {
-        node {
-            category {
-            name
-            }
+}`;
+
+// Product types and taxonomy categories must be read across every product
+// page. The metadata query above still fetches global tags/types/collections;
+// this query supplies the authoritative product -> type/category mapping used
+// for progressive filters.
+const storeMetadataProductsQuery = `query storeMetadataProducts($cursor: String) {
+  products(first: 250, after: $cursor) {
+    edges {
+      node {
+        productType
+        category {
+          name
+          ancestors { name }
         }
-        }
+      }
     }
+    pageInfo { hasNextPage endCursor }
+  }
 }`;
 
 // GraphQL query to fetch related products based on a given product ID.
@@ -416,10 +426,10 @@ const refundQuery = `
   }
 `;
 
-// Export the GraphQL query for use in other modules
 module.exports = {
   productSearchByQuery,
   storeMetadataQuery,
+  storeMetadataProductsQuery,
   relatedProductsQuery,
   productByIdQuery,
   productSortQuery,

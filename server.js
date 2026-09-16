@@ -93,7 +93,7 @@ const createMcpServer = (configs = {}) => {
       - "running shoes"
       - "vitamin c serum"
 
-    2. Use "product_type" when the customer specifies a product type/category.
+    2. Use "product_type" when the customer specifies a product type/category (e.g. "travel bags", "laptop", "Face Moisturizers").
 
     3. Use "vendor" only when the customer explicitly specifies a brand/vendor.
 
@@ -118,6 +118,7 @@ const createMcpServer = (configs = {}) => {
     {
       query: z
         .string()
+        .optional()
         .describe(
           "Free-text search keywords (product name, description terms, or descriptive attributes not covered by product_type/tags - e.g. 'vitamin c', 'oily skin', 'wireless').",
         ),
@@ -128,18 +129,16 @@ const createMcpServer = (configs = {}) => {
           "Whether to return full product details including variants, images, and URLs. Defaults to false.",
         ),
       product_type: z
-        .string()
+        .union([z.string(), z.array(z.string())])
         .optional()
         .describe(
-          "Product category/type, e.g. 'Perfume', 'Sunscreen', 'Serum'. Matched against the " +
-            "store's real product types/collections (see get_store_meta_info) - pass the " +
-            "customer's category word even if casing or plurality differs.",
+          "Product type, e.g. 'Perfume', 'Sunscreen', 'Serum'. Can be a single string or an array of strings (searched as OR). 1. ALWAYS use singular form (e.g., 'Foundation', not 'Foundations'). 2. For compound words, ALWAYS pass an array checking both with and without spaces (e.g., ['Eye Shadow', 'Eyeshadow']) to ensure a match.",
         ),
       vendor: z
-        .string()
+        .union([z.string(), z.array(z.string())])
         .optional()
         .describe(
-          "Brand/vendor filter, e.g. 'Chanel'. Only pass when the customer names a specific brand.",
+          "Brand/vendor filter, e.g. 'Chanel'. Can be a single string or an array of strings (searched as OR). Only pass when the customer names a specific brand.",
         ),
       tags: z
         .array(z.string())
@@ -198,16 +197,54 @@ const createMcpServer = (configs = {}) => {
       max_price = null,
       sort_by = "relevance",
     }) => {
+      console.log("[MCP search_products] Tool called with arguments:", {
+        query,
+        product_type,
+        vendor,
+        tags,
+        min_price,
+        max_price,
+      });
       try {
         const searchClauses = [];
         const { sortKey, reverse } = getProductSortConfig(sort_by);
 
-        if (query?.trim()) {
-          searchClauses.push(query.trim());
+        let finalQuery = query?.trim() || "";
+        const typeArray = [product_type]
+          .flat()
+          .filter(Boolean)
+          .flatMap((t) => t.split(",").map((s) => s.trim()));
+
+        if (finalQuery && typeArray.length > 0) {
+          const queryLower = finalQuery.toLowerCase();
+          const isCategoryOnly = typeArray.some((t) => {
+            const tLower = t.trim().toLowerCase();
+            return (
+              queryLower === tLower ||
+              queryLower === tLower + "s" ||
+              queryLower + "s" === tLower ||
+              queryLower === tLower + "es" ||
+              queryLower + "es" === tLower ||
+              queryLower.replace(/s$/, "") === tLower.replace(/s$/, "")
+            );
+          });
+          if (isCategoryOnly) {
+            finalQuery = "";
+          }
         }
 
-        if (product_type?.trim()) {
-          searchClauses.push(`product_type:${product_type.trim()}`);
+        if (finalQuery) {
+          searchClauses.push(finalQuery);
+        }
+
+        if (typeArray.length > 0) {
+          const types = [...new Set(typeArray)]
+            .map(
+              (t) =>
+                `(product_type:${JSON.stringify(t)} OR ${JSON.stringify(t)})`,
+            )
+            .join(" OR ");
+          searchClauses.push(`(${types})`);
         }
 
         if (vendor?.trim()) {
@@ -239,6 +276,9 @@ const createMcpServer = (configs = {}) => {
         }
 
         const searchQuery = searchClauses.join(" ");
+        console.log(
+          `[MCP search_products] Final Shopify Query: "${searchQuery}"`,
+        );
 
         const cacheKey = `product_search:${searchQuery}:${sortKey}:${reverse}`;
 
@@ -643,7 +683,7 @@ const createMcpServer = (configs = {}) => {
   server.tool(
     "get_store_meta_info",
     `Fetch metadata about the store's product catalog.
-  Returns product tags, types, collections, and categories available in the store.
+  Returns product tags, types, collections, categories available in the store.
   `,
     async () => {
       try {
