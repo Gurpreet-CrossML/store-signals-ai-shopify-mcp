@@ -7,6 +7,7 @@ const express = require("express");
 const cors = require("cors");
 const {
   productSearchByQuery,
+  collectionProductsQuery,
   productByIdQuery,
   productSortQuery,
   discountQuery,
@@ -35,9 +36,18 @@ const {
   ShopifyExchangeManager,
   getExchangePolicyEligibility,
   verifyOrderIdentity,
+  quoteSearchValue,
+  groundTerm,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
+
+// Safety cap on how many products the category search tier will scan
+// (paginated, 250 per page) per request while looking for enough category
+// matches. Bounds worst-case latency on a single search_products call when
+// the matched category has few/no products or the catalog is huge.
+const CATEGORY_TIER_SCAN_MAX =
+  Number(process.env.CATEGORY_TIER_SCAN_MAX) || 2000;
 
 const createMcpServer = (configs = {}) => {
   const {
@@ -79,7 +89,7 @@ const createMcpServer = (configs = {}) => {
   server.tool(
     "search_products",
     `Search for products based on the customer's request using product, price,
-    availability, tag, brand, category, and sorting filters.
+    availability, tag, brand, category, collection, and sorting filters.
 
     Use structured filters whenever the customer's request maps to them. These filters
     are processed server-side and are more precise than putting everything into "query".
@@ -93,22 +103,43 @@ const createMcpServer = (configs = {}) => {
       - "running shoes"
       - "vitamin c serum"
 
-    2. Use "product_type" when the customer specifies a product type/category.
+    2. Use "collection" when the customer refers to a named store collection
+      (e.g. "summer sale", "new arrivals").
 
-    3. Use "vendor" only when the customer explicitly specifies a brand/vendor.
+    3. Use "category" when the customer's request maps to the store's standardized
+      product category/taxonomy (see get_store_meta_info).
 
-    4. Use "tags" for store attributes such as audience, occasion, feature,
+    4. Use "product_type" when the customer specifies a product type.
+
+    5. Use "vendor" only when the customer explicitly specifies a brand/vendor.
+
+    6. Use "tags" for store attributes such as audience, occasion, feature,
       material, skin type, concern, etc., when they correspond to store tags.
+
+    Structured filters are searched in priority order: collection > category >
+    product_type > tags > query. The server tries the highest-priority filter
+    first; if that returns 2 or fewer products, it automatically searches the
+    next filter in priority order and merges in any new results, cascading
+    down to a free-text "query" search if needed - the customer should always
+    see some relevant products rather than a near-empty result set.
 
     If the customer asks for a variant option that does not exist in the store
     metadata, do not invent it and do not pass it as a variant filter.
     The agent should handle unavailable variant options before calling this tool.
 
+    Rules:
+    - Translate customer intent to English for the query.
+    - Keep brand names, model names, and quoted product names unchanged.
+    - Never invent filters that do not exist in the store.
+    - Always return every product id the tool gives you.
+
     Parameters:
     @param {string} query: Main free-text product search intent.
     @param {boolean} full_details: Whether to return full product details including variants, images, and URLs.
     @param {number} page_size: Number of products to return.
-    @param {string} product_type: Product type/category filter.
+    @param {string} collection: Store collection name filter.
+    @param {string} category: Product category/taxonomy filter.
+    @param {string} product_type: Product type filter.
     @param {string} vendor: Brand/vendor filter.
     @param {string[]} tags: Store tag filters.
     @param {string} availability: "in_stock" | "out_of_stock" | "all".
@@ -126,6 +157,22 @@ const createMcpServer = (configs = {}) => {
         .optional()
         .describe(
           "Whether to return full product details including variants, images, and URLs. Defaults to false.",
+        ),
+      collection: z
+        .string()
+        .optional()
+        .describe(
+          "Store collection name, e.g. 'Summer Sale', 'New Arrivals'. Matched against the " +
+            "store's real collections (see get_store_meta_info) - pass the customer's own " +
+            "wording even if casing differs.",
+        ),
+      category: z
+        .string()
+        .optional()
+        .describe(
+          "Standardized product category/taxonomy name (see get_store_meta_info). Matched " +
+            "against the store's real categories - pass the customer's own wording even if " +
+            "casing or plurality differs.",
         ),
       product_type: z
         .string()
@@ -190,6 +237,8 @@ const createMcpServer = (configs = {}) => {
       query,
       full_details = false,
       page_size = 15,
+      collection = null,
+      category = null,
       product_type = null,
       vendor = null,
       tags = [],
@@ -199,48 +248,54 @@ const createMcpServer = (configs = {}) => {
       sort_by = "relevance",
     }) => {
       try {
-        const searchClauses = [];
         const { sortKey, reverse } = getProductSortConfig(sort_by);
+        // collection.products uses ProductCollectionSortKeys, which spells
+        // "created" differently than the top-level ProductSortKeys enum.
+        const collectionSortKey =
+          sortKey === "CREATED_AT" ? "CREATED" : sortKey;
 
-        if (query?.trim()) {
-          searchClauses.push(query.trim());
-        }
+        const trimmedQuery = query?.trim() || "";
+        const trimmedCollection = collection?.trim() || "";
+        const trimmedCategory = category?.trim() || "";
+        const trimmedProductType = product_type?.trim() || "";
+        const cleanTags = (Array.isArray(tags) ? tags : [])
+          .filter(Boolean)
+          .map((tag) => tag.trim())
+          .filter(Boolean);
 
-        if (product_type?.trim()) {
-          searchClauses.push(`product_type:${product_type.trim()}`);
-        }
-
+        // Non-narrowing filters that should still apply no matter which
+        // priority tier ends up supplying the products.
+        const broadClauses = [];
         if (vendor?.trim()) {
-          searchClauses.push(`vendor:${vendor.trim()}`);
+          broadClauses.push(`vendor:${quoteSearchValue(vendor)}`);
         }
-
         if (availability && availability !== "all") {
-          searchClauses.push(
+          broadClauses.push(
             `available_for_sale:${availability === "in_stock"}`,
           );
         }
-
         if (min_price != null && min_price >= 0) {
-          searchClauses.push(`variants.price:>=${min_price}`);
+          broadClauses.push(`variants.price:>=${min_price}`);
         }
-
         if (max_price != null && max_price >= 0) {
-          searchClauses.push(`variants.price:<=${max_price}`);
+          broadClauses.push(`variants.price:<=${max_price}`);
         }
 
-        if (Array.isArray(tags) && tags.length > 0) {
-          tags
-            .filter(Boolean)
-            .map((tag) => tag.trim())
-            .filter(Boolean)
-            .forEach((tag) => {
-              searchClauses.push(`tag:${JSON.stringify(tag)}`);
-            });
+        const collectionFilters = [];
+        if (vendor?.trim()) {
+          collectionFilters.push({ productVendor: vendor.trim() });
+        }
+        if (availability && availability !== "all") {
+          collectionFilters.push({ available: availability === "in_stock" });
+        }
+        if (min_price != null || max_price != null) {
+          const priceFilter = {};
+          if (min_price != null) priceFilter.min = min_price;
+          if (max_price != null) priceFilter.max = max_price;
+          collectionFilters.push({ price: priceFilter });
         }
 
-        const searchQuery = searchClauses.join(" ");
-
-        const cacheKey = `product_search:${searchQuery}:${sortKey}:${reverse}`;
+        const cacheKey = `product_search:${trimmedCollection}:${trimmedCategory}:${trimmedProductType}:${cleanTags.join(",")}:${trimmedQuery}:${broadClauses.join(" ")}:${sortKey}:${reverse}:${page_size}:${full_details}`;
 
         const cached = await getCache(cacheKey);
         if (cached) {
@@ -260,24 +315,164 @@ const createMcpServer = (configs = {}) => {
           };
         }
 
-        const searchResponse = await callShopifyApi(
-          baseUrl,
-          storefrontAccessToken,
-          adminAccessToken,
-          "POST",
-          "",
-          {
-            query: productSearchByQuery,
-            variables: {
-              search: searchQuery,
-              sortKey,
-              reverse,
-              first: page_size,
+        const runProductSearchPage = (search, first, after = null) =>
+          callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "POST",
+            "",
+            {
+              query: productSearchByQuery,
+              variables: { search, sortKey, reverse, first, after },
             },
-          },
-        );
+          ).then((res) => res?.data?.products || {});
 
-        const rawProducts = searchResponse?.data?.products?.edges;
+        const runProductSearch = (search, first = page_size) =>
+          runProductSearchPage(search, first).then(
+            (products) => products?.edges || [],
+          );
+
+        const runCollectionSearch = async (handle) =>
+          callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "POST",
+            "",
+            {
+              query: collectionProductsQuery,
+              variables: {
+                handle,
+                first: page_size,
+                sortKey: collectionSortKey,
+                reverse,
+                filters: collectionFilters,
+              },
+            },
+          ).then((res) => res?.data?.collectionByHandle?.products?.edges || []);
+
+        // Structured filters are tried in priority order - collection >
+        // category > product_type > tags > free-text query - stopping as
+        // soon as the accumulated result set has more than 2 products, so
+        // the customer always sees some relevant products instead of a
+        // near-empty result from an overly narrow filter.
+        let rawProducts = [];
+        const seenIds = new Set();
+        const mergeEdges = (edges) => {
+          for (const edge of edges) {
+            if (rawProducts.length >= page_size) break;
+            const id = edge?.node?.id;
+            if (!id || seenIds.has(id)) continue;
+            seenIds.add(id);
+            rawProducts.push(edge);
+          }
+        };
+
+        const needsMetadata =
+          trimmedCollection || trimmedCategory || trimmedProductType;
+        const metadata = needsMetadata
+          ? await storeMetadata(
+              baseUrl,
+              storefrontAccessToken,
+              adminAccessToken,
+              storeCode,
+            )
+          : null;
+
+        // Tier 1: collection
+        if (trimmedCollection && rawProducts.length <= 2) {
+          const matchedTitle = groundTerm(
+            trimmedCollection,
+            metadata?.collections || [],
+          );
+          const handle = matchedTitle
+            ? metadata?.collectionHandles?.[matchedTitle]
+            : null;
+          if (handle) {
+            mergeEdges(await runCollectionSearch(handle));
+          }
+        }
+
+        // Tier 2: category. No server-side category filter exists on the
+        // top-level products search, so this paginates through the catalog
+        // (250 per page) filtering client-side against the grounded category
+        // name, stopping once enough matches are collected - rather than
+        // sampling a single bounded batch, which can silently miss matches
+        // that don't happen to fall in the first page.
+        if (trimmedCategory && rawProducts.length <= 2) {
+          const matchedCategory = groundTerm(
+            trimmedCategory,
+            metadata?.categories || [],
+          );
+          if (matchedCategory) {
+            const categorySearch = broadClauses.join(" ");
+            const needed = page_size - rawProducts.length;
+            const categoryMatches = [];
+            let after = null;
+            let scanned = 0;
+
+            while (
+              categoryMatches.length < needed &&
+              scanned < CATEGORY_TIER_SCAN_MAX
+            ) {
+              const products = await runProductSearchPage(
+                categorySearch,
+                250,
+                after,
+              );
+              const edges = products?.edges || [];
+
+              edges.forEach((edge) => {
+                if (
+                  edge?.node?.category?.name?.toLowerCase() ===
+                  matchedCategory.toLowerCase()
+                ) {
+                  categoryMatches.push(edge);
+                }
+              });
+
+              scanned += edges.length;
+
+              const pageInfo = products?.pageInfo;
+              if (!pageInfo?.hasNextPage || edges.length === 0) break;
+              after = pageInfo.endCursor;
+            }
+
+            mergeEdges(categoryMatches);
+          }
+        }
+
+        // Tier 3: product_type
+        if (trimmedProductType && rawProducts.length <= 2) {
+          const matchedType =
+            groundTerm(trimmedProductType, metadata?.types || []) ||
+            trimmedProductType;
+          const typeSearch = [
+            `product_type:${quoteSearchValue(matchedType)}`,
+            ...broadClauses,
+          ]
+            .filter(Boolean)
+            .join(" ");
+          mergeEdges(await runProductSearch(typeSearch));
+        }
+
+        // Tier 4: tags
+        if (cleanTags.length > 0 && rawProducts.length <= 2) {
+          const tagClauses = cleanTags.map(
+            (tag) => `tag:${quoteSearchValue(tag)}`,
+          );
+          const tagSearch = [...tagClauses, ...broadClauses].join(" ");
+          mergeEdges(await runProductSearch(tagSearch));
+        }
+
+        // Tier 5: free-text query fallback
+        if (trimmedQuery && rawProducts.length <= 2) {
+          const querySearch = [trimmedQuery, ...broadClauses]
+            .filter(Boolean)
+            .join(" ");
+          mergeEdges(await runProductSearch(querySearch));
+        }
 
         if (!rawProducts || !rawProducts.length) {
           return {
@@ -515,15 +710,23 @@ const createMcpServer = (configs = {}) => {
   // ######### 3. Fetch Sorted Products #########
   server.tool(
     "get_products_sorted",
-    `Fetch up to 10 products, sorted by Shopify sort options.
+    `Fetch up to 10 products from the store catalogue, sorted by the given key.
 
-    Supported sort keys:
-    - relevance (default)
+    Use this for pure store-level browsing when the customer has NOT named any
+    product category, audience, use-case, attribute, colour, material, or budget.
+
+    Supported sort_key values:
+    - relevance (default) – general overview / "show me your products"
     - featured
     - newest
     - best_selling
     - price_asc
     - price_desc
+
+    Optional filters:
+    - min_price / max_price (numbers)
+
+    Do not invent categories or filters that the customer did not mention.
 
     Parameters:
     @param {string} [sort_key]: Sort key. Supported values: relevance(default), price_asc, price_desc, newest, best_selling, featured.
@@ -647,12 +850,13 @@ const createMcpServer = (configs = {}) => {
   `,
     async () => {
       try {
-        const metadata = await storeMetadata(
+        const { collectionHandles, ...metadata } = await storeMetadata(
           baseUrl,
           storefrontAccessToken,
           adminAccessToken,
           storeCode,
         );
+        void collectionHandles;
 
         return {
           content: [
@@ -813,9 +1017,17 @@ const createMcpServer = (configs = {}) => {
   // ######### 6. List Available Discounts #########
   server.tool(
     "list_available_discounts",
-    `List all available discounts from the store.
-  Returns active discount codes, automatic discounts (price rules), and their details.
-  `,
+    `List all currently active discounts, coupon codes, automatic discounts, and promotions in the store.
+
+    Use this when the customer asks about:
+    - Available coupon / promo / discount codes
+    - Current offers, deals, sales, free shipping, BOGO, cashback
+    - Eligibility (first-time buyer, student, etc.)
+    - General questions like "any discounts?", "what offers do you have?"
+
+    Do NOT use this when the customer wants to see discounted products or asks if a specific product is on sale.
+    Returns only active offers. Never invent codes or conditions.
+    `,
     {},
     async () => {
       try {
@@ -2029,16 +2241,14 @@ const createMcpServer = (configs = {}) => {
   // ######### 17. Fetch Discounted Products #########
   server.tool(
     "get_discounted_products",
-    `Fetch up to 10 discounted products.
+    `Fetch up to 10 products that are currently on discount / sale.
 
-    Supported sort keys:
-    - query
-    - relevance (default)
-    - featured
-    - newest
-    - best_selling
-    - price_asc
-    - price_desc
+    Use this when the customer:
+    - Asks to see sale items / discounted products
+    - Mentions a product name + sale/discount language ("is X on sale?", "discount on Y")
+    - Wants products sorted by price, newest, best-selling, etc. among discounted items
+
+    Optional: query (search text), min_price, max_price.
 
     Parameters:
     @param {string} query: Search query for discounted products
