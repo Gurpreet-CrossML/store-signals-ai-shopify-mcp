@@ -295,26 +295,6 @@ const createMcpServer = (configs = {}) => {
           collectionFilters.push({ price: priceFilter });
         }
 
-        const cacheKey = `product_search:${trimmedCollection}:${trimmedCategory}:${trimmedProductType}:${cleanTags.join(",")}:${trimmedQuery}:${broadClauses.join(" ")}:${sortKey}:${reverse}:${page_size}:${full_details}:${storeCode}`;
-
-        const cached = await getCache(cacheKey);
-        if (cached) {
-          logProductViewEvents(
-            widgetKey,
-            cached.products,
-            sessionId,
-            storeCode,
-          );
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(cached, null, 2),
-              },
-            ],
-          };
-        }
-
         const runProductSearchPage = (search, first, after = null) =>
           callShopifyApi(
             baseUrl,
@@ -532,12 +512,6 @@ const createMcpServer = (configs = {}) => {
         }
 
         result.relatedProducts = [...relatedProductIds];
-
-        try {
-          await setCache(cacheKey, result);
-        } catch (e) {
-          console.warn("search cache set failed:", e?.message || e);
-        }
 
         return {
           content: [
