@@ -3,7 +3,7 @@ const dotenv = require("dotenv");
 const https = require("https");
 const {
   storeMetadataQuery,
-  storeMetadataProductsQuery,
+  productCategoriesQuery,
   relatedProductsQuery,
   productSearchByQuery,
   getReturnableFulfillmentsQuery,
@@ -258,7 +258,7 @@ const formatProducts = (
           name: productName,
           category: productCategory,
           price: `${getCurrencySymbol(node.priceRange?.minVariantPrice?.currencyCode)}${node.priceRange?.minVariantPrice?.amount || 0}`,
-          description: node.description || "",
+          description: full_details ? node.description || "" : "",
           available_for_sale: node.availableForSale,
           warranty: node?.metafield?.value || null,
         };
@@ -347,123 +347,56 @@ const formatProducts = (
   }
 };
 
-// Utility function to fetch store metadata like product tags, types, collections, and categories. This metadata can be used for various purposes like improving search relevance, generating search queries, etc.
-const buildFilterCatalog = (productNodes, types) => {
-  const clean = (value) => String(value || "").trim();
-  const key = (value) => clean(value).toLocaleLowerCase();
+// Number of products to scan (in pages of 250, Shopify's max page size) when
+// collecting distinct category names for storeMetadata. A single
+// `products(first: 250)` call only samples the first page, which silently
+// misses categories on larger catalogs - this walks further pages up to the
+// cap below so stores with thousands of products still get a representative
+// category list. Configurable since catalog size varies a lot per store.
+const CATEGORY_SCAN_MAX_PRODUCTS = 5000;
 
-  // Safely normalize for grouping without breaking words ending in 'ss' (Dress), 'as' (Canvas), 'is', etc.
-  const typeKey = (value) => {
-    const k = key(value);
-    if (k.match(/(ss|as|is|us|os)$/)) return k;
-    if (k.endsWith("ies")) return k.replace(/ies$/, "y"); // Accessories -> accessory
-    return k.replace(/s$/, ""); // Shirts -> shirt
-  };
+// Utility function to walk the product catalog (paginated, 250 per page) and
+// collect distinct category names, up to CATEGORY_SCAN_MAX_PRODUCTS products.
+const fetchAllProductCategories = async (
+  base_url,
+  storefront_token,
+  admin_token,
+) => {
+  const categories = new Set();
+  const pageSize = 250;
+  let after = null;
+  let scanned = 0;
 
-  const typeByKey = new Map();
-  for (const type of types.map(clean).filter(Boolean)) {
-    if (!typeByKey.has(typeKey(type)))
-      typeByKey.set(typeKey(type), new Set([type]));
-    else typeByKey.get(typeKey(type)).add(type);
-  }
+  while (scanned < CATEGORY_SCAN_MAX_PRODUCTS) {
+    const result = await callShopifyApi(
+      base_url,
+      storefront_token,
+      admin_token,
+      "POST",
+      "",
+      {
+        query: productCategoriesQuery,
+        variables: { first: pageSize, after },
+      },
+    );
 
-  // Build choices from taxonomy leaves. A value such as "Face" is excluded
-  // when Shopify also reports it as an ancestor of "Face Wash" or another
-  // more-specific category; panels must not mix hierarchy levels.
-  const groupLeaves = new Map();
-  const ancestorNames = new Set();
-
-  for (const product of productNodes) {
-    const category = product?.category;
-    // Storefront TaxonomyCategory.ancestors runs from the immediate parent to
-    // the root. Group by that root, never by a coincidental shared word such
-    // as "bag". This keeps Laptop Bags from swallowing every bag type.
-    const ancestors = Array.isArray(category?.ancestors)
-      ? category.ancestors
-      : [];
-    const leaf = clean(category?.name);
-    const type = clean(product?.productType);
-
-    if (type) {
-      if (!typeByKey.has(typeKey(type)))
-        typeByKey.set(typeKey(type), new Set([type]));
-      else typeByKey.get(typeKey(type)).add(type);
-    }
-
-    ancestors.forEach((ancestor) => {
-      const name = clean(ancestor?.name);
-      if (name) ancestorNames.add(key(name));
+    const edges = result?.data?.products?.edges || [];
+    edges.forEach((edge) => {
+      const name = edge?.node?.category?.name;
+      if (name) categories.add(name);
     });
 
-    if (!leaf || !type) continue;
+    scanned += edges.length;
 
-    // Retain every taxonomy branch, not just the root. That lets a request
-    // for Skin Care resolve to its own branch instead of root Beauty, which
-    // also contains hair, makeup, fragrance, and nails.
-    const groupLabels = [
-      ...ancestors.map((ancestor) => clean(ancestor?.name)),
-      leaf,
-    ].filter(Boolean);
-
-    for (const group of groupLabels) {
-      if (!groupLeaves.has(group)) groupLeaves.set(group, new Map());
-      const leaves = groupLeaves.get(group);
-
-      if (!leaves.has(key(leaf))) {
-        leaves.set(key(leaf), { label: leaf, types: new Set() });
-      }
-
-      // Store the EXACT type string to prevent dropping product matches
-      leaves.get(key(leaf)).types.add(type);
-    }
+    const pageInfo = result?.data?.products?.pageInfo;
+    if (!pageInfo?.hasNextPage || edges.length === 0) break;
+    after = pageInfo.endCursor;
   }
 
-  const assigned = new Set();
-  const groups = [...groupLeaves.entries()]
-    .map(([label, leaves]) => {
-      const options = [...leaves.values()]
-        .filter((leaf) => !ancestorNames.has(key(leaf.label)))
-        .sort((left, right) => left.label.localeCompare(right.label))
-        .map((leaf) => {
-          const searchTypes = [...leaf.types.values()].sort((a, b) =>
-            a.localeCompare(b),
-          );
-          // Mark this base type key as assigned so it doesn't show up in ungrouped
-          searchTypes.forEach((type) => assigned.add(typeKey(type)));
-
-          return {
-            label: leaf.label,
-            // Keep both forms during the widget's string-only transition.
-            search_type: searchTypes[0],
-            search_types: searchTypes,
-          };
-        });
-      return {
-        label,
-        options,
-      };
-    })
-    .filter((group) => group.options.length >= 2);
-
-  const ungrouped = [];
-  for (const [baseKey, typeVariants] of typeByKey.entries()) {
-    if (!assigned.has(baseKey)) {
-      const sortedVariants = [...typeVariants].sort((a, b) =>
-        a.localeCompare(b),
-      );
-      ungrouped.push({
-        label: sortedVariants[0],
-        search_type: sortedVariants[0],
-        search_types: sortedVariants,
-      });
-    }
-  }
-
-  ungrouped.sort((a, b) => a.label.localeCompare(b.label));
-
-  return { groups, ungrouped_types: ungrouped };
+  return [...categories];
 };
 
+// Utility function to fetch store metadata like product types, collections, and categories. This metadata can be used for various purposes like improving search relevance, generating search queries, etc.
 const storeMetadata = async (
   base_url,
   storefront_token,
@@ -493,59 +426,47 @@ const storeMetadata = async (
 
     if (result.errors) {
       return {
-        tags: [],
         types: [],
         collections: [],
         categories: [],
+        collectionHandles: {},
       };
     }
-
-    const tags =
-      result?.data?.productTags?.edges?.map((item) => item?.node) || [];
 
     const types =
       result?.data?.productTypes?.edges?.map((item) => item?.node) || [];
 
-    const collections =
-      result?.data?.collections?.edges?.map((item) => item?.node?.title) || [];
+    const collectionNodes =
+      result?.data?.collections?.edges?.map((item) => item?.node) || [];
 
-    const productNodes = [];
-    let cursor = null;
-    do {
-      const page = await callShopifyApi(
+    const collections = collectionNodes.map((node) => node?.title);
+
+    const collectionHandles = collectionNodes.reduce((acc, node) => {
+      if (node?.title && node?.handle) {
+        acc[node.title] = node.handle;
+      }
+      return acc;
+    }, {});
+
+    let categories = [];
+    try {
+      categories = await fetchAllProductCategories(
         base_url,
         storefront_token,
         admin_token,
-        "POST",
-        "",
-        { query: storeMetadataProductsQuery, variables: { cursor } },
       );
-      if (page?.errors) {
-        throw new Error("Unable to fetch a complete product metadata page");
-      }
-      const connection = page?.data?.products;
-      productNodes.push(
-        ...(connection?.edges?.map((item) => item?.node) || []),
+    } catch (categoryError) {
+      console.warn(
+        "storeMetadata category scan failed:",
+        categoryError?.message || categoryError,
       );
-      cursor = connection?.pageInfo?.hasNextPage
-        ? connection.pageInfo.endCursor
-        : null;
-    } while (cursor);
-
-    const categories = [
-      ...new Set(
-        productNodes.map((item) => item?.category?.name).filter(Boolean),
-      ),
-    ];
+    }
 
     const metadata = {
-      tags,
       types,
       collections,
       categories,
-      // This is the only customer-facing progressive-filter source. It is
-      // generated per store from categories/product types, never hardcoded.
-      filter_catalog: buildFilterCatalog(productNodes, types),
+      collectionHandles,
     };
 
     try {
@@ -561,10 +482,10 @@ const storeMetadata = async (
     console.error("productsMetadata Error:", error);
 
     return {
-      tags: [],
       types: [],
       collections: [],
       categories: [],
+      collectionHandles: {},
     };
   }
 };
@@ -653,21 +574,104 @@ const groundTerm = (term, candidates = []) => {
     String(s || "")
       .toLowerCase()
       .trim()
-      .replace(/s$/, "");
+      .replace(/(?:es|s)$/, "");
 
   const target = normalize(term);
   if (!target) return null;
 
-  const exactMatches = candidates.filter((c) => normalize(c) === target);
-  if (exactMatches.length > 0) return exactMatches;
+  // Tier 1: Exact match
+  const exact = candidates.find((c) => normalize(c) === target);
+  if (exact) return exact;
 
-  const partialMatches = candidates.filter((c) => {
+  // Tier 2: Substring containment match
+  const partial = candidates.find((c) => {
     const norm = normalize(c);
     return norm.includes(target) || target.includes(norm);
   });
+  if (partial) return partial;
 
-  if (partialMatches.length > 0) return partialMatches;
+  // Tier 3: Dynamic token-specificity match (IDF scoring across store catalog)
+  const tokens = target.split(/\s+/).filter((w) => w.length > 2);
+  if (tokens.length > 0) {
+    const tokenFreq = {};
+    tokens.forEach((t) => {
+      tokenFreq[t] = candidates.filter((c) =>
+        normalize(c).includes(t),
+      ).length;
+    });
+
+    let bestCandidate = null;
+    let maxScore = 0;
+
+    candidates.forEach((c) => {
+      const normC = normalize(c);
+      let score = 0;
+      tokens.forEach((t) => {
+        if (normC.includes(t)) {
+          const weight = 1 / (tokenFreq[t] || 1);
+          score += weight;
+        }
+      });
+      if (score > maxScore) {
+        maxScore = score;
+        bestCandidate = c;
+      }
+    });
+
+    if (bestCandidate && maxScore > 0) {
+      return bestCandidate;
+    }
+  }
+
   return null;
+};
+
+// Dynamically extracts specific keywords from multi-word terms using statistical token frequency
+// across store metadata candidates (no hardcoded domain word sets).
+const getDynamicCleanSearchTerm = (term, metadataCandidates = []) => {
+  const str = String(term || "").trim();
+  if (!str) return "";
+
+  const normalize = (s) =>
+    String(s || "")
+      .toLowerCase()
+      .trim()
+      .replace(/(?:es|s)$/, "");
+
+  const words = normalize(str)
+    .split(/\s+/)
+    .filter((w) => w.length > 2);
+
+  if (
+    words.length <= 1 ||
+    !Array.isArray(metadataCandidates) ||
+    metadataCandidates.length === 0
+  ) {
+    return str;
+  }
+
+  const wordFreq = {};
+  words.forEach((w) => {
+    wordFreq[w] = 0;
+    metadataCandidates.forEach((c) => {
+      if (normalize(c).includes(w)) {
+        wordFreq[w]++;
+      }
+    });
+  });
+
+  const freqs = Object.values(wordFreq);
+  const minFreq = Math.min(...freqs);
+  const maxFreq = Math.max(...freqs);
+
+  if (maxFreq >= 3 && maxFreq > minFreq * 2) {
+    const specificWords = words.filter((w) => wordFreq[w] < maxFreq);
+    if (specificWords.length > 0) {
+      return specificWords.join(" ");
+    }
+  }
+
+  return str;
 };
 
 // Utility function to parse space input and convert dimensions to centimeters. This can be used to filter products based on available space by extracting dimensions from product descriptions and converting them to a standard unit for comparison.
@@ -2122,7 +2126,6 @@ module.exports = {
   fetchRelatedProducts,
   getProductSortConfig,
   storeMetadata,
-  buildFilterCatalog,
   logProductViewEvents,
   parseSpaceInput,
   extractDimensions,
@@ -2140,4 +2143,5 @@ module.exports = {
   isConsumableProductType,
   quoteSearchValue,
   groundTerm,
+  getDynamicCleanSearchTerm,
 };

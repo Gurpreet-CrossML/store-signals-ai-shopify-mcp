@@ -1,14 +1,20 @@
 // Query to search products by a free-text `search` string, which may also
 // contain field-qualified clauses (product_type:, vendor:, tag:,
 // variants.price, available_for_sale:) built by buildShopifySearchQuery.
-// - Variables: { search: String!, sortKey, reverse, first: Int! }
+// - Variables: { search: String!, sortKey, reverse, first: Int!, after: String }
 // - Returns: up to `first` matching products with selected fields, including
-//   images, price range, and up to 20 variants per product.
+//   images, price range, and up to 20 variants per product, plus pageInfo
+//   for callers that need to paginate (e.g. the category search tier, which
+//   has no server-side category filter and must walk pages client-side).
 //   The `first` value is passed dynamically from the search_products tool
 //   in server.js (default: 15) — giving the calling agent's own
 //   audience/budget/attribute post-filtering enough surviving candidates.
-const productSearchByQuery = `query getProducts($search: String!, $sortKey: ProductSortKeys, $reverse: Boolean, $first: Int!) {
-  products(first: $first, query: $search, sortKey:$sortKey, reverse:$reverse) {
+const productSearchByQuery = `query getProducts($search: String!, $sortKey: ProductSortKeys, $reverse: Boolean, $first: Int!, $after: String) {
+  products(first: $first, after: $after, query: $search, sortKey:$sortKey, reverse:$reverse) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
     edges {
       node {
         id
@@ -72,46 +78,116 @@ const productSearchByQuery = `query getProducts($search: String!, $sortKey: Prod
   }
 }`;
 
-// GraphQL query to fetch store metadata including product tags, types, collections, and categories.
-const storeMetadataQuery = `query {
-    productTags(first: 250) {
-        edges {
-        node
-        }
-    }
-
-    productTypes(first: 250) {
-        edges {
-        node
-        }
-    }
-
-    collections(first: 250) {
-        edges {
+// Query to fetch products within a specific collection by handle. Used as a
+// higher-priority search tier ahead of product_type/tags: collection.products
+// supports structured `filters` (vendor/availability/price) server-side,
+// unlike the top-level products search which only takes a free-text `query`.
+// - Variables: { handle: String!, first: Int!, sortKey: ProductCollectionSortKeys, reverse, filters: [ProductFilter!] }
+const collectionProductsQuery = `query getCollectionProducts($handle: String!, $first: Int!, $sortKey: ProductCollectionSortKeys, $reverse: Boolean, $filters: [ProductFilter!]) {
+  collectionByHandle(handle: $handle) {
+    products(first: $first, sortKey: $sortKey, reverse: $reverse, filters: $filters) {
+      edges {
         node {
-            title
-        }
-        }
-    }
+          id
+          title
+          handle
+          productType
+          category {
+            name
+          }
+          availableForSale
+          onlineStoreUrl
+          description
+          descriptionHtml
 
-}`;
+          metafield(namespace: "custom", key: "warranty") {
+            value
+            type
+          }
 
-// Product types and taxonomy categories must be read across every product
-// page. The metadata query above still fetches global tags/types/collections;
-// this query supplies the authoritative product -> type/category mapping used
-// for progressive filters.
-const storeMetadataProductsQuery = `query storeMetadataProducts($cursor: String) {
-  products(first: 250, after: $cursor) {
-    edges {
-      node {
-        productType
-        category {
-          name
-          ancestors { name }
+          images(first: 5) {
+            edges {
+              node {
+                url
+                altText
+              }
+            }
+          }
+
+          priceRange {
+            minVariantPrice {
+              amount
+              currencyCode
+            }
+          }
+
+          variants(first: 20) {
+            edges {
+              node {
+                id
+                title
+                priceV2 {
+                  amount
+                  currencyCode
+                }
+                compareAtPriceV2 {
+                  amount
+                  currencyCode
+                }
+                availableForSale
+                quantityAvailable
+                currentlyNotInStock
+                selectedOptions {
+                  name
+                  value
+                }
+              }
+            }
+          }
         }
       }
     }
-    pageInfo { hasNextPage endCursor }
+  }
+}`;
+
+// GraphQL query to fetch store metadata including product tags, types, and collections.
+// Categories are fetched separately via `productCategoriesQuery`, paginated,
+// since they're derived from actual product data rather than a distinct-values field.
+const storeMetadataQuery = `query {
+  productTypes(first: 100) {
+    edges {
+      node
+    }
+  }
+
+  collections(first: 50) {
+    edges {
+      node {
+        title
+        handle
+      }
+    }
+  }
+}`;
+
+// Paginated query to walk the full product catalog collecting distinct
+// category names - a single `products(first: 250)` call only samples the
+// first page, which silently misses categories on stores with thousands of
+// products. Callers page through with $after until pageInfo.hasNextPage is
+// false (or a safety cap on pages is reached).
+const productCategoriesQuery = `query getProductCategories($first: Int!, $after: String) {
+  products(first: $first, after: $after) {
+    edges {
+      node {
+        category {
+          name
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
   }
 }`;
 
@@ -426,10 +502,12 @@ const refundQuery = `
   }
 `;
 
+// Export the GraphQL query for use in other modules
 module.exports = {
   productSearchByQuery,
+  collectionProductsQuery,
   storeMetadataQuery,
-  storeMetadataProductsQuery,
+  productCategoriesQuery,
   relatedProductsQuery,
   productByIdQuery,
   productSortQuery,
