@@ -3,6 +3,7 @@ const dotenv = require("dotenv");
 const https = require("https");
 const {
   storeMetadataQuery,
+  productCategoriesQuery,
   relatedProductsQuery,
   productSearchByQuery,
   getReturnableFulfillmentsQuery,
@@ -346,7 +347,56 @@ const formatProducts = (
   }
 };
 
-// Utility function to fetch store metadata like product tags, types, collections, and categories. This metadata can be used for various purposes like improving search relevance, generating search queries, etc.
+// Number of products to scan (in pages of 250, Shopify's max page size) when
+// collecting distinct category names for storeMetadata. A single
+// `products(first: 250)` call only samples the first page, which silently
+// misses categories on larger catalogs - this walks further pages up to the
+// cap below so stores with thousands of products still get a representative
+// category list. Configurable since catalog size varies a lot per store.
+const CATEGORY_SCAN_MAX_PRODUCTS = 5000;
+
+// Utility function to walk the product catalog (paginated, 250 per page) and
+// collect distinct category names, up to CATEGORY_SCAN_MAX_PRODUCTS products.
+const fetchAllProductCategories = async (
+  base_url,
+  storefront_token,
+  admin_token,
+) => {
+  const categories = new Set();
+  const pageSize = 250;
+  let after = null;
+  let scanned = 0;
+
+  while (scanned < CATEGORY_SCAN_MAX_PRODUCTS) {
+    const result = await callShopifyApi(
+      base_url,
+      storefront_token,
+      admin_token,
+      "POST",
+      "",
+      {
+        query: productCategoriesQuery,
+        variables: { first: pageSize, after },
+      },
+    );
+
+    const edges = result?.data?.products?.edges || [];
+    edges.forEach((edge) => {
+      const name = edge?.node?.category?.name;
+      if (name) categories.add(name);
+    });
+
+    scanned += edges.length;
+
+    const pageInfo = result?.data?.products?.pageInfo;
+    if (!pageInfo?.hasNextPage || edges.length === 0) break;
+    after = pageInfo.endCursor;
+  }
+
+  return [...categories];
+};
+
+// Utility function to fetch store metadata like product types, collections, and categories. This metadata can be used for various purposes like improving search relevance, generating search queries, etc.
 const storeMetadata = async (
   base_url,
   storefront_token,
@@ -376,37 +426,47 @@ const storeMetadata = async (
 
     if (result.errors) {
       return {
-        tags: [],
         types: [],
         collections: [],
         categories: [],
+        collectionHandles: {},
       };
     }
-
-    const tags =
-      result?.data?.productTags?.edges?.map((item) => item?.node) || [];
 
     const types =
       result?.data?.productTypes?.edges?.map((item) => item?.node) || [];
 
-    const collections =
-      result?.data?.collections?.edges?.map((item) => item?.node?.title) || [];
+    const collectionNodes =
+      result?.data?.collections?.edges?.map((item) => item?.node) || [];
 
-    const categories = [
-      ...new Set(
-        (
-          result?.data?.products?.edges?.map(
-            (item) => item?.node?.category?.name,
-          ) || []
-        ).filter(Boolean),
-      ),
-    ];
+    const collections = collectionNodes.map((node) => node?.title);
+
+    const collectionHandles = collectionNodes.reduce((acc, node) => {
+      if (node?.title && node?.handle) {
+        acc[node.title] = node.handle;
+      }
+      return acc;
+    }, {});
+
+    let categories = [];
+    try {
+      categories = await fetchAllProductCategories(
+        base_url,
+        storefront_token,
+        admin_token,
+      );
+    } catch (categoryError) {
+      console.warn(
+        "storeMetadata category scan failed:",
+        categoryError?.message || categoryError,
+      );
+    }
 
     const metadata = {
-      tags,
       types,
       collections,
       categories,
+      collectionHandles,
     };
 
     try {
@@ -422,10 +482,10 @@ const storeMetadata = async (
     console.error("productsMetadata Error:", error);
 
     return {
-      tags: [],
       types: [],
       collections: [],
       categories: [],
+      collectionHandles: {},
     };
   }
 };
