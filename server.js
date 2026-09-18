@@ -295,7 +295,7 @@ const createMcpServer = (configs = {}) => {
           collectionFilters.push({ price: priceFilter });
         }
 
-        const cacheKey = `product_search:${trimmedCollection}:${trimmedCategory}:${trimmedProductType}:${cleanTags.join(",")}:${trimmedQuery}:${broadClauses.join(" ")}:${sortKey}:${reverse}:${page_size}:${full_details}`;
+        const cacheKey = `product_search:${trimmedCollection}:${trimmedCategory}:${trimmedProductType}:${cleanTags.join(",")}:${trimmedQuery}:${broadClauses.join(" ")}:${sortKey}:${reverse}:${page_size}:${full_details}:${storeCode}`;
 
         const cached = await getCache(cacheKey);
         if (cached) {
@@ -758,6 +758,7 @@ const createMcpServer = (configs = {}) => {
           sort_key || "relevance",
           min_price ?? "any",
           max_price ?? "any",
+          storeCode,
         ].join(":");
 
         const cached = await getCache(cacheKey);
@@ -2294,6 +2295,7 @@ const createMcpServer = (configs = {}) => {
           min_price ?? "any",
           max_price ?? "any",
           query ?? "",
+          storeCode,
         ].join(":");
 
         const cached = await getCache(cacheKey);
