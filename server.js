@@ -340,11 +340,6 @@ const createMcpServer = (configs = {}) => {
             },
           ).then((res) => res?.data?.products || {});
 
-        const runProductSearch = (search, first = page_size) =>
-          runProductSearchPage(search, first).then(
-            (products) => products?.edges || [],
-          );
-
         const runCollectionSearch = async (handle) =>
           callShopifyApi(
             baseUrl,
