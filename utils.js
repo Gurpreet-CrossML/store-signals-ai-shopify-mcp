@@ -595,9 +595,7 @@ const groundTerm = (term, candidates = []) => {
   if (tokens.length > 0) {
     const tokenFreq = {};
     tokens.forEach((t) => {
-      tokenFreq[t] = candidates.filter((c) =>
-        normalize(c).includes(t),
-      ).length;
+      tokenFreq[t] = candidates.filter((c) => normalize(c).includes(t)).length;
     });
 
     let bestCandidate = null;

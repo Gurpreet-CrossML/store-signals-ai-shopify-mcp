@@ -269,8 +269,12 @@ const createMcpServer = (configs = {}) => {
 
         const categoriesList = parseList(category);
         const productTypesList = parseList(product_type);
-        const trimmedCategory = categoriesList[0] || (typeof category === "string" ? category.trim() : "");
-        const trimmedProductType = productTypesList[0] || (typeof product_type === "string" ? product_type.trim() : "");
+        const trimmedCategory =
+          categoriesList[0] ||
+          (typeof category === "string" ? category.trim() : "");
+        const trimmedProductType =
+          productTypesList[0] ||
+          (typeof product_type === "string" ? product_type.trim() : "");
 
         const cleanTags = (Array.isArray(tags) ? tags : [])
           .filter(Boolean)
@@ -359,7 +363,6 @@ const createMcpServer = (configs = {}) => {
             },
           ).then((res) => res?.data?.collectionByHandle?.products?.edges || []);
 
-
         let rawProducts = [];
         const seenIds = new Set();
         const mergeEdges = (edges) => {
@@ -373,7 +376,9 @@ const createMcpServer = (configs = {}) => {
         };
 
         const needsMetadata =
-          trimmedCollection || categoriesList.length > 0 || productTypesList.length > 0;
+          trimmedCollection ||
+          categoriesList.length > 0 ||
+          productTypesList.length > 0;
         const metadata = needsMetadata
           ? await storeMetadata(
               baseUrl,
