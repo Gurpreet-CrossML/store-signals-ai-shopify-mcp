@@ -255,7 +255,6 @@ const createMcpServer = (configs = {}) => {
 
         const trimmedQuery = query?.trim() || "";
         const trimmedCollection = collection?.trim() || "";
-
         const parseList = (val) => {
           if (Array.isArray(val))
             return val.map((s) => String(s).trim()).filter(Boolean);
@@ -277,7 +276,6 @@ const createMcpServer = (configs = {}) => {
           .filter(Boolean)
           .map((tag) => tag.trim())
           .filter(Boolean);
-
         // Non-narrowing filters that should still apply no matter which
         // priority tier ends up supplying the products.
         const broadClauses = [];
@@ -329,7 +327,6 @@ const createMcpServer = (configs = {}) => {
             ],
           };
         }
-
         const runProductSearchPage = (search, first, after = null) =>
           callShopifyApi(
             baseUrl,
@@ -366,6 +363,7 @@ const createMcpServer = (configs = {}) => {
               },
             },
           ).then((res) => res?.data?.collectionByHandle?.products?.edges || []);
+
 
         let rawProducts = [];
         const seenIds = new Set();
@@ -605,12 +603,6 @@ const createMcpServer = (configs = {}) => {
 
         result.relatedProducts = [...relatedProductIds];
 
-        try {
-          await setCache(cacheKey, result);
-        } catch (e) {
-          console.warn("search cache set failed:", e?.message || e);
-        }
-
         return {
           content: [
             {
@@ -830,6 +822,7 @@ const createMcpServer = (configs = {}) => {
           sort_key || "relevance",
           min_price ?? "any",
           max_price ?? "any",
+          storeCode,
         ].join(":");
 
         const cached = await getCache(cacheKey);
@@ -2366,6 +2359,7 @@ const createMcpServer = (configs = {}) => {
           min_price ?? "any",
           max_price ?? "any",
           query ?? "",
+          storeCode,
         ].join(":");
 
         const cached = await getCache(cacheKey);
