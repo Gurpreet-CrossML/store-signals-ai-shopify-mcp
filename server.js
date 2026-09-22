@@ -38,7 +38,6 @@ const {
   verifyOrderIdentity,
   quoteSearchValue,
   groundTerm,
-  getDynamicCleanSearchTerm,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
@@ -166,20 +165,20 @@ const createMcpServer = (configs = {}) => {
         .optional()
         .describe(
           "Store collection name, e.g. 'Summer Sale', 'New Arrivals'. Matched against the " +
-            "store's real collections (see get_store_meta_info) - pass the customer's own " +
+            "store's real collections - pass the customer's own " +
             "wording even if casing differs.",
         ),
       category: z
-        .union([z.string(), z.array(z.string())])
+        .array(z.string())
         .optional()
         .describe(
-          "Standardized product category/taxonomy name(s) (see get_store_meta_info). Accepts a single category string, comma-separated categories, or an array of category strings for multi-category queries.",
+          "Standardized product category/taxonomy name(s) (see get_store_meta_info). Accepts an array of category strings for multi-category queries.",
         ),
       product_type: z
-        .union([z.string(), z.array(z.string())])
+        .array(z.string())
         .optional()
         .describe(
-          "Product category/type name(s), e.g. ['Perfume', 'Serum']. Accepts a single type string, comma-separated types, or an array of product type strings.",
+          "Product type name(s). Accepts an array of product type strings.",
         ),
       vendor: z
         .string()
@@ -269,34 +268,29 @@ const createMcpServer = (configs = {}) => {
 
         const categoriesList = parseList(category);
         const productTypesList = parseList(product_type);
-        const trimmedCategory =
-          categoriesList[0] ||
-          (typeof category === "string" ? category.trim() : "");
-        const trimmedProductType =
-          productTypesList[0] ||
-          (typeof product_type === "string" ? product_type.trim() : "");
+        const trimmedCategory = categoriesList[0] || "";
+        const trimmedProductType = productTypesList[0] || "";
 
-        const cleanTags = (Array.isArray(tags) ? tags : [])
-          .filter(Boolean)
-          .map((tag) => tag.trim())
-          .filter(Boolean);
+        const cleanTags = Array.isArray(tags) ? tags : [];
         // Non-narrowing filters that should still apply no matter which
         // priority tier ends up supplying the products.
         const broadClauses = [];
-        if (vendor?.trim()) {
-          broadClauses.push(`vendor:${quoteSearchValue(vendor)}`);
-        }
-        if (availability && availability !== "all") {
+
+        if (cleanTags.length > 0) {
           broadClauses.push(
-            `available_for_sale:${availability === "in_stock"}`,
+            cleanTags
+              .map((t) => `tag:'${t.replace(/'/g, "\\'")}'`)
+              .join(" AND "),
           );
         }
-        if (min_price != null && min_price >= 0) {
+        if (min_price !== null)
           broadClauses.push(`variants.price:>=${min_price}`);
-        }
-        if (max_price != null && max_price >= 0) {
+        if (max_price !== null)
           broadClauses.push(`variants.price:<=${max_price}`);
-        }
+        if (vendor)
+          broadClauses.push(`vendor:'${vendor.replace(/'/g, "\\'")}'`);
+        if (availability === "in_stock")
+          broadClauses.push(`available_for_sale:true`);
 
         const collectionFilters = [];
         if (vendor?.trim()) {
@@ -312,25 +306,6 @@ const createMcpServer = (configs = {}) => {
           collectionFilters.push({ price: priceFilter });
         }
 
-        const cacheKey = `product_search:${trimmedCollection}:${categoriesList.join(",")}:${productTypesList.join(",")}:${cleanTags.join(",")}:${trimmedQuery}:${broadClauses.join(" ")}:${sortKey}:${reverse}:${page_size}:${full_details}`;
-
-        const cached = await getCache(cacheKey);
-        if (cached) {
-          logProductViewEvents(
-            widgetKey,
-            cached.products,
-            sessionId,
-            storeCode,
-          );
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(cached, null, 2),
-              },
-            ],
-          };
-        }
         const runProductSearchPage = (search, first, after = null) =>
           callShopifyApi(
             baseUrl,
@@ -479,16 +454,7 @@ const createMcpServer = (configs = {}) => {
           // Tier 5: free-text query fallback
           const fallbackTerm = trimmedQuery || catStr || typeStr;
           if (fallbackTerm && results.length <= 2) {
-            const metadataCandidates = [
-              ...(metadata?.categories || []),
-              ...(metadata?.types || []),
-            ];
-            const cleanSearchTerm = getDynamicCleanSearchTerm(
-              fallbackTerm,
-              metadataCandidates,
-            );
-
-            const querySearch = [cleanSearchTerm, ...broadClauses]
+            const querySearch = [fallbackTerm, ...broadClauses]
               .filter(Boolean)
               .join(" ");
             const edges = await runProductSearchPage(

@@ -588,88 +588,8 @@ const groundTerm = (term, candidates = []) => {
     const norm = normalize(c);
     return norm.includes(target) || target.includes(norm);
   });
-  if (partial) return partial;
 
-  // Tier 3: Dynamic token-specificity match (IDF scoring across store catalog)
-  const tokens = target.split(/\s+/).filter((w) => w.length > 2);
-  if (tokens.length > 0) {
-    const tokenFreq = {};
-    tokens.forEach((t) => {
-      tokenFreq[t] = candidates.filter((c) => normalize(c).includes(t)).length;
-    });
-
-    let bestCandidate = null;
-    let maxScore = 0;
-
-    candidates.forEach((c) => {
-      const normC = normalize(c);
-      let score = 0;
-      tokens.forEach((t) => {
-        if (normC.includes(t)) {
-          const weight = 1 / (tokenFreq[t] || 1);
-          score += weight;
-        }
-      });
-      if (score > maxScore) {
-        maxScore = score;
-        bestCandidate = c;
-      }
-    });
-
-    if (bestCandidate && maxScore > 0) {
-      return bestCandidate;
-    }
-  }
-
-  return null;
-};
-
-// Dynamically extracts specific keywords from multi-word terms using statistical token frequency
-// across store metadata candidates (no hardcoded domain word sets).
-const getDynamicCleanSearchTerm = (term, metadataCandidates = []) => {
-  const str = String(term || "").trim();
-  if (!str) return "";
-
-  const normalize = (s) =>
-    String(s || "")
-      .toLowerCase()
-      .trim()
-      .replace(/(?:es|s)$/, "");
-
-  const words = normalize(str)
-    .split(/\s+/)
-    .filter((w) => w.length > 2);
-
-  if (
-    words.length <= 1 ||
-    !Array.isArray(metadataCandidates) ||
-    metadataCandidates.length === 0
-  ) {
-    return str;
-  }
-
-  const wordFreq = {};
-  words.forEach((w) => {
-    wordFreq[w] = 0;
-    metadataCandidates.forEach((c) => {
-      if (normalize(c).includes(w)) {
-        wordFreq[w]++;
-      }
-    });
-  });
-
-  const freqs = Object.values(wordFreq);
-  const minFreq = Math.min(...freqs);
-  const maxFreq = Math.max(...freqs);
-
-  if (maxFreq >= 3 && maxFreq > minFreq * 2) {
-    const specificWords = words.filter((w) => wordFreq[w] < maxFreq);
-    if (specificWords.length > 0) {
-      return specificWords.join(" ");
-    }
-  }
-
-  return str;
+  return partial || null;
 };
 
 // Utility function to parse space input and convert dimensions to centimeters. This can be used to filter products based on available space by extracting dimensions from product descriptions and converting them to a standard unit for comparison.
@@ -2141,5 +2061,4 @@ module.exports = {
   isConsumableProductType,
   quoteSearchValue,
   groundTerm,
-  getDynamicCleanSearchTerm,
 };
