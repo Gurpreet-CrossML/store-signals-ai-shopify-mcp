@@ -334,6 +334,7 @@ const formatProducts = (
               discount: discount,
 
               available_for_sale: v.availableForSale,
+              quantity_available: v.quantityAvailable,
               options: v.selectedOptions,
             };
           }),
