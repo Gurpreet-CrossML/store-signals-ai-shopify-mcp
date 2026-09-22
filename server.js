@@ -386,12 +386,20 @@ const createMcpServer = (configs = {}) => {
               catStr,
               metadata?.categories || [],
             );
+
             if (matchedCategory) {
-              const categorySearch = broadClauses.join(" ");
-              const needed = targetLimit - results.length;
-              const categoryMatches = [];
+              const searchTerms = [...broadClauses];
+              // Inject ONLY the first significant word of the category to avoid strict AND failures.
+              // e.g. "Highlighters & Luminizers" -> "Highlighters"
+              if (!trimmedQuery) {
+                const firstWord = matchedCategory.split(/[&\s]+/)[0];
+                if (firstWord) searchTerms.unshift(firstWord);
+              }
+              const categorySearch = searchTerms.join(" ");
+              let needed = targetLimit - results.length;
               let after = null;
               let scanned = 0;
+              let categoryMatches = [];
 
               while (
                 categoryMatches.length < needed &&
@@ -419,7 +427,6 @@ const createMcpServer = (configs = {}) => {
                 if (!pageInfo?.hasNextPage || edges.length === 0) break;
                 after = pageInfo.endCursor;
               }
-
               mergeLocal(categoryMatches);
             }
           }
@@ -435,11 +442,30 @@ const createMcpServer = (configs = {}) => {
             ]
               .filter(Boolean)
               .join(" ");
-            const edges = await runProductSearchPage(
-              typeSearch,
-              targetLimit,
-            ).then((p) => p?.edges || []);
-            mergeLocal(edges);
+
+            let needed = targetLimit - results.length;
+            let after = null;
+            let scanned = 0;
+            let typeMatches = [];
+
+            while (
+              typeMatches.length < needed &&
+              scanned < CATEGORY_TIER_SCAN_MAX
+            ) {
+              const products = await runProductSearchPage(
+                typeSearch,
+                250,
+                after,
+              );
+              const edges = products?.edges || [];
+              typeMatches.push(...edges);
+              scanned += edges.length;
+
+              const pageInfo = products?.pageInfo;
+              if (!pageInfo?.hasNextPage || edges.length === 0) break;
+              after = pageInfo.endCursor;
+            }
+            mergeLocal(typeMatches);
           }
 
           // Tier 4: tags
