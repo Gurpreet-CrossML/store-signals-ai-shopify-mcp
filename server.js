@@ -283,14 +283,18 @@ const createMcpServer = (configs = {}) => {
               .join(" AND "),
           );
         }
-        if (min_price !== null)
+        if (min_price != null && min_price >= 0) {
           broadClauses.push(`variants.price:>=${min_price}`);
-        if (max_price !== null)
+        }
+        if (max_price != null && max_price >= 0) {
           broadClauses.push(`variants.price:<=${max_price}`);
-        if (vendor)
+        }
+        if (vendor) {
           broadClauses.push(`vendor:'${vendor.replace(/'/g, "\\'")}'`);
-        if (availability === "in_stock")
+        }
+        if (availability === "in_stock") {
           broadClauses.push(`available_for_sale:true`);
+        }
 
         const collectionFilters = [];
         if (vendor?.trim()) {
