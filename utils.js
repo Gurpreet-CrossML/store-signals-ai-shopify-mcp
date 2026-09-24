@@ -862,7 +862,7 @@ const getReturnStatus = (o) => {
     return { allowed: false, reason: "Order is cancelled" };
   }
 
-  if (!["fulfilled", "delivered"].includes(o.fulfillment_status)) {
+  if (!["delivered"].includes(o.fulfillment_status)) {
     return { allowed: false, reason: "Order not delivered yet" };
   }
 
