@@ -1024,6 +1024,7 @@ const formatOrder = async (o) => {
 
     subtotal: `${getCurrencySymbol(o.presentment_currency)}${o.subtotal_price || 0}`,
     discount: `${getCurrencySymbol(o.presentment_currency)}${o.total_discounts || 0}`,
+    shipping: `${getCurrencySymbol(o.presentment_currency)}${o.total_shipping_price_set?.shop_money?.amount || 0}`,
     total: `${getCurrencySymbol(o.presentment_currency)}${o.total_price || 0}`,
     tax: `${getCurrencySymbol(o.presentment_currency)}${o.total_tax || 0}`,
 
