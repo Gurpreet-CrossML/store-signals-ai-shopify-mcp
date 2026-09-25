@@ -857,19 +857,26 @@ const getCancelStatus = (o) => {
 };
 
 // Utility function to determine return eligibility based on order status and timestamps. It checks if the order is cancelled, if it has been delivered, and if it falls within the return window (e.g., 7 days from delivery) to determine if a return is allowed and provides an appropriate reason if not.
-const getReturnStatus = (o) => {
+// Delivery is not readable from o.fulfillment_status (that field only reports packing/shipping, never "delivered").
+// The caller resolves it from the fulfillments' shipment_status and passes it in, along with the delivery date the window is measured from.
+const getReturnStatus = (o, isDelivered, deliveredAt) => {
   if (o.cancelled_at) {
     return { allowed: false, reason: "Order is cancelled" };
   }
 
-  if (!["delivered"].includes(o.fulfillment_status)) {
+  if (!isDelivered) {
     return { allowed: false, reason: "Order not delivered yet" };
   }
 
-  const createdDate = new Date(o.created_at);
+  // The return window runs from delivery, not from when the order was placed.
+  const deliveredDate = deliveredAt ? new Date(deliveredAt) : null;
+  if (!deliveredDate || Number.isNaN(deliveredDate.getTime())) {
+    return { allowed: true };
+  }
+
   const now = new Date();
 
-  const diffDays = (now - createdDate) / (1000 * 60 * 60 * 24);
+  const diffDays = (now - deliveredDate) / (1000 * 60 * 60 * 24);
 
   if (diffDays > 7) {
     return { allowed: false, reason: "Return window expired (7 days)" };
@@ -946,23 +953,31 @@ const getOrderFulfillmentData = async (order_id) => {
 
 // Utility function to format order details received from Shopify API, including calculating cancel and return eligibility based on order status and timestamps. This can be used to provide customers with clear information about their orders and their options for cancellation or returns.
 const formatOrder = async (o) => {
-  const cancelStatus = getCancelStatus(o);
-  const returnStatus = getReturnStatus(o);
-
   // Extract shipment status from active fulfillments only
   const fulfillments = o.fulfillments || [];
   const activeFulfillments = fulfillments.filter(
     (f) => (f.status || "").toLowerCase() !== "cancelled",
   );
-  const isDelivered = activeFulfillments.some(
+  const deliveredFulfillments = activeFulfillments.filter(
     (f) => (f.shipment_status || "").toLowerCase() === "delivered",
   );
+  const isDelivered = deliveredFulfillments.length > 0;
+
+  // When delivery happened, for the return window. A fulfillment's updated_at moves
+  // to the delivery time when the carrier reports it, so take the earliest of those.
+  const deliveredAt = deliveredFulfillments
+    .map((f) => f.updated_at || f.created_at)
+    .filter(Boolean)
+    .sort()[0];
 
   const shipmentStatus = isDelivered
     ? "delivered"
     : (o.fulfillment_status || "").toLowerCase() === "fulfilled"
       ? "shipped"
       : "not_shipped";
+
+  const cancelStatus = getCancelStatus(o);
+  const returnStatus = getReturnStatus(o, isDelivered, deliveredAt);
 
   // Build a lookup: line_item_id (numeric) -> { fulfillment_line_item_id, fulfillment_id, fulfillment_created_at }
   const fulfillmentLineItemMap = {};
