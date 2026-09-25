@@ -463,9 +463,9 @@ const storeMetadata = async (
       );
     }
 
-    let min_price = 0;
-    let max_price = 1000;
-    let currency = "USD";
+    let min_price = null;
+    let max_price = null;
+    let currency = null;
     try {
       const priceResult = await callShopifyApi(
         base_url,
@@ -480,26 +480,28 @@ const storeMetadata = async (
         const maxEdge = priceResult.data.maxProduct?.edges?.[0];
         if (minEdge) {
           min_price =
-            parseFloat(minEdge.node.priceRange.minVariantPrice.amount) || 0;
+            parseFloat(minEdge.node.priceRange.minVariantPrice.amount) || null;
           currency =
-            minEdge.node.priceRange.minVariantPrice.currencyCode || "USD";
+            minEdge.node.priceRange.minVariantPrice.currencyCode || null;
         }
         if (maxEdge) {
           max_price =
-            parseFloat(maxEdge.node.priceRange.maxVariantPrice.amount) || 1000;
+            parseFloat(maxEdge.node.priceRange.maxVariantPrice.amount) || null;
         }
 
         // Dynamically convert ISO currency codes to symbols using Intl API
         try {
-          const formatter = new Intl.NumberFormat("en", {
-            style: "currency",
-            currency: currency,
-            currencyDisplay: "narrowSymbol",
-          });
-          const parts = formatter.formatToParts(0);
-          const symbolPart = parts.find((p) => p.type === "currency");
-          if (symbolPart && symbolPart.value) {
-            currency = symbolPart.value;
+          if (currency) {
+            const formatter = new Intl.NumberFormat("en", {
+              style: "currency",
+              currency: currency,
+              currencyDisplay: "narrowSymbol",
+            });
+            const parts = formatter.formatToParts(0);
+            const symbolPart = parts.find((p) => p.type === "currency");
+            if (symbolPart && symbolPart.value) {
+              currency = symbolPart.value;
+            }
           }
         } catch {
           // Fallback to the code if Intl fails for any reason
@@ -514,7 +516,7 @@ const storeMetadata = async (
 
     // Generate dynamic, smart clustered price buckets
     const price_ranges = [];
-    if (max_price > min_price) {
+    if (min_price !== null && max_price !== null && max_price > min_price) {
       const range = max_price - min_price;
 
       // Calculate dynamic breakpoints clustering at the lower end (8%, 20%, 40%)
@@ -1409,7 +1411,7 @@ class ShopifyExchangeManager {
         returnProcess(input: $input) {
           return { id status }
           userErrors { field message }
-        } 
+        }
       }
     `;
     console.log("[processReturn] Processing return ID:", returnId);
