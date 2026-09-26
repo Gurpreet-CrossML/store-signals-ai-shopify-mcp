@@ -7,6 +7,7 @@ const {
   relatedProductsQuery,
   productSearchByQuery,
   getReturnableFulfillmentsQuery,
+  minMaxPriceQuery,
 } = require("./graphql_queries");
 const { getCache, setCache } = require("./cache");
 
@@ -463,11 +464,105 @@ const storeMetadata = async (
       );
     }
 
+    let min_price = null;
+    let max_price = null;
+    let currency = null;
+    try {
+      const priceResult = await callShopifyApi(
+        base_url,
+        storefront_token,
+        admin_token,
+        "POST",
+        "",
+        { query: minMaxPriceQuery },
+      );
+      if (!priceResult.errors && priceResult.data) {
+        const minEdge = priceResult.data.minProduct?.edges?.[0];
+        const maxEdge = priceResult.data.maxProduct?.edges?.[0];
+        if (minEdge) {
+          min_price =
+            parseFloat(minEdge.node.priceRange.minVariantPrice.amount) || null;
+          currency =
+            minEdge.node.priceRange.minVariantPrice.currencyCode || null;
+        }
+        if (maxEdge) {
+          max_price =
+            parseFloat(maxEdge.node.priceRange.maxVariantPrice.amount) || null;
+        }
+
+        // Dynamically convert ISO currency codes to symbols using Intl API
+        try {
+          if (currency) {
+            const formatter = new Intl.NumberFormat("en", {
+              style: "currency",
+              currency: currency,
+              currencyDisplay: "narrowSymbol",
+            });
+            const parts = formatter.formatToParts(0);
+            const symbolPart = parts.find((p) => p.type === "currency");
+            if (symbolPart && symbolPart.value) {
+              currency = symbolPart.value;
+            }
+          }
+        } catch {
+          // Fallback to the code if Intl fails for any reason
+        }
+      }
+    } catch (priceError) {
+      console.warn(
+        "storeMetadata price scan failed:",
+        priceError?.message || priceError,
+      );
+    }
+
+    // Generate dynamic, smart clustered price buckets
+    const price_ranges = [];
+    if (min_price !== null && max_price !== null && max_price > min_price) {
+      const range = max_price - min_price;
+
+      // Calculate dynamic breakpoints clustering at the lower end (8%, 20%, 40%)
+      // This solves the issue of the massive outlier while remaining 100% dynamic
+      let bp1 = min_price + range * 0.08;
+      let bp2 = min_price + range * 0.2;
+      let bp3 = min_price + range * 0.4;
+
+      // Helper to round to nearest nice human number
+      const roundNice = (val) => {
+        if (val < 10) return Math.ceil(val);
+        if (val < 100) return Math.round(val / 5) * 5;
+        if (val < 1000) return Math.round(val / 50) * 50;
+        if (val < 10000) return Math.round(val / 500) * 500;
+        return Math.round(val / 1000) * 1000;
+      };
+
+      bp1 = roundNice(bp1);
+      bp2 = roundNice(bp2);
+      bp3 = roundNice(bp3);
+
+      // Ensure strictly increasing
+      if (bp1 <= min_price) bp1 = Math.ceil(min_price) + 1;
+      if (bp2 <= bp1) bp2 = bp1 + 10;
+      if (bp3 <= bp2) bp3 = bp2 + 10;
+
+      price_ranges.push(`Under ${currency} ${bp1}`);
+      price_ranges.push(`${currency} ${bp1} - ${currency} ${bp2}`);
+      price_ranges.push(`${currency} ${bp2} - ${currency} ${bp3}`);
+      price_ranges.push(
+        `${currency} ${bp3} - ${currency} ${Math.round(max_price)}`,
+      );
+    } else {
+      price_ranges.push(`Any Price`);
+    }
+
     const metadata = {
       types,
       collections,
       categories,
       collectionHandles,
+      min_price,
+      max_price,
+      currency,
+      price_ranges,
     };
 
     try {
@@ -575,14 +670,16 @@ const groundTerm = (term, candidates = []) => {
     String(s || "")
       .toLowerCase()
       .trim()
-      .replace(/s$/, "");
+      .replace(/(?:es|s)$/, "");
 
   const target = normalize(term);
   if (!target) return null;
 
+  // Tier 1: Exact match
   const exact = candidates.find((c) => normalize(c) === target);
   if (exact) return exact;
 
+  // Tier 2: Substring containment match
   const partial = candidates.find((c) => {
     const norm = normalize(c);
     return norm.includes(target) || target.includes(norm);
@@ -1331,7 +1428,7 @@ class ShopifyExchangeManager {
         returnProcess(input: $input) {
           return { id status }
           userErrors { field message }
-        } 
+        }
       }
     `;
     console.log("[processReturn] Processing return ID:", returnId);

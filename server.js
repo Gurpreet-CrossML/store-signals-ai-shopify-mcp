@@ -149,8 +149,10 @@ const createMcpServer = (configs = {}) => {
     {
       query: z
         .string()
+        .optional()
+        .default("")
         .describe(
-          "Free-text search keywords (product name, description terms, or descriptive attributes not covered by product_type/tags - e.g. 'vitamin c', 'oily skin', 'wireless').",
+          "Free-text search keywords (product name, description terms, or descriptive attributes not covered by product_type/tags - e.g. 'vitamin c', 'oily skin', 'wireless'). Defaults to empty string when searching by structured filters alone.",
         ),
       full_details: z
         .boolean()
@@ -163,24 +165,20 @@ const createMcpServer = (configs = {}) => {
         .optional()
         .describe(
           "Store collection name, e.g. 'Summer Sale', 'New Arrivals'. Matched against the " +
-            "store's real collections (see get_store_meta_info) - pass the customer's own " +
+            "store's real collections - pass the customer's own " +
             "wording even if casing differs.",
         ),
       category: z
-        .string()
+        .array(z.string())
         .optional()
         .describe(
-          "Standardized product category/taxonomy name (see get_store_meta_info). Matched " +
-            "against the store's real categories - pass the customer's own wording even if " +
-            "casing or plurality differs.",
+          "Standardized product category/taxonomy name(s) (see get_store_meta_info). Accepts an array of category strings for multi-category queries.",
         ),
       product_type: z
-        .string()
+        .array(z.string())
         .optional()
         .describe(
-          "Product category/type, e.g. 'Perfume', 'Sunscreen', 'Serum'. Matched against the " +
-            "store's real product types/collections (see get_store_meta_info) - pass the " +
-            "customer's category word even if casing or plurality differs.",
+          "Product type name(s). Accepts an array of product type strings.",
         ),
       vendor: z
         .string()
@@ -234,7 +232,7 @@ const createMcpServer = (configs = {}) => {
         ),
     },
     async ({
-      query,
+      query = "",
       full_details = false,
       page_size = 15,
       collection = null,
@@ -256,22 +254,33 @@ const createMcpServer = (configs = {}) => {
 
         const trimmedQuery = query?.trim() || "";
         const trimmedCollection = collection?.trim() || "";
-        const trimmedCategory = category?.trim() || "";
-        const trimmedProductType = product_type?.trim() || "";
-        const cleanTags = (Array.isArray(tags) ? tags : [])
-          .filter(Boolean)
-          .map((tag) => tag.trim())
-          .filter(Boolean);
+        const parseList = (val) => {
+          if (Array.isArray(val))
+            return val.map((s) => String(s).trim()).filter(Boolean);
+          if (typeof val === "string" && val.trim()) {
+            return val
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
+          }
+          return [];
+        };
 
+        const categoriesList = parseList(category);
+        const productTypesList = parseList(product_type);
+        const trimmedCategory = categoriesList[0] || "";
+        const trimmedProductType = productTypesList[0] || "";
+
+        const cleanTags = Array.isArray(tags) ? tags : [];
         // Non-narrowing filters that should still apply no matter which
         // priority tier ends up supplying the products.
         const broadClauses = [];
-        if (vendor?.trim()) {
-          broadClauses.push(`vendor:${quoteSearchValue(vendor)}`);
-        }
-        if (availability && availability !== "all") {
+
+        if (cleanTags.length > 0) {
           broadClauses.push(
-            `available_for_sale:${availability === "in_stock"}`,
+            cleanTags
+              .map((t) => `tag:'${t.replace(/'/g, "\\'")}'`)
+              .join(" AND "),
           );
         }
         if (min_price != null && min_price >= 0) {
@@ -279,6 +288,12 @@ const createMcpServer = (configs = {}) => {
         }
         if (max_price != null && max_price >= 0) {
           broadClauses.push(`variants.price:<=${max_price}`);
+        }
+        if (vendor) {
+          broadClauses.push(`vendor:'${vendor.replace(/'/g, "\\'")}'`);
+        }
+        if (availability === "in_stock") {
+          broadClauses.push(`available_for_sale:true`);
         }
 
         const collectionFilters = [];
@@ -308,11 +323,6 @@ const createMcpServer = (configs = {}) => {
             },
           ).then((res) => res?.data?.products || {});
 
-        const runProductSearch = (search, first = page_size) =>
-          runProductSearchPage(search, first).then(
-            (products) => products?.edges || [],
-          );
-
         const runCollectionSearch = async (handle) =>
           callShopifyApi(
             baseUrl,
@@ -332,11 +342,6 @@ const createMcpServer = (configs = {}) => {
             },
           ).then((res) => res?.data?.collectionByHandle?.products?.edges || []);
 
-        // Structured filters are tried in priority order - collection >
-        // category > product_type > tags > free-text query - stopping as
-        // soon as the accumulated result set has more than 2 products, so
-        // the customer always sees some relevant products instead of a
-        // near-empty result from an overly narrow filter.
         let rawProducts = [];
         const seenIds = new Set();
         const mergeEdges = (edges) => {
@@ -350,7 +355,9 @@ const createMcpServer = (configs = {}) => {
         };
 
         const needsMetadata =
-          trimmedCollection || trimmedCategory || trimmedProductType;
+          trimmedCollection ||
+          categoriesList.length > 0 ||
+          productTypesList.length > 0;
         const metadata = needsMetadata
           ? await storeMetadata(
               baseUrl,
@@ -360,98 +367,177 @@ const createMcpServer = (configs = {}) => {
             )
           : null;
 
-        // Tier 1: collection
-        if (trimmedCollection && rawProducts.length <= 2) {
-          const matchedTitle = groundTerm(
-            trimmedCollection,
-            metadata?.collections || [],
-          );
-          const handle = matchedTitle
-            ? metadata?.collectionHandles?.[matchedTitle]
-            : null;
-          if (handle) {
-            mergeEdges(await runCollectionSearch(handle));
-          }
-        }
+        const executeSingleSearch = async (catStr, typeStr, targetLimit) => {
+          let results = [];
+          const localSeen = new Set();
+          const mergeLocal = (edges) => {
+            for (const edge of edges) {
+              if (results.length >= targetLimit) break;
+              const id = edge?.node?.id;
+              if (!id || localSeen.has(id)) continue;
+              localSeen.add(id);
+              results.push(edge);
+            }
+          };
 
-        // Tier 2: category. No server-side category filter exists on the
-        // top-level products search, so this paginates through the catalog
-        // (250 per page) filtering client-side against the grounded category
-        // name, stopping once enough matches are collected - rather than
-        // sampling a single bounded batch, which can silently miss matches
-        // that don't happen to fall in the first page.
-        if (trimmedCategory && rawProducts.length <= 2) {
-          const matchedCategory = groundTerm(
-            trimmedCategory,
-            metadata?.categories || [],
-          );
-          if (matchedCategory) {
-            const categorySearch = broadClauses.join(" ");
-            const needed = page_size - rawProducts.length;
-            const categoryMatches = [];
+          // Tier 2: Category
+          if (catStr && results.length <= 2) {
+            const matchedCategory = groundTerm(
+              catStr,
+              metadata?.categories || [],
+            );
+
+            if (matchedCategory) {
+              const searchTerms = [...broadClauses];
+              // Inject ONLY the first significant word of the category to avoid strict AND failures.
+              // e.g. "Highlighters & Luminizers" -> "Highlighters"
+              if (!trimmedQuery) {
+                const firstWord = matchedCategory.split(/[&\s]+/)[0];
+                if (firstWord) searchTerms.unshift(firstWord);
+              }
+              const categorySearch = searchTerms.join(" ");
+              let needed = targetLimit - results.length;
+              let after = null;
+              let scanned = 0;
+              let categoryMatches = [];
+
+              while (
+                categoryMatches.length < needed &&
+                scanned < CATEGORY_TIER_SCAN_MAX
+              ) {
+                const products = await runProductSearchPage(
+                  categorySearch,
+                  250,
+                  after,
+                );
+                const edges = products?.edges || [];
+
+                edges.forEach((edge) => {
+                  if (
+                    edge?.node?.category?.name?.toLowerCase() ===
+                    matchedCategory.toLowerCase()
+                  ) {
+                    categoryMatches.push(edge);
+                  }
+                });
+
+                scanned += edges.length;
+
+                const pageInfo = products?.pageInfo;
+                if (!pageInfo?.hasNextPage || edges.length === 0) break;
+                after = pageInfo.endCursor;
+              }
+              mergeLocal(categoryMatches);
+            }
+          }
+
+          // Tier 3: product_type
+          const targetType = typeStr || (results.length <= 2 ? catStr : "");
+          if (targetType && results.length <= 2) {
+            const matchedType =
+              groundTerm(targetType, metadata?.types || []) || targetType;
+            const typeSearch = [
+              `product_type:${quoteSearchValue(matchedType)}`,
+              ...broadClauses,
+            ]
+              .filter(Boolean)
+              .join(" ");
+
+            let needed = targetLimit - results.length;
             let after = null;
             let scanned = 0;
+            let typeMatches = [];
 
             while (
-              categoryMatches.length < needed &&
+              typeMatches.length < needed &&
               scanned < CATEGORY_TIER_SCAN_MAX
             ) {
               const products = await runProductSearchPage(
-                categorySearch,
+                typeSearch,
                 250,
                 after,
               );
               const edges = products?.edges || [];
-
-              edges.forEach((edge) => {
-                if (
-                  edge?.node?.category?.name?.toLowerCase() ===
-                  matchedCategory.toLowerCase()
-                ) {
-                  categoryMatches.push(edge);
-                }
-              });
-
+              typeMatches.push(...edges);
               scanned += edges.length;
 
               const pageInfo = products?.pageInfo;
               if (!pageInfo?.hasNextPage || edges.length === 0) break;
               after = pageInfo.endCursor;
             }
-
-            mergeEdges(categoryMatches);
+            mergeLocal(typeMatches);
           }
-        }
 
-        // Tier 3: product_type
-        if (trimmedProductType && rawProducts.length <= 2) {
-          const matchedType =
-            groundTerm(trimmedProductType, metadata?.types || []) ||
-            trimmedProductType;
-          const typeSearch = [
-            `product_type:${quoteSearchValue(matchedType)}`,
-            ...broadClauses,
-          ]
-            .filter(Boolean)
-            .join(" ");
-          mergeEdges(await runProductSearch(typeSearch));
-        }
+          // Tier 4: tags
+          if (cleanTags.length > 0 && results.length <= 2) {
+            const tagClauses = cleanTags.map(
+              (tag) => `tag:${quoteSearchValue(tag)}`,
+            );
+            const tagSearch = [...tagClauses, ...broadClauses].join(" ");
+            const edges = await runProductSearchPage(
+              tagSearch,
+              targetLimit,
+            ).then((p) => p?.edges || []);
+            mergeLocal(edges);
+          }
 
-        // Tier 4: tags
-        if (cleanTags.length > 0 && rawProducts.length <= 2) {
-          const tagClauses = cleanTags.map(
-            (tag) => `tag:${quoteSearchValue(tag)}`,
+          // Tier 5: free-text query fallback
+          const fallbackTerm = trimmedQuery || catStr || typeStr;
+          if (fallbackTerm && results.length <= 2) {
+            const querySearch = [fallbackTerm, ...broadClauses]
+              .filter(Boolean)
+              .join(" ");
+            const edges = await runProductSearchPage(
+              querySearch,
+              targetLimit,
+            ).then((p) => p?.edges || []);
+            mergeLocal(edges);
+          }
+
+          return results;
+        };
+
+        if (categoriesList.length > 1) {
+          const quota = Math.max(
+            2,
+            Math.floor(page_size / categoriesList.length),
           );
-          const tagSearch = [...tagClauses, ...broadClauses].join(" ");
-          mergeEdges(await runProductSearch(tagSearch));
-        }
+          for (const catItem of categoriesList) {
+            const catEdges = await executeSingleSearch(catItem, null, quota);
+            mergeEdges(catEdges);
+          }
+        } else if (productTypesList.length > 1) {
+          const quota = Math.max(
+            2,
+            Math.floor(page_size / productTypesList.length),
+          );
+          for (const typeItem of productTypesList) {
+            const typeEdges = await executeSingleSearch(null, typeItem, quota);
+            mergeEdges(typeEdges);
+          }
+        } else {
+          // Tier 1: collection
+          if (trimmedCollection && rawProducts.length <= 2) {
+            const matchedTitle = groundTerm(
+              trimmedCollection,
+              metadata?.collections || [],
+            );
+            const handle = matchedTitle
+              ? metadata?.collectionHandles?.[matchedTitle]
+              : null;
+            if (handle) {
+              mergeEdges(await runCollectionSearch(handle));
+            }
+          }
 
-        // Tier 5: free-text query fallback
-        if (trimmedQuery && rawProducts.length <= 2) {
-          const querySearch = [trimmedQuery, ...broadClauses]
-            .filter(Boolean)
-            .join(" ");
-          mergeEdges(await runProductSearch(querySearch));
+          const singleCat = categoriesList[0] || trimmedCategory;
+          const singleType = productTypesList[0] || trimmedProductType;
+          const edges = await executeSingleSearch(
+            singleCat,
+            singleType,
+            page_size,
+          );
+          mergeEdges(edges);
         }
 
         if (!rawProducts || !rawProducts.length) {

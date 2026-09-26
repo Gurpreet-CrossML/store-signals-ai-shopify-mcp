@@ -502,6 +502,15 @@ const refundQuery = `
   }
 `;
 
+const minMaxPriceQuery = `query {
+  minProduct: products(first: 1, sortKey: PRICE, reverse: false) {
+    edges { node { priceRange { minVariantPrice { amount currencyCode } } } }
+  }
+  maxProduct: products(first: 1, sortKey: PRICE, reverse: true) {
+    edges { node { priceRange { maxVariantPrice { amount currencyCode } } } }
+  }
+}`;
+
 // Export the GraphQL query for use in other modules
 module.exports = {
   productSearchByQuery,
@@ -514,4 +523,5 @@ module.exports = {
   discountQuery,
   refundQuery,
   getReturnableFulfillmentsQuery,
+  minMaxPriceQuery,
 };
