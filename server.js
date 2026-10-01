@@ -12,12 +12,18 @@ const {
   productSortQuery,
   discountQuery,
   refundQuery,
+  cartQuery,
+  cartCreateMutation,
+  cartLinesAddMutation,
+  cartLinesUpdateMutation,
+  cartLinesRemoveMutation,
 } = require("./graphql_queries");
 const {
   MCP_NAME,
   MCP_VERSION,
   callShopifyApi,
   callBackendAPI,
+  getCurrencySymbol,
   formatProducts,
   fetchRelatedProducts,
   getProductSortConfig,
@@ -2417,6 +2423,312 @@ const createMcpServer = (configs = {}) => {
             {
               type: "text",
               text: `Error fetching latest order: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ######### 19. Get Cart Details #########
+  server.tool(
+    "get_cart_details",
+    `Retrieve cart details using a Shopify Storefront Cart ID.
+
+    This tool returns cart items, pricing summary, and checkout URL.
+    It must only be used when a Cart ID already exists in context.
+
+    Parameters:
+    @param {string} cart_id - Shopify Storefront Cart ID (gid://shopify/Cart/...)
+    `,
+    {
+      cart_id: z
+        .string()
+        .startsWith("gid://shopify/Cart/")
+        .describe("Shopify Storefront Cart ID"),
+    },
+    async ({ cart_id }) => {
+      try {
+        const response = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "POST",
+          "",
+          { query: cartQuery, variables: { cartId: cart_id } },
+        );
+
+        const cart = response?.data?.cart;
+
+        callBackendAPI(widgetKey, "POST", "/chat/bot-events/", {
+          thread_id: sessionId,
+          event_type: "checkout_link",
+          store_code: storeCode,
+        });
+
+        if (!cart) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Unable to retrieve cart details at the moment.",
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const items = cart.lines.edges.map(({ node }) => ({
+          lineId: node.id,
+          productName: node.merchandise.product.title,
+          variantTitle: node.merchandise.title,
+          quantity: node.quantity,
+          price: `${getCurrencySymbol(node.merchandise.price?.currencyCode)}${node.merchandise.price?.amount || 0}`,
+          currency: node.merchandise.price.currencyCode,
+          inStock: node.merchandise.availableForSale,
+        }));
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  cartID: cart.id,
+                  items,
+                  subtotal: `${getCurrencySymbol(cart.cost.subtotalAmount?.currencyCode)}${cart.cost.subtotalAmount?.amount || 0}`,
+                  tax: `${getCurrencySymbol(cart.cost.totalTaxAmount?.currencyCode)}${cart.cost.totalTaxAmount?.amount || 0}`,
+                  total: `${getCurrencySymbol(cart.cost.totalAmount?.currencyCode)}${cart.cost.totalAmount?.amount || 0}`,
+                  checkoutUrl: cart.checkoutUrl,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        console.error("Get cart details error:", error);
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Something went wrong while fetching your cart.",
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ######### 20. Add to Cart #########
+  server.tool(
+    "add_to_cart",
+    `Add a product variant to cart.
+    If cart_id is not provided, a new cart will be created first.
+
+    Parameters:
+    @param {string} variant_id: Shopify ProductVariant ID
+    @param {number} quantity: Quantity to add
+    @param {string} [cart_id]: Existing cart ID (optional)
+    `,
+    {
+      variant_id: z
+        .string()
+        .describe(
+          "Shopify ProductVariant ID (gid://shopify/ProductVariant/...)",
+        ),
+      quantity: z.number().min(1).describe("Quantity to add"),
+      cart_id: z.string().optional().describe("Existing cart ID (optional)"),
+    },
+    async ({ variant_id, quantity, cart_id }) => {
+      try {
+        let cartId = cart_id;
+
+        // Create a cart if one doesn't exist yet
+        if (!cartId) {
+          const createCartResponse = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "POST",
+            "",
+            { query: cartCreateMutation },
+          );
+
+          cartId = createCartResponse?.data?.cartCreate?.cart?.id;
+
+          if (!cartId) {
+            return {
+              content: [{ type: "text", text: "Failed to create cart" }],
+              isError: true,
+            };
+          }
+        }
+
+        const addResponse = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "POST",
+          "",
+          {
+            query: cartLinesAddMutation,
+            variables: {
+              cartId,
+              lines: [{ merchandiseId: variant_id, quantity }],
+            },
+          },
+        );
+
+        const cart = addResponse?.data?.cartLinesAdd?.cart;
+        const errors = addResponse?.data?.cartLinesAdd?.userErrors || [];
+
+        if (!cart) {
+          return {
+            content: [{ type: "text", text: "Failed to add item to cart" }],
+            isError: true,
+          };
+        }
+
+        const formattedCart = {
+          cart_id: cart.id,
+          checkout_url: cart.checkoutUrl,
+          items: cart.lines.edges.map(({ node }) => ({
+            cart_line_id: node.id,
+            variant_id: node.merchandise.id,
+            title: node.merchandise.title,
+            quantity: node.quantity,
+            price: `${getCurrencySymbol(node?.merchandise?.price?.currencyCode)}${node?.merchandise?.price?.amount || 0}`,
+          })),
+        };
+
+        callBackendAPI(widgetKey, "POST", "/chat/bot-events/", {
+          thread_id: sessionId,
+          event_type: "add_to_cart",
+          store_code: storeCode,
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                { cart: formattedCart, userErrors: errors },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            { type: "text", text: `Error adding to cart: ${error.message}` },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ######### 21. Update Cart Item #########
+  server.tool(
+    "update_cart_item",
+    `Update quantity of a cart line item.
+
+    Parameters:
+    @param {string} cart_id: Shopify Cart ID
+    @param {string} cart_line_id: CartLine ID
+    @param {number} quantity: New quantity
+    `,
+    {
+      cart_id: z.string().describe("Shopify Cart ID"),
+      cart_line_id: z.string().describe("CartLine ID"),
+      quantity: z.number().min(1).describe("New quantity"),
+    },
+    async ({ cart_id, cart_line_id, quantity }) => {
+      try {
+        const response = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "POST",
+          "",
+          {
+            query: cartLinesUpdateMutation,
+            variables: {
+              cartId: cart_id,
+              lines: [{ id: cart_line_id, quantity }],
+            },
+          },
+        );
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(response.data.cartLinesUpdate, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error updating cart item: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ######### 22. Remove from Cart #########
+  server.tool(
+    "remove_from_cart",
+    `Remove an item from cart.
+
+    Parameters:
+    @param {string} cart_id: Shopify Cart ID
+    @param {string} cart_line_id: CartLine ID to remove
+    `,
+    {
+      cart_id: z.string().describe("Shopify Cart ID"),
+      cart_line_id: z.string().describe("CartLine ID"),
+    },
+    async ({ cart_id, cart_line_id }) => {
+      try {
+        const response = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "POST",
+          "",
+          {
+            query: cartLinesRemoveMutation,
+            variables: { cartId: cart_id, lineIds: [cart_line_id] },
+          },
+        );
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(response.data.cartLinesRemove, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error removing cart item: ${error.message}`,
             },
           ],
           isError: true,

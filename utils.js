@@ -2074,6 +2074,7 @@ module.exports = {
   getExchangePolicyEligibility,
   verifyOrderIdentity,
   isConsumableProductType,
+  getCurrencySymbol,
   quoteSearchValue,
   groundTerm,
 };
