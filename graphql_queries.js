@@ -223,6 +223,27 @@ const productByIdQuery = `query getProductById($id: ID!) {
     }
 }`;
 
+// GraphQL query for live stock: products and/or variants by GID in one call.
+// Never cached - cart actions use it to check stock at the moment of adding.
+const liveStockQuery = `query liveStock($ids: [ID!]!) {
+    nodes(ids: $ids) {
+        __typename
+        ... on Product {
+            id title availableForSale
+            variants(first: 250) { nodes { ...LiveVariant } }
+        }
+        ... on ProductVariant {
+            ...LiveVariant
+            product { id title availableForSale }
+        }
+    }
+}
+fragment LiveVariant on ProductVariant {
+    id title availableForSale quantityAvailable currentlyNotInStock
+    price { amount currencyCode }
+    selectedOptions { name value }
+}`;
+
 // GraphQL query to fetch products sorted by specified Shopify sort options, such as relevance, price ascending/descending, newest, or best selling.
 const productSortQuery = `query getProducts(
   $search: String
@@ -510,6 +531,7 @@ module.exports = {
   productCategoriesQuery,
   relatedProductsQuery,
   productByIdQuery,
+  liveStockQuery,
   productSortQuery,
   discountQuery,
   refundQuery,

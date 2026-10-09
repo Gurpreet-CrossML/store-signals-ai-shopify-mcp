@@ -9,6 +9,7 @@ const {
   productSearchByQuery,
   collectionProductsQuery,
   productByIdQuery,
+  liveStockQuery,
   productSortQuery,
   discountQuery,
   refundQuery,
@@ -673,6 +674,135 @@ const createMcpServer = (configs = {}) => {
             {
               type: "text",
               text: `Error fetching products by ID: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ######### 2b. Live Stock (never cached) #########
+  server.tool(
+    "get_live_stock",
+    `Fetch live stock and variants for products and/or variants by ID.
+
+    Never cached and logs no product views: use it right before adding to or
+    changing the cart, so a sold-out variant is never added.
+
+    Returns { products: [{ product_id, title, available_for_sale, variants:
+    [{ variant_id, title, options, price, available_for_sale,
+    quantity_available, backorder }] }], not_found: [ids] }.
+    A product id returns all its variants; a variant id returns that variant
+    under its product. quantity_available is a cap only when backorder is
+    false (backorder = the store keeps selling when out of stock).
+
+    Parameters:
+    @param {string[]} product_ids  Numeric or GID product IDs
+    @param {string[]} variant_ids  Numeric or GID variant IDs
+    `,
+    {
+      product_ids: z
+        .array(z.string())
+        .max(50)
+        .default([])
+        .describe("Product IDs, numeric ('123') or GID."),
+      variant_ids: z
+        .array(z.string())
+        .max(50)
+        .default([])
+        .describe("Variant IDs, numeric ('456') or GID."),
+    },
+    async ({ product_ids, variant_ids }) => {
+      try {
+        const toGid = (kind, id) =>
+          String(id).startsWith("gid://")
+            ? String(id)
+            : `gid://shopify/${kind}/${id}`;
+        const gids = [
+          ...new Set([
+            ...product_ids.map((id) => toGid("Product", id)),
+            ...variant_ids.map((id) => toGid("ProductVariant", id)),
+          ]),
+        ];
+        if (gids.length === 0) {
+          return {
+            content: [
+              { type: "text", text: "No product or variant IDs given." },
+            ],
+            isError: true,
+          };
+        }
+
+        const res = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "POST",
+          "",
+          { query: liveStockQuery, variables: { ids: gids } },
+        );
+        if (!res?.data?.nodes) {
+          throw new Error(JSON.stringify(res?.errors || "no data"));
+        }
+
+        const numericId = (gid) => String(gid).split("/").pop();
+        const variant = (v) => ({
+          variant_id: numericId(v.id),
+          title: v.title,
+          options: (v.selectedOptions || []).map((o) => ({
+            name: o.name,
+            value: o.value,
+          })),
+          price: v.price?.amount ?? null,
+          currency: v.price?.currencyCode ?? null,
+          available_for_sale: Boolean(v.availableForSale),
+          quantity_available: v.quantityAvailable ?? null,
+          backorder: Boolean(v.currentlyNotInStock),
+        });
+
+        const byProduct = new Map();
+        const notFound = [];
+        res.data.nodes.forEach((node, i) => {
+          if (!node) {
+            notFound.push(numericId(gids[i]));
+            return;
+          }
+          const product =
+            node.__typename === "Product" ? node : node.product || {};
+          const variants =
+            node.__typename === "Product" ? node.variants?.nodes || [] : [node];
+          const entry = byProduct.get(product.id) || {
+            product_id: numericId(product.id),
+            title: product.title,
+            available_for_sale: Boolean(product.availableForSale),
+            variants: [],
+          };
+          for (const v of variants) {
+            if (!entry.variants.some((e) => e.variant_id === numericId(v.id))) {
+              entry.variants.push(variant(v));
+            }
+          }
+          byProduct.set(product.id, entry);
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                products: [...byProduct.values()],
+                not_found: notFound,
+              }),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error fetching live stock: ${error.message}`,
             },
           ],
           isError: true,
