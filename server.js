@@ -734,14 +734,26 @@ const createMcpServer = (configs = {}) => {
           };
         }
 
-        const res = await callShopifyApi(
-          baseUrl,
-          storefrontAccessToken,
-          adminAccessToken,
-          "POST",
-          "",
-          { query: liveStockQuery, variables: { ids: gids } },
-        );
+        // Retry only network failures (no HTTP response): a dropped
+        // connection must not block an add-to-cart. Shopify's own errors
+        // are not retried.
+        let res;
+        for (let attempt = 1; ; attempt++) {
+          try {
+            res = await callShopifyApi(
+              baseUrl,
+              storefrontAccessToken,
+              adminAccessToken,
+              "POST",
+              "",
+              { query: liveStockQuery, variables: { ids: gids } },
+            );
+            break;
+          } catch (err) {
+            if (err?.response || attempt >= 3) throw err;
+            await new Promise((r) => setTimeout(r, 200 * attempt));
+          }
+        }
         if (!res?.data?.nodes) {
           throw new Error(JSON.stringify(res?.errors || "no data"));
         }
