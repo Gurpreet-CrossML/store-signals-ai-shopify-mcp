@@ -528,15 +528,17 @@ const refundQuery = `
 // Full terms of every discount type, so the backend can tell which offers
 // a customer may see and how much they need to spend. Never cached.
 // Needs Admin API 2026-04+ (discount tags); utils.SHOPIFY_API_VERSION.
+// Nested lists are kept short: Shopify reserves query cost up front, and
+// a costly query gets THROTTLED when several customers ask at once.
 const offerSharedFragments = `
 fragment OfferItems on DiscountItems {
   __typename
   ... on AllDiscountItems { allItems }
   ... on DiscountProducts {
-    products(first: 50) { nodes { id title } }
-    productVariants(first: 50) { nodes { id } }
+    products(first: 5) { nodes { id title } }
+    productVariants(first: 5) { nodes { id } }
   }
-  ... on DiscountCollections { collections(first: 20) { nodes { id title } } }
+  ... on DiscountCollections { collections(first: 10) { nodes { id title } } }
 }
 fragment OfferValue on DiscountCustomerGetsValue {
   __typename
@@ -570,7 +572,7 @@ fragment CodeBasic on DiscountCodeBasic {
   title status startsAt endsAt summary tags
   context { __typename }
   combinesWith { ...OfferCombines }
-  codes(first: 5) { nodes { code } } codesCount { count }
+  codes(first: 2) { nodes { code } } codesCount { count }
   usageLimit appliesOncePerCustomer asyncUsageCount
   minimumRequirement { ...OfferMinimum }
   customerGets {
@@ -582,7 +584,7 @@ fragment CodeBxgy on DiscountCodeBxgy {
   title status startsAt endsAt summary tags
   context { __typename }
   combinesWith { ...OfferCombines }
-  codes(first: 5) { nodes { code } } codesCount { count }
+  codes(first: 2) { nodes { code } } codesCount { count }
   usageLimit appliesOncePerCustomer asyncUsageCount usesPerOrderLimit
   customerBuys { value { ...OfferBuysValue } items { ...OfferItems } }
   customerGets { value { ...OfferValue } items { ...OfferItems } }
@@ -591,7 +593,7 @@ fragment CodeFreeShipping on DiscountCodeFreeShipping {
   title status startsAt endsAt summary tags
   context { __typename }
   combinesWith { ...OfferCombines }
-  codes(first: 5) { nodes { code } } codesCount { count }
+  codes(first: 2) { nodes { code } } codesCount { count }
   usageLimit appliesOncePerCustomer asyncUsageCount
   minimumRequirement { ...OfferMinimum }
   maximumShippingPrice { amount currencyCode }
@@ -599,7 +601,7 @@ fragment CodeFreeShipping on DiscountCodeFreeShipping {
 fragment CodeApp on DiscountCodeApp {
   title status startsAt endsAt tags
   context { __typename }
-  codes(first: 5) { nodes { code } } codesCount { count }
+  codes(first: 2) { nodes { code } } codesCount { count }
   usageLimit appliesOncePerCustomer asyncUsageCount
 }`;
 
@@ -636,7 +638,7 @@ fragment AutoApp on DiscountAutomaticApp {
 
 // Every active discount, a page at a time.
 const offerTermsQuery = `query offerTerms($after: String) {
-  discountNodes(first: 100, after: $after, query: "status:active") {
+  discountNodes(first: 25, after: $after, query: "status:active") {
     pageInfo { hasNextPage endCursor }
     nodes {
       id

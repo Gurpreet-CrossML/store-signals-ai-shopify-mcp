@@ -1248,6 +1248,132 @@ const createMcpServer = (configs = {}) => {
     },
   );
 
+  // One Admin GraphQL query for the offer tools. When Shopify answers
+  // THROTTLED (its cost budget is spent), wait as long as Shopify says the
+  // budget needs to refill, then retry; dropped connections are retried
+  // too (at most 3 tries).
+  const offerAdminQuery = async (query, variables) => {
+    for (let attempt = 1; ; attempt++) {
+      let res;
+      try {
+        res = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "POST",
+          "",
+          { query, variables },
+          true,
+        );
+      } catch (err) {
+        // A dropped connection (no HTTP response) is retried; any other
+        // error is final.
+        if (err?.response || attempt >= 3) throw err;
+        await new Promise((r) => setTimeout(r, 200 * attempt));
+        continue;
+      }
+      const throttled = (res?.errors || []).some(
+        (e) => e?.extensions?.code === "THROTTLED",
+      );
+      if (!throttled) {
+        if (res?.errors) throw new Error(JSON.stringify(res.errors));
+        return res;
+      }
+      if (attempt >= 3) throw new Error("Shopify throttled the offer query");
+      const status = res?.extensions?.cost?.throttleStatus || {};
+      const needed =
+        (res?.extensions?.cost?.requestedQueryCost || 0) -
+        (status.currentlyAvailable || 0);
+      const waitMs = Math.min(
+        Math.max((needed / (status.restoreRate || 100)) * 1000, 300),
+        3000,
+      );
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  };
+
+  // Test discount codes on throwaway Storefront carts copying `lines`: one
+  // cart without codes, one per code. The customer's real cart is never
+  // touched. Shopify decides whether each code applies, the new total and
+  // why not. Retries only dropped connections.
+  const testOfferCodes = async (lines, codes, countryCode) => {
+    const cartLines = lines.map((l) => ({
+      merchandiseId: String(l.variant_id).startsWith("gid://")
+        ? l.variant_id
+        : `gid://shopify/ProductVariant/${l.variant_id}`,
+      quantity: l.quantity,
+    }));
+
+    const testCart = async (discountCodes) => {
+      const input = { lines: cartLines, discountCodes };
+      if (countryCode) input.buyerIdentity = { countryCode };
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const res = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "POST",
+            "",
+            { query: offerCartTestMutation, variables: { input } },
+          );
+          if (res?.errors) throw new Error(JSON.stringify(res.errors));
+          const payload = res?.data?.cartCreate;
+          if (payload?.userErrors?.length) {
+            throw new Error(JSON.stringify(payload.userErrors));
+          }
+          return formatOfferCart(payload);
+        } catch (err) {
+          if (err?.response || attempt >= 3) throw err;
+          await new Promise((r) => setTimeout(r, 200 * attempt));
+        }
+      }
+    };
+
+    const unique = [...new Set(codes.map((c) => c.trim()).filter(Boolean))];
+    const [base, ...tested] = await Promise.all([
+      testCart([]),
+      ...unique.map((c) => testCart([c])),
+    ]);
+
+    return {
+      base: {
+        currency: base.currency,
+        subtotal: base.subtotal,
+        total: base.total,
+        allocations: base.allocations,
+      },
+      codes: unique.map((code, i) => {
+        const cart = tested[i];
+        const applicable = Boolean(
+          cart?.codes?.find((c) => c.code.toLowerCase() === code.toLowerCase())
+            ?.applicable,
+        );
+        return {
+          code,
+          applicable,
+          subtotal: cart?.subtotal ?? null,
+          total: cart?.total ?? null,
+          saving: applicable
+            ? Math.round((base.total - cart.total) * 100) / 100
+            : 0,
+          allocations: cart?.allocations || [],
+          warnings: cart?.warnings || [],
+        };
+      }),
+    };
+  };
+
+  const cartLinesSchema = z
+    .array(
+      z.object({
+        variant_id: z.string(),
+        quantity: z.number().int().min(1),
+      }),
+    )
+    .min(1)
+    .max(100);
+
   // ######### 6b. Offer Terms (never cached) #########
   server.tool(
     "get_offer_terms",
@@ -1256,17 +1382,22 @@ const createMcpServer = (configs = {}) => {
     Without a code: every ACTIVE discount (all types, code and automatic).
     With a code: that one code whatever its status (active, expired or
     scheduled), case-insensitive; an empty list when no such code exists.
+    With lines (and no code): also tests, in the same call, the active
+    single codes open to all customers (max 10) on a throwaway copy of
+    those cart lines, exactly like check_offer_codes; returned as "cart".
 
     Returns { discounts: [{ id, title, method (code|automatic), kind
     (basic|bxgy|free_shipping|app), status, starts_at, ends_at, summary,
-    context (all|customers|segments|markets|unknown), codes, codes_count,
-    usage_limit, used, once_per_customer, combines_with, minimum, value,
-    applies_to, one_time_purchase, subscription, buys, uses_per_order,
-    max_shipping_price }] }. Contains private codes: never show this raw
-    to a customer.
+    tags, context (all|customers|segments|markets|unknown), codes,
+    codes_count, usage_limit, used, once_per_customer, combines_with,
+    minimum, value, applies_to, one_time_purchase, subscription, buys,
+    uses_per_order, max_shipping_price }], cart: {base, codes} | null }.
+    Contains private codes: never show this raw to a customer.
 
     Parameters:
     @param {string} code  Optional discount code to look up
+    @param {object[]} lines  Optional cart lines [{ variant_id, quantity }]
+    @param {string} country_code  Optional buyer country (ISO 2)
     `,
     {
       code: z
@@ -1275,23 +1406,16 @@ const createMcpServer = (configs = {}) => {
         .describe(
           "A discount code to look up (any status). Omit for all active.",
         ),
+      lines: cartLinesSchema.optional(),
+      country_code: z.string().length(2).optional(),
     },
-    async ({ code }) => {
+    async ({ code, lines, country_code }) => {
       try {
         const discounts = [];
 
         if (code) {
           // One code, any status.
-          const res = await callShopifyApi(
-            baseUrl,
-            storefrontAccessToken,
-            adminAccessToken,
-            "POST",
-            "",
-            { query: offerByCodeQuery, variables: { code } },
-            true,
-          );
-          if (res?.errors) throw new Error(JSON.stringify(res.errors));
+          const res = await offerAdminQuery(offerByCodeQuery, { code });
           const node = res?.data?.codeDiscountNodeByCode;
           if (node?.codeDiscount) {
             discounts.push(formatOfferTerms(node.id, node.codeDiscount));
@@ -1300,16 +1424,7 @@ const createMcpServer = (configs = {}) => {
           // Every active discount, page by page.
           let after = null;
           for (let page = 0; page < 5; page++) {
-            const res = await callShopifyApi(
-              baseUrl,
-              storefrontAccessToken,
-              adminAccessToken,
-              "POST",
-              "",
-              { query: offerTermsQuery, variables: { after } },
-              true,
-            );
-            if (res?.errors) throw new Error(JSON.stringify(res.errors));
+            const res = await offerAdminQuery(offerTermsQuery, { after });
             const connection = res?.data?.discountNodes;
             for (const node of connection?.nodes || []) {
               if (node?.discount) {
@@ -1321,8 +1436,34 @@ const createMcpServer = (configs = {}) => {
           }
         }
 
+        // With a cart: test the single codes open to all customers on it,
+        // in this same call. A failed test leaves cart null; the terms
+        // are still returned.
+        let cart = null;
+        if (lines && !code) {
+          const testable = discounts
+            .filter(
+              (d) =>
+                d.method === "code" &&
+                d.status === "ACTIVE" &&
+                d.context === "all" &&
+                d.kind !== "app" &&
+                d.codes_count === 1 &&
+                d.codes.length,
+            )
+            .map((d) => d.codes[0])
+            .slice(0, 10);
+          try {
+            cart = await testOfferCodes(lines, testable, country_code);
+          } catch (err) {
+            console.error("Offer cart test failed:", err?.message || err);
+          }
+        }
+
         return {
-          content: [{ type: "text", text: JSON.stringify({ discounts }) }],
+          content: [
+            { type: "text", text: JSON.stringify({ discounts, cart }) },
+          ],
         };
       } catch (error) {
         return {
@@ -1360,95 +1501,15 @@ const createMcpServer = (configs = {}) => {
     @param {string} country_code  Optional buyer country (ISO 2)
     `,
     {
-      lines: z
-        .array(
-          z.object({
-            variant_id: z.string(),
-            quantity: z.number().int().min(1),
-          }),
-        )
-        .min(1)
-        .max(100),
+      lines: cartLinesSchema,
       codes: z.array(z.string()).max(10).default([]),
       country_code: z.string().length(2).optional(),
     },
     async ({ lines, codes, country_code }) => {
       try {
-        const cartLines = lines.map((l) => ({
-          merchandiseId: String(l.variant_id).startsWith("gid://")
-            ? l.variant_id
-            : `gid://shopify/ProductVariant/${l.variant_id}`,
-          quantity: l.quantity,
-        }));
-
-        // One throwaway cart; retried only when the connection drops.
-        const testCart = async (discountCodes) => {
-          const input = { lines: cartLines, discountCodes };
-          if (country_code) input.buyerIdentity = { countryCode: country_code };
-          for (let attempt = 1; ; attempt++) {
-            try {
-              const res = await callShopifyApi(
-                baseUrl,
-                storefrontAccessToken,
-                adminAccessToken,
-                "POST",
-                "",
-                { query: offerCartTestMutation, variables: { input } },
-              );
-              if (res?.errors) throw new Error(JSON.stringify(res.errors));
-              const payload = res?.data?.cartCreate;
-              if (payload?.userErrors?.length) {
-                throw new Error(JSON.stringify(payload.userErrors));
-              }
-              return formatOfferCart(payload);
-            } catch (err) {
-              if (err?.response || attempt >= 3) throw err;
-              await new Promise((r) => setTimeout(r, 200 * attempt));
-            }
-          }
-        };
-
-        const unique = [...new Set(codes.map((c) => c.trim()).filter(Boolean))];
-        const [base, ...tested] = await Promise.all([
-          testCart([]),
-          ...unique.map((c) => testCart([c])),
-        ]);
-
-        const results = unique.map((code, i) => {
-          const cart = tested[i];
-          const applicable = Boolean(
-            cart?.codes?.find(
-              (c) => c.code.toLowerCase() === code.toLowerCase(),
-            )?.applicable,
-          );
-          return {
-            code,
-            applicable,
-            subtotal: cart?.subtotal ?? null,
-            total: cart?.total ?? null,
-            saving: applicable
-              ? Math.round((base.total - cart.total) * 100) / 100
-              : 0,
-            allocations: cart?.allocations || [],
-            warnings: cart?.warnings || [],
-          };
-        });
-
+        const result = await testOfferCodes(lines, codes, country_code);
         return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                base: {
-                  currency: base.currency,
-                  subtotal: base.subtotal,
-                  total: base.total,
-                  allocations: base.allocations,
-                },
-                codes: results,
-              }),
-            },
-          ],
+          content: [{ type: "text", text: JSON.stringify(result) }],
         };
       } catch (error) {
         return {
