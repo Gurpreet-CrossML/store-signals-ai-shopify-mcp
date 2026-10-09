@@ -10,11 +10,15 @@ const {
   collectionProductsQuery,
   productByIdQuery,
   liveStockQuery,
+  offerTermsQuery,
+  offerByCodeQuery,
+  offerCartTestMutation,
   productSortQuery,
   discountQuery,
   refundQuery,
 } = require("./graphql_queries");
 const {
+  SHOPIFY_API_VERSION,
   MCP_NAME,
   MCP_VERSION,
   callShopifyApi,
@@ -29,6 +33,8 @@ const {
   normalizeDims,
   getRelevanceScore,
   formatDiscounts,
+  formatOfferTerms,
+  formatOfferCart,
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
@@ -1242,6 +1248,222 @@ const createMcpServer = (configs = {}) => {
     },
   );
 
+  // ######### 6b. Offer Terms (never cached) #########
+  server.tool(
+    "get_offer_terms",
+    `Fetch the full terms of the store's discounts, live (never cached).
+
+    Without a code: every ACTIVE discount (all types, code and automatic).
+    With a code: that one code whatever its status (active, expired or
+    scheduled), case-insensitive; an empty list when no such code exists.
+
+    Returns { discounts: [{ id, title, method (code|automatic), kind
+    (basic|bxgy|free_shipping|app), status, starts_at, ends_at, summary,
+    context (all|customers|segments|markets|unknown), codes, codes_count,
+    usage_limit, used, once_per_customer, combines_with, minimum, value,
+    applies_to, one_time_purchase, subscription, buys, uses_per_order,
+    max_shipping_price }] }. Contains private codes: never show this raw
+    to a customer.
+
+    Parameters:
+    @param {string} code  Optional discount code to look up
+    `,
+    {
+      code: z
+        .string()
+        .optional()
+        .describe(
+          "A discount code to look up (any status). Omit for all active.",
+        ),
+    },
+    async ({ code }) => {
+      try {
+        const discounts = [];
+
+        if (code) {
+          // One code, any status.
+          const res = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "POST",
+            "",
+            { query: offerByCodeQuery, variables: { code } },
+            true,
+          );
+          if (res?.errors) throw new Error(JSON.stringify(res.errors));
+          const node = res?.data?.codeDiscountNodeByCode;
+          if (node?.codeDiscount) {
+            discounts.push(formatOfferTerms(node.id, node.codeDiscount));
+          }
+        } else {
+          // Every active discount, page by page.
+          let after = null;
+          for (let page = 0; page < 5; page++) {
+            const res = await callShopifyApi(
+              baseUrl,
+              storefrontAccessToken,
+              adminAccessToken,
+              "POST",
+              "",
+              { query: offerTermsQuery, variables: { after } },
+              true,
+            );
+            if (res?.errors) throw new Error(JSON.stringify(res.errors));
+            const connection = res?.data?.discountNodes;
+            for (const node of connection?.nodes || []) {
+              if (node?.discount) {
+                discounts.push(formatOfferTerms(node.id, node.discount));
+              }
+            }
+            if (!connection?.pageInfo?.hasNextPage) break;
+            after = connection.pageInfo.endCursor;
+          }
+        }
+
+        return {
+          content: [{ type: "text", text: JSON.stringify({ discounts }) }],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error fetching offer terms: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ######### 6c. Check Offer Codes on a Test Cart #########
+  server.tool(
+    "check_offer_codes",
+    `Test discount codes against a copy of the customer's cart.
+
+    Builds throwaway Storefront carts with the given lines (the customer's
+    real cart is never touched, nothing is applied): one without codes, and
+    one per code. Shopify itself decides whether each code applies, the
+    new total, and why it doesn't (warnings such as
+    DISCOUNT_PURCHASE_NOT_IN_RANGE, DISCOUNT_NO_ENTITLED_LINE_ITEMS,
+    DISCOUNT_USAGE_LIMIT_REACHED, DISCOUNT_CURRENTLY_INACTIVE).
+
+    Returns { base: {currency, subtotal, total, allocations}, codes:
+    [{ code, applicable, subtotal, total, saving, allocations, warnings }] }.
+    Totals are estimates: shipping and taxes are settled at checkout.
+
+    Parameters:
+    @param {object[]} lines  [{ variant_id, quantity }]
+    @param {string[]} codes  Codes to test (max 10)
+    @param {string} country_code  Optional buyer country (ISO 2)
+    `,
+    {
+      lines: z
+        .array(
+          z.object({
+            variant_id: z.string(),
+            quantity: z.number().int().min(1),
+          }),
+        )
+        .min(1)
+        .max(100),
+      codes: z.array(z.string()).max(10).default([]),
+      country_code: z.string().length(2).optional(),
+    },
+    async ({ lines, codes, country_code }) => {
+      try {
+        const cartLines = lines.map((l) => ({
+          merchandiseId: String(l.variant_id).startsWith("gid://")
+            ? l.variant_id
+            : `gid://shopify/ProductVariant/${l.variant_id}`,
+          quantity: l.quantity,
+        }));
+
+        // One throwaway cart; retried only when the connection drops.
+        const testCart = async (discountCodes) => {
+          const input = { lines: cartLines, discountCodes };
+          if (country_code) input.buyerIdentity = { countryCode: country_code };
+          for (let attempt = 1; ; attempt++) {
+            try {
+              const res = await callShopifyApi(
+                baseUrl,
+                storefrontAccessToken,
+                adminAccessToken,
+                "POST",
+                "",
+                { query: offerCartTestMutation, variables: { input } },
+              );
+              if (res?.errors) throw new Error(JSON.stringify(res.errors));
+              const payload = res?.data?.cartCreate;
+              if (payload?.userErrors?.length) {
+                throw new Error(JSON.stringify(payload.userErrors));
+              }
+              return formatOfferCart(payload);
+            } catch (err) {
+              if (err?.response || attempt >= 3) throw err;
+              await new Promise((r) => setTimeout(r, 200 * attempt));
+            }
+          }
+        };
+
+        const unique = [...new Set(codes.map((c) => c.trim()).filter(Boolean))];
+        const [base, ...tested] = await Promise.all([
+          testCart([]),
+          ...unique.map((c) => testCart([c])),
+        ]);
+
+        const results = unique.map((code, i) => {
+          const cart = tested[i];
+          const applicable = Boolean(
+            cart?.codes?.find(
+              (c) => c.code.toLowerCase() === code.toLowerCase(),
+            )?.applicable,
+          );
+          return {
+            code,
+            applicable,
+            subtotal: cart?.subtotal ?? null,
+            total: cart?.total ?? null,
+            saving: applicable
+              ? Math.round((base.total - cart.total) * 100) / 100
+              : 0,
+            allocations: cart?.allocations || [],
+            warnings: cart?.warnings || [],
+          };
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                base: {
+                  currency: base.currency,
+                  subtotal: base.subtotal,
+                  total: base.total,
+                  allocations: base.allocations,
+                },
+                codes: results,
+              }),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error checking offer codes: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
   // ######### 9. Get Order Detail #########
   server.tool(
     "get_order_detail",
@@ -1301,7 +1523,7 @@ const createMcpServer = (configs = {}) => {
             storefrontAccessToken,
             adminAccessToken,
             "GET",
-            `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
+            `/admin/api/${SHOPIFY_API_VERSION}/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
           );
 
           orders = response?.orders || [];
@@ -1413,7 +1635,7 @@ const createMcpServer = (configs = {}) => {
           storefrontAccessToken,
           adminAccessToken,
           "GET",
-          `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
+          `/admin/api/${SHOPIFY_API_VERSION}/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
         );
 
         const orders = response?.orders || [];
@@ -1471,7 +1693,7 @@ const createMcpServer = (configs = {}) => {
           storefrontAccessToken,
           adminAccessToken,
           "POST",
-          `/admin/api/2024-04/orders/${order.id}/cancel.json`,
+          `/admin/api/${SHOPIFY_API_VERSION}/orders/${order.id}/cancel.json`,
           { reason: reason, email: true },
         );
 
@@ -1701,7 +1923,7 @@ const createMcpServer = (configs = {}) => {
             storefrontAccessToken,
             adminAccessToken,
             "GET",
-            `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
+            `/admin/api/${SHOPIFY_API_VERSION}/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
           );
 
           currentOrder = orderResponse?.orders?.[0];
@@ -1723,7 +1945,7 @@ const createMcpServer = (configs = {}) => {
             storefrontAccessToken,
             adminAccessToken,
             "GET",
-            `/admin/api/2024-04/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
+            `/admin/api/${SHOPIFY_API_VERSION}/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
           );
           if (
             !response ||
@@ -1773,7 +1995,7 @@ const createMcpServer = (configs = {}) => {
           storefrontAccessToken,
           adminAccessToken,
           "GET",
-          `/admin/api/2024-04/orders/${currentOrder.id}/transactions.json`,
+          `/admin/api/${SHOPIFY_API_VERSION}/orders/${currentOrder.id}/transactions.json`,
         );
 
         const formattedTransactions = formatOrderTransactions(
@@ -1851,7 +2073,7 @@ const createMcpServer = (configs = {}) => {
             storefrontAccessToken,
             adminAccessToken,
             "GET",
-            `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
+            `/admin/api/${SHOPIFY_API_VERSION}/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
           );
 
           restOrder = ordersResponse?.orders?.[0];
@@ -1873,7 +2095,7 @@ const createMcpServer = (configs = {}) => {
             storefrontAccessToken,
             adminAccessToken,
             "GET",
-            `/admin/api/2024-04/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
+            `/admin/api/${SHOPIFY_API_VERSION}/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
           );
           if (
             !response ||
@@ -1926,7 +2148,7 @@ const createMcpServer = (configs = {}) => {
           "POST",
           "",
           { query: refundQuery, variables: { id: shopifyOrderGid } },
-          true, // isAdmin = true → uses /admin/api/2025-10/graphql.json
+          true, // isAdmin = true → Admin GraphQL API
         );
 
         const gqlOrder = graphqlResponse?.data?.order;
@@ -2523,7 +2745,7 @@ const createMcpServer = (configs = {}) => {
           storefrontAccessToken,
           adminAccessToken,
           "GET",
-          `/admin/api/2024-04/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
+          `/admin/api/${SHOPIFY_API_VERSION}/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
         );
 
         if (
