@@ -45,6 +45,10 @@ const SortOption = Object.freeze({
 });
 
 // Mapping of user-friendly sort options to Shopify's sort keys and reverse flags
+// One Shopify API version (Admin GraphQL, Admin REST and Storefront) for
+// every call. SHOPIFY_API_VERSION in the environment overrides it.
+const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2026-10";
+
 const SHOPIFY_SORT_MAPPING = {
   [SortOption.RELEVANCE]: {
     sortKey: "RELEVANCE",
@@ -84,8 +88,8 @@ const callShopifyApi = async (
 ) => {
   try {
     let url = isAdmin
-      ? `${base_url}/admin/api/2025-10/graphql.json`
-      : `${base_url}/api/2025-01/graphql.json`;
+      ? `${base_url}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`
+      : `${base_url}/api/${SHOPIFY_API_VERSION}/graphql.json`;
     if (endpoint) {
       url = `${base_url}${endpoint}`;
     }
@@ -939,7 +943,7 @@ const getOrderFulfillmentData = async (order_id) => {
   try {
     const fulfillmentData = await callShopifyApi(
       "GET",
-      "/admin/api/2025-01/orders/" + order_id + "/fulfillment_orders.json",
+      `/admin/api/${SHOPIFY_API_VERSION}/orders/${order_id}/fulfillment_orders.json`,
     );
 
     if (fulfillmentData && fulfillmentData?.fulfillment_orders?.length) {
@@ -1087,7 +1091,7 @@ class ShopifyOrderEditor {
     const baseUrl = base_url || "";
     this.shopDomain = baseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
     this.accessToken = admin_token;
-    this.apiVersion = process.env.SHOPIFY_API_VERSION || "2024-04";
+    this.apiVersion = SHOPIFY_API_VERSION;
     this.graphqlEndpoint = `https://${this.shopDomain}/admin/api/${this.apiVersion}/graphql.json`;
   }
 
@@ -1249,7 +1253,7 @@ class ShopifyExchangeManager {
     const baseUrl = base_url || "";
     this.shopDomain = baseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
     this.accessToken = admin_token;
-    this.apiVersion = process.env.SHOPIFY_API_VERSION || "2025-04"; // Use latest
+    this.apiVersion = SHOPIFY_API_VERSION;
     this.graphqlEndpoint = `https://${this.shopDomain}/admin/api/${this.apiVersion}/graphql.json`;
   }
 
@@ -2047,8 +2051,181 @@ const verifyOrderIdentity = (
 };
 
 // Export environment variables and utility functions
+// ── Offer terms (get_offer_terms / check_offer_codes) ──
+
+// Plain numeric id from a Shopify GID.
+const gidNumber = (gid) =>
+  String(gid || "")
+    .split("/")
+    .pop();
+
+// What a discount gives: percent, fixed amount, or Buy X Get Y.
+const offerValue = (value) => {
+  if (!value) return null;
+  if (value.__typename === "DiscountPercentage") {
+    return { type: "percentage", value: Number(value.percentage) * 100 };
+  }
+  if (value.__typename === "DiscountAmount") {
+    return {
+      type: "amount",
+      value: Number(value.amount?.amount),
+      currency: value.amount?.currencyCode || null,
+      each_item: Boolean(value.appliesOnEachItem),
+    };
+  }
+  if (value.__typename === "DiscountOnQuantity") {
+    return {
+      type: "get_quantity",
+      quantity: value.quantity?.quantity ?? null,
+      effect: offerValue(value.effect),
+    };
+  }
+  return null;
+};
+
+// Which items a discount covers: everything, some products, or collections.
+const offerItems = (items) => {
+  if (!items || items.__typename === "AllDiscountItems") return { type: "all" };
+  if (items.__typename === "DiscountProducts") {
+    return {
+      type: "products",
+      product_ids: (items.products?.nodes || []).map((n) => gidNumber(n.id)),
+      product_titles: (items.products?.nodes || []).map((n) => n.title),
+      variant_ids: (items.productVariants?.nodes || []).map((n) =>
+        gidNumber(n.id),
+      ),
+    };
+  }
+  if (items.__typename === "DiscountCollections") {
+    return {
+      type: "collections",
+      collection_ids: (items.collections?.nodes || []).map((n) =>
+        gidNumber(n.id),
+      ),
+      collection_titles: (items.collections?.nodes || []).map((n) => n.title),
+    };
+  }
+  return { type: "unknown" };
+};
+
+// Minimum spend or quantity the cart needs.
+const offerMinimum = (minimum) => {
+  if (minimum?.__typename === "DiscountMinimumSubtotal") {
+    return {
+      type: "subtotal",
+      value: Number(minimum.greaterThanOrEqualToSubtotal?.amount),
+      currency: minimum.greaterThanOrEqualToSubtotal?.currencyCode || null,
+    };
+  }
+  if (minimum?.__typename === "DiscountMinimumQuantity") {
+    return {
+      type: "quantity",
+      value: Number(minimum.greaterThanOrEqualToQuantity),
+    };
+  }
+  return null;
+};
+
+// One discount node as a flat record the backend can decide on.
+const formatOfferTerms = (id, discount) => {
+  const type = discount?.__typename || "";
+  const kind = type.includes("Bxgy")
+    ? "bxgy"
+    : type.includes("FreeShipping")
+      ? "free_shipping"
+      : type.includes("App")
+        ? "app"
+        : "basic";
+  const contextType = discount?.context?.__typename || "";
+  const context =
+    {
+      DiscountBuyerSelectionAll: "all",
+      DiscountCustomers: "customers",
+      DiscountCustomerSegments: "segments",
+      DiscountMarkets: "markets",
+    }[contextType] || "unknown";
+  const gets = discount?.customerGets;
+  const buys = discount?.customerBuys;
+  return {
+    id: gidNumber(id),
+    title: discount?.title || "",
+    method: type.startsWith("DiscountCode") ? "code" : "automatic",
+    kind,
+    status: discount?.status || "",
+    starts_at: discount?.startsAt || null,
+    ends_at: discount?.endsAt || null,
+    summary: discount?.summary || "",
+    tags: discount?.tags || [],
+    context,
+    codes: (discount?.codes?.nodes || []).map((n) => n.code),
+    codes_count: discount?.codesCount?.count ?? null,
+    usage_limit: discount?.usageLimit ?? null,
+    used: discount?.asyncUsageCount ?? null,
+    once_per_customer: Boolean(discount?.appliesOncePerCustomer),
+    combines_with: {
+      product: Boolean(discount?.combinesWith?.productDiscounts),
+      order: Boolean(discount?.combinesWith?.orderDiscounts),
+      shipping: Boolean(discount?.combinesWith?.shippingDiscounts),
+    },
+    minimum: offerMinimum(discount?.minimumRequirement),
+    value: offerValue(gets?.value),
+    applies_to: offerItems(gets?.items),
+    one_time_purchase: gets?.appliesOnOneTimePurchase ?? true,
+    subscription: gets?.appliesOnSubscription ?? false,
+    buys: buys
+      ? {
+          quantity:
+            buys.value?.__typename === "DiscountQuantity"
+              ? Number(buys.value.quantity)
+              : null,
+          amount:
+            buys.value?.__typename === "DiscountPurchaseAmount"
+              ? Number(buys.value.amount)
+              : null,
+          items: offerItems(buys.items),
+        }
+      : null,
+    uses_per_order: discount?.usesPerOrderLimit ?? null,
+    max_shipping_price: discount?.maximumShippingPrice
+      ? Number(discount.maximumShippingPrice.amount)
+      : null,
+  };
+};
+
+// Sum of discount allocations, with the code or title each came from.
+const offerAllocations = (allocations) =>
+  (allocations || []).map((a) => ({
+    amount: Number(a?.discountedAmount?.amount || 0),
+    code: a?.code || null,
+    title: a?.title || null,
+  }));
+
+// The result of one throwaway test cart.
+const formatOfferCart = (payload) => {
+  const cart = payload?.cart;
+  if (!cart) return null;
+  const lineAllocations = (cart.lines?.nodes || []).flatMap((line) =>
+    offerAllocations(line.discountAllocations),
+  );
+  return {
+    currency: cart.cost?.totalAmount?.currencyCode || null,
+    subtotal: Number(cart.cost?.subtotalAmount?.amount || 0),
+    total: Number(cart.cost?.totalAmount?.amount || 0),
+    codes: cart.discountCodes || [],
+    allocations: [
+      ...offerAllocations(cart.discountAllocations),
+      ...lineAllocations,
+    ],
+    warnings: (payload.warnings || []).map((w) => ({
+      code: w.code,
+      message: w.message,
+    })),
+  };
+};
+
 module.exports = {
   // envs
+  SHOPIFY_API_VERSION,
   MCP_NAME,
   MCP_VERSION,
   BACKEND_API_URL,
@@ -2067,6 +2244,8 @@ module.exports = {
   normalizeDims,
   getRelevanceScore,
   formatDiscounts,
+  formatOfferTerms,
+  formatOfferCart,
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,

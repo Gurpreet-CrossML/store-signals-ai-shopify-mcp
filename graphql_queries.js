@@ -524,6 +524,178 @@ const refundQuery = `
 `;
 
 // Export the GraphQL query for use in other modules
+// ── Offer terms (discount workflow) ──
+// Full terms of every discount type, so the backend can tell which offers
+// a customer may see and how much they need to spend. Never cached.
+// Needs Admin API 2026-04+ (discount tags); utils.SHOPIFY_API_VERSION.
+const offerSharedFragments = `
+fragment OfferItems on DiscountItems {
+  __typename
+  ... on AllDiscountItems { allItems }
+  ... on DiscountProducts {
+    products(first: 50) { nodes { id title } }
+    productVariants(first: 50) { nodes { id } }
+  }
+  ... on DiscountCollections { collections(first: 20) { nodes { id title } } }
+}
+fragment OfferValue on DiscountCustomerGetsValue {
+  __typename
+  ... on DiscountPercentage { percentage }
+  ... on DiscountAmount { amount { amount currencyCode } appliesOnEachItem }
+  ... on DiscountOnQuantity {
+    quantity { quantity }
+    effect {
+      __typename
+      ... on DiscountPercentage { percentage }
+      ... on DiscountAmount { amount { amount currencyCode } }
+    }
+  }
+}
+fragment OfferMinimum on DiscountMinimumRequirement {
+  __typename
+  ... on DiscountMinimumSubtotal { greaterThanOrEqualToSubtotal { amount currencyCode } }
+  ... on DiscountMinimumQuantity { greaterThanOrEqualToQuantity }
+}
+fragment OfferBuysValue on DiscountCustomerBuysValue {
+  __typename
+  ... on DiscountQuantity { quantity }
+  ... on DiscountPurchaseAmount { amount }
+}
+fragment OfferCombines on DiscountCombinesWith {
+  productDiscounts orderDiscounts shippingDiscounts
+}`;
+
+const offerCodeFragments = `
+fragment CodeBasic on DiscountCodeBasic {
+  title status startsAt endsAt summary tags
+  context { __typename }
+  combinesWith { ...OfferCombines }
+  codes(first: 5) { nodes { code } } codesCount { count }
+  usageLimit appliesOncePerCustomer asyncUsageCount
+  minimumRequirement { ...OfferMinimum }
+  customerGets {
+    appliesOnOneTimePurchase appliesOnSubscription
+    value { ...OfferValue } items { ...OfferItems }
+  }
+}
+fragment CodeBxgy on DiscountCodeBxgy {
+  title status startsAt endsAt summary tags
+  context { __typename }
+  combinesWith { ...OfferCombines }
+  codes(first: 5) { nodes { code } } codesCount { count }
+  usageLimit appliesOncePerCustomer asyncUsageCount usesPerOrderLimit
+  customerBuys { value { ...OfferBuysValue } items { ...OfferItems } }
+  customerGets { value { ...OfferValue } items { ...OfferItems } }
+}
+fragment CodeFreeShipping on DiscountCodeFreeShipping {
+  title status startsAt endsAt summary tags
+  context { __typename }
+  combinesWith { ...OfferCombines }
+  codes(first: 5) { nodes { code } } codesCount { count }
+  usageLimit appliesOncePerCustomer asyncUsageCount
+  minimumRequirement { ...OfferMinimum }
+  maximumShippingPrice { amount currencyCode }
+}
+fragment CodeApp on DiscountCodeApp {
+  title status startsAt endsAt tags
+  context { __typename }
+  codes(first: 5) { nodes { code } } codesCount { count }
+  usageLimit appliesOncePerCustomer asyncUsageCount
+}`;
+
+const offerAutomaticFragments = `
+fragment AutoBasic on DiscountAutomaticBasic {
+  title status startsAt endsAt summary tags
+  context { __typename }
+  combinesWith { ...OfferCombines }
+  minimumRequirement { ...OfferMinimum }
+  customerGets {
+    appliesOnOneTimePurchase appliesOnSubscription
+    value { ...OfferValue } items { ...OfferItems }
+  }
+}
+fragment AutoBxgy on DiscountAutomaticBxgy {
+  title status startsAt endsAt summary tags
+  context { __typename }
+  combinesWith { ...OfferCombines }
+  usesPerOrderLimit
+  customerBuys { value { ...OfferBuysValue } items { ...OfferItems } }
+  customerGets { value { ...OfferValue } items { ...OfferItems } }
+}
+fragment AutoFreeShipping on DiscountAutomaticFreeShipping {
+  title status startsAt endsAt summary tags
+  context { __typename }
+  combinesWith { ...OfferCombines }
+  minimumRequirement { ...OfferMinimum }
+  maximumShippingPrice { amount currencyCode }
+}
+fragment AutoApp on DiscountAutomaticApp {
+  title status startsAt endsAt tags
+  context { __typename }
+}`;
+
+// Every active discount, a page at a time.
+const offerTermsQuery = `query offerTerms($after: String) {
+  discountNodes(first: 100, after: $after, query: "status:active") {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      discount {
+        __typename
+        ...CodeBasic ...CodeBxgy ...CodeFreeShipping ...CodeApp
+        ...AutoBasic ...AutoBxgy ...AutoFreeShipping ...AutoApp
+      }
+    }
+  }
+}
+${offerSharedFragments}
+${offerCodeFragments}
+${offerAutomaticFragments}`;
+
+// One code, whatever its status (expired and scheduled codes included).
+const offerByCodeQuery = `query offerByCode($code: String!) {
+  codeDiscountNodeByCode(code: $code) {
+    id
+    codeDiscount {
+      __typename
+      ...CodeBasic ...CodeBxgy ...CodeFreeShipping ...CodeApp
+    }
+  }
+}
+${offerSharedFragments}
+${offerCodeFragments}`;
+
+// A throwaway cart (Storefront API) to test one code against the
+// customer's lines: Shopify says whether it applies, the new total, and why
+// not. The customer's real cart is never touched.
+const offerCartTestMutation = `mutation offerCartTest($input: CartInput!) {
+  cartCreate(input: $input) {
+    cart {
+      cost {
+        subtotalAmount { amount currencyCode }
+        totalAmount { amount currencyCode }
+      }
+      discountCodes { code applicable }
+      discountAllocations {
+        discountedAmount { amount }
+        ... on CartAutomaticDiscountAllocation { title }
+        ... on CartCodeDiscountAllocation { code }
+      }
+      lines(first: 100) {
+        nodes {
+          discountAllocations {
+            discountedAmount { amount }
+            ... on CartAutomaticDiscountAllocation { title }
+            ... on CartCodeDiscountAllocation { code }
+          }
+        }
+      }
+    }
+    userErrors { field message code }
+    warnings { code message }
+  }
+}`;
+
 module.exports = {
   productSearchByQuery,
   collectionProductsQuery,
@@ -532,6 +704,9 @@ module.exports = {
   relatedProductsQuery,
   productByIdQuery,
   liveStockQuery,
+  offerTermsQuery,
+  offerByCodeQuery,
+  offerCartTestMutation,
   productSortQuery,
   discountQuery,
   refundQuery,
