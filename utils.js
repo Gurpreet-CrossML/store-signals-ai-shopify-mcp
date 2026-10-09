@@ -115,6 +115,8 @@ const callShopifyApi = async (
   } catch (error) {
     console.error(
       "Shopify API Error:",
+      error?.response?.status,
+      error?.code,
       error?.response?.data || error.message || error?.errors,
     );
     throw error;
