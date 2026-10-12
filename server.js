@@ -1295,7 +1295,8 @@ const createMcpServer = (configs = {}) => {
   // Test discount codes on throwaway Storefront carts copying `lines`: one
   // cart without codes, one per code. The customer's real cart is never
   // touched. Shopify decides whether each code applies, the new total and
-  // why not. Retries only dropped connections.
+  // why not. Retries only dropped connections; one code's failed cart
+  // doesn't fail the others.
   const testOfferCodes = async (lines, codes, countryCode) => {
     const cartLines = lines.map((l) => ({
       merchandiseId: String(l.variant_id).startsWith("gid://")
@@ -1308,8 +1309,9 @@ const createMcpServer = (configs = {}) => {
       const input = { lines: cartLines, discountCodes };
       if (countryCode) input.buyerIdentity = { countryCode };
       for (let attempt = 1; ; attempt++) {
+        let res;
         try {
-          const res = await callShopifyApi(
+          res = await callShopifyApi(
             baseUrl,
             storefrontAccessToken,
             adminAccessToken,
@@ -1317,24 +1319,38 @@ const createMcpServer = (configs = {}) => {
             "",
             { query: offerCartTestMutation, variables: { input } },
           );
-          if (res?.errors) throw new Error(JSON.stringify(res.errors));
-          const payload = res?.data?.cartCreate;
-          if (payload?.userErrors?.length) {
-            throw new Error(JSON.stringify(payload.userErrors));
-          }
-          return formatOfferCart(payload);
         } catch (err) {
           if (err?.response || attempt >= 3) throw err;
           await new Promise((r) => setTimeout(r, 200 * attempt));
+          continue;
         }
+        // Shopify's own errors are final: a retry gets the same answer.
+        if (res?.errors) throw new Error(JSON.stringify(res.errors));
+        const payload = res?.data?.cartCreate;
+        if (payload?.userErrors?.length) {
+          throw new Error(JSON.stringify(payload.userErrors));
+        }
+        return formatOfferCart(payload);
       }
     };
 
+    // The base cart is needed to compare totals; a code whose own cart
+    // fails is listed under `failed`, and the other codes still count.
     const unique = [...new Set(codes.map((c) => c.trim()).filter(Boolean))];
-    const [base, ...tested] = await Promise.all([
+    const [settledBase, ...settled] = await Promise.allSettled([
       testCart([]),
       ...unique.map((c) => testCart([c])),
     ]);
+    if (settledBase.status === "rejected") throw settledBase.reason;
+    const base = settledBase.value;
+    const failed = unique.filter((code, i) => {
+      if (settled[i].status === "fulfilled") return false;
+      console.error(
+        `Offer cart test failed for ${code}:`,
+        settled[i].reason?.message,
+      );
+      return true;
+    });
 
     return {
       base: {
@@ -1343,8 +1359,9 @@ const createMcpServer = (configs = {}) => {
         total: base.total,
         allocations: base.allocations,
       },
-      codes: unique.map((code, i) => {
-        const cart = tested[i];
+      codes: unique.flatMap((code, i) => {
+        if (settled[i].status === "rejected") return [];
+        const cart = settled[i].value;
         const applicable = Boolean(
           cart?.codes?.find((c) => c.code.toLowerCase() === code.toLowerCase())
             ?.applicable,
@@ -1361,6 +1378,7 @@ const createMcpServer = (configs = {}) => {
           warnings: cart?.warnings || [],
         };
       }),
+      failed,
     };
   };
 
@@ -1492,7 +1510,8 @@ const createMcpServer = (configs = {}) => {
     DISCOUNT_USAGE_LIMIT_REACHED, DISCOUNT_CURRENTLY_INACTIVE).
 
     Returns { base: {currency, subtotal, total, allocations}, codes:
-    [{ code, applicable, subtotal, total, saving, allocations, warnings }] }.
+    [{ code, applicable, subtotal, total, saving, allocations, warnings }],
+    failed: [codes that could not be tested] }.
     Totals are estimates: shipping and taxes are settled at checkout.
 
     Parameters:

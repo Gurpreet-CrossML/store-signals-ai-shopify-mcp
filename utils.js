@@ -13,6 +13,31 @@ const { getCache, setCache } = require("./cache");
 // Load environment variables from .env file
 dotenv.config();
 
+// Every HTTP call shares one keep-alive agent that verifies TLS, and has a
+// default timeout (a call may set its own).
+axios.defaults.httpsAgent = new https.Agent({ keepAlive: true });
+axios.defaults.timeout = 20000;
+
+// Errors keep only what callers and logs need. An axios error also carries
+// the request config and raw headers, i.e. the Shopify and OpenAI tokens, so
+// logging it whole would leak them.
+axios.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const safe = new Error(error?.message || "HTTP request failed");
+    safe.code = error?.code;
+    if (error?.response) {
+      safe.response = {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        headers: error.response.headers,
+        data: error.response.data,
+      };
+    }
+    return Promise.reject(safe);
+  },
+);
+
 const MCP_NAME = process.env.MCP_NAME;
 const MCP_VERSION = process.env.MCP_VERSION;
 const BACKEND_API_URL = process.env.BACKEND_API_URL;
@@ -108,10 +133,6 @@ const callShopifyApi = async (
       headers,
       timeout: 15000, // 15 seconds timeout
       data: data ? JSON.stringify(data) : undefined,
-      // Bypass SSL certificate verification for development
-      httpsAgent: new https.Agent({
-        rejectUnauthorized: false,
-      }),
     };
 
     const response = await axios(config);
