@@ -2244,6 +2244,89 @@ const formatOfferCart = (payload) => {
   };
 };
 
+// Policy HTML as plain paragraphs: block tags become line breaks.
+const policyParagraphs = (html) =>
+  String(html || "")
+    .replace(/<\/(p|li|h[1-6]|div|tr)>|<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&rsquo;/g, "'")
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+// Paragraphs of a policy that talk about paying ("Payment must be received
+// in full before dispatch").
+const PAYMENT_WORDS =
+  /\b(pay|paid|payment|payments|cash on delivery|cod|card|cards|upi|emi|paypal|wallet|bank transfer|net ?banking|installments?)\b/i;
+const paymentParagraphs = (html, max = 6) =>
+  policyParagraphs(html)
+    .filter((line) => PAYMENT_WORDS.test(line))
+    .slice(0, max)
+    .map((line) => line.slice(0, 500));
+
+// Shipping options of a throwaway cart, one entry per distinct option.
+// An option without a cost (e.g. a carrier rate still being calculated) is
+// left out: a missing cost must never read as free.
+// English name of an ISO country code ("AE" -> "United Arab Emirates"), so
+// a model never has to map codes itself; the code when Node has no name.
+const REGION_NAMES = new Intl.DisplayNames(["en"], { type: "region" });
+const countryName = (code) => {
+  try {
+    const name = REGION_NAMES.of(code);
+    return name && name !== "Unknown Region" ? name : code;
+  } catch {
+    return code;
+  }
+};
+
+// Every country code Node knows a name for, minus groupings and pseudo
+// codes (EU, UN, eurozone, outlying Oceania, X* test codes).
+const NOT_COUNTRIES = new Set(["EU", "EZ", "UN", "QO", "AN", "ZZ"]);
+const ALL_COUNTRY_CODES = (() => {
+  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const codes = [];
+  for (const a of letters) {
+    for (const b of letters) {
+      const code = a + b;
+      if (a === "X" || NOT_COUNTRIES.has(code)) continue;
+      if (countryName(code) !== code) codes.push(code);
+    }
+  }
+  return codes;
+})();
+
+// Names of the countries a store does NOT ship to, so policy text about
+// them can be left out of its answers.
+const notShippingCountryNames = (shipsTo) => {
+  const ships = new Set(shipsTo || []);
+  return ALL_COUNTRY_CODES.filter((c) => !ships.has(c)).map(countryName);
+};
+
+const formatShippingRates = (payload) => {
+  const seen = new Set();
+  const options = [];
+  for (const group of payload?.cart?.deliveryGroups?.nodes || []) {
+    for (const option of group.deliveryOptions || []) {
+      const amount = option.estimatedCost?.amount;
+      if (amount === undefined || amount === null || amount === "") continue;
+      const key = `${option.title}|${option.estimatedCost?.amount}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      options.push({
+        title: option.title,
+        description: option.description || null,
+        method: option.deliveryMethodType,
+        cost: Number(amount),
+        currency: option.estimatedCost?.currencyCode || null,
+      });
+    }
+  }
+  return options;
+};
+
 module.exports = {
   // envs
   SHOPIFY_API_VERSION,
@@ -2267,6 +2350,11 @@ module.exports = {
   formatDiscounts,
   formatOfferTerms,
   formatOfferCart,
+  policyParagraphs,
+  paymentParagraphs,
+  formatShippingRates,
+  countryName,
+  notShippingCountryNames,
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,

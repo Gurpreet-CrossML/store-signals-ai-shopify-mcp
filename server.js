@@ -13,6 +13,9 @@ const {
   offerTermsQuery,
   offerByCodeQuery,
   offerCartTestMutation,
+  shippingPaymentInfoQuery,
+  shopAddressQuery,
+  shippingRatesMutation,
   productSortQuery,
   discountQuery,
   refundQuery,
@@ -35,6 +38,11 @@ const {
   formatDiscounts,
   formatOfferTerms,
   formatOfferCart,
+  policyParagraphs,
+  paymentParagraphs,
+  formatShippingRates,
+  countryName,
+  notShippingCountryNames,
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
@@ -55,6 +63,24 @@ const { getCache, setCache } = require("./cache");
 // the matched category has few/no products or the catalog is huge.
 const CATEGORY_TIER_SCAN_MAX =
   Number(process.env.CATEGORY_TIER_SCAN_MAX) || 2000;
+
+// Longest get_shipping_payment_info waits for the home shipping rates.
+const HOME_RATES_WAIT_MS = Number(process.env.HOME_RATES_WAIT_MS) || 2000;
+
+// One fetch per key at a time: concurrent callers share the same promise
+// (e.g. a store's first shipping questions arriving together).
+const inflightFetches = new Map();
+const sharedFetch = (key, fetch) => {
+  if (!inflightFetches.has(key)) {
+    inflightFetches.set(
+      key,
+      Promise.resolve()
+        .then(fetch)
+        .finally(() => inflightFetches.delete(key)),
+    );
+  }
+  return inflightFetches.get(key);
+};
 
 const createMcpServer = (configs = {}) => {
   const {
@@ -1536,6 +1562,291 @@ const createMcpServer = (configs = {}) => {
             {
               type: "text",
               text: `Error checking offer codes: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ######### 6d. Shipping & Payment Info (cached) #########
+  // One Storefront/Admin call, retried only on dropped connections; Shopify's
+  // own errors are final.
+  const shopifyCall = async (query, variables, isAdmin = false) => {
+    for (let attempt = 1; ; attempt++) {
+      let res;
+      try {
+        res = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "POST",
+          "",
+          { query, variables },
+          isAdmin,
+        );
+      } catch (err) {
+        if (err?.response || attempt >= 3) throw err;
+        await new Promise((r) => setTimeout(r, 200 * attempt));
+        continue;
+      }
+      if (res?.errors) throw new Error(JSON.stringify(res.errors));
+      return res.data;
+    }
+  };
+
+  // Shipping options for an address, from a throwaway cart with `lines`
+  // (never the customer's cart). Shopify needs a zip or province code.
+  const shippingRatesFor = async (address, lines) => {
+    const data = await shopifyCall(shippingRatesMutation, {
+      input: {
+        lines: lines.map((l) => ({
+          merchandiseId: String(l.variant_id).startsWith("gid://")
+            ? l.variant_id
+            : `gid://shopify/ProductVariant/${l.variant_id}`,
+          quantity: l.quantity,
+        })),
+        delivery: {
+          addresses: [
+            {
+              address: { deliveryAddress: address },
+              selected: true,
+              oneTimeUse: true,
+            },
+          ],
+        },
+      },
+    });
+    return {
+      options: formatShippingRates(data?.cartCreate),
+      warnings: (data?.cartCreate?.warnings || []).map((w) => w.code),
+    };
+  };
+
+  // Rates for a small order (the cheapest item) to the store's own address,
+  // cached apart from the facts. Skipped when the address has no zip/province
+  // or the store doesn't ship to its own country; a failed call is not cached.
+  const homeRates = (info) => {
+    const cacheKey = `shipping_home_rates:${storeCode}`;
+    return sharedFetch(cacheKey, async () => {
+      const cached = await getCache(cacheKey);
+      if (cached) return cached.rates;
+      let rates = null;
+      try {
+        const home = (await shopifyCall(shopAddressQuery, {}, true))?.shop
+          ?.billingAddress;
+        const shipsHome = info.ships_to_countries.includes(home?.countryCodeV2);
+        if (
+          info.sample_variant_id &&
+          shipsHome &&
+          (home.zip || home.provinceCode)
+        ) {
+          const found = await shippingRatesFor(
+            {
+              countryCode: home.countryCodeV2,
+              ...(home.provinceCode ? { provinceCode: home.provinceCode } : {}),
+              ...(home.zip ? { zip: home.zip } : {}),
+            },
+            [{ variant_id: info.sample_variant_id, quantity: 1 }],
+          );
+          rates = { country_code: home.countryCodeV2, options: found.options };
+        }
+      } catch (err) {
+        console.warn("Home shipping rates failed:", err?.message);
+        return null;
+      }
+      try {
+        await setCache(cacheKey, { rates });
+      } catch (cacheError) {
+        console.warn(
+          "shipping_home_rates cache set failed:",
+          cacheError?.message,
+        );
+      }
+      return rates;
+    });
+  };
+
+  // The store's shipping & payment facts, cached per store (they change
+  // rarely): Storefront policy text, ship-to countries, payment settings,
+  // and the cheapest item, to price shipping with. One Shopify fetch per
+  // store at a time: concurrent requests share it.
+  const shippingPaymentInfo = async () => {
+    const cacheKey = `shipping_payment_info:${storeCode}`;
+    const cached = await getCache(cacheKey);
+    if (cached) return cached;
+    return sharedFetch(cacheKey, async () => {
+      const data = await shopifyCall(shippingPaymentInfoQuery, {});
+      const shop = data?.shop || {};
+      const sample = (data?.products?.nodes || [])
+        .flatMap((p) => p.variants?.nodes || [])
+        .find((v) => v.availableForSale && Number(v.price?.amount) > 0);
+      const info = {
+        ships_to_countries: shop.shipsToCountries || [],
+        ships_to_country_names: (shop.shipsToCountries || []).map(countryName),
+        not_shipping_country_names: notShippingCountryNames(
+          shop.shipsToCountries,
+        ),
+        store_country: shop.paymentSettings?.countryCode || null,
+        currency: shop.paymentSettings?.currencyCode || null,
+        payment: {
+          card_brands: shop.paymentSettings?.acceptedCardBrands || [],
+          digital_wallets: shop.paymentSettings?.supportedDigitalWallets || [],
+          // Shopify has no API for manual methods (cash on delivery, bank
+          // transfer) or third-party gateways: never inferred here.
+          other_methods_listed: false,
+          terms: paymentParagraphs(shop.termsOfService?.body),
+        },
+        shipping_policy: {
+          text: policyParagraphs(shop.shippingPolicy?.body)
+            .join("\n")
+            .slice(0, 20000),
+          url: shop.shippingPolicy?.url || null,
+        },
+        sample_variant_id: sample?.id || null,
+      };
+      try {
+        await setCache(cacheKey, info);
+      } catch (cacheError) {
+        console.warn(
+          "shipping_payment_info cache set failed:",
+          cacheError?.message,
+        );
+      }
+      return info;
+    });
+  };
+
+  server.tool(
+    "get_shipping_payment_info",
+    `The store's shipping and payment facts, for "how much is shipping?",
+    "how long does delivery take?", "do you ship to X?" and "what payment
+    methods do you accept?".
+
+    Returns { ships_to_countries, store_country, currency,
+    payment: { card_brands, digital_wallets, other_methods_listed, terms },
+    shipping_policy: { text, url },
+    home_rates: { country_code, options: [{ title, cost, currency }] } | null }.
+    home_rates price a small order (the cheapest item) to the store's own
+    country; larger orders may cost less (free-shipping offers and rates apply
+    at checkout). other_methods_listed is
+    false: the platform does not say whether cash on delivery, bank transfer
+    or other gateways are on. Cached for 30 minutes.
+    `,
+    {},
+    async () => {
+      try {
+        const facts = await shippingPaymentInfo();
+        // Home rates never hold the facts up for long: a slow first fetch
+        // keeps running and is cached for the next request.
+        const home = await Promise.race([
+          homeRates(facts),
+          new Promise((resolve) => setTimeout(resolve, HOME_RATES_WAIT_MS)),
+        ]);
+        // The sample variant is internal: used only to price shipping.
+        const info = { ...facts, home_rates: home ?? null };
+        delete info.sample_variant_id;
+        return { content: [{ type: "text", text: JSON.stringify(info) }] };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error fetching shipping and payment info: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ######### 6e. Shipping Rates for an Address #########
+  server.tool(
+    "get_shipping_rates",
+    `Real shipping options and costs to an address, from a throwaway cart
+    (the customer's cart is never touched).
+
+    Pass the cart lines to price the customer's cart; without lines, a small
+    order (the cheapest item) is priced. Shopify needs a zip/postal code or a province
+    code with the country.
+
+    Returns { country_code, ships_here, needs, options: [{ title, description,
+    method, cost, currency }], rates_available, basis }. rates_available is
+    false when the platform gave no rate for the address (the cost is then
+    shown at checkout). ships_here is false when the store
+    does not ship to that country. needs is "zip" when a zip or province is
+    required first. Free-shipping offers apply at checkout and are not
+    included in these costs.
+
+    Parameters:
+    @param {string} country_code  ISO 2 country code, e.g. "US", "IN"
+    @param {string} zip  Optional zip / postal / pin code
+    @param {string} province_code  Optional state / province code, e.g. "NY"
+    @param {object[]} lines  Optional [{ variant_id, quantity }]
+    `,
+    {
+      country_code: z.string().length(2),
+      zip: z.string().max(20).optional(),
+      province_code: z.string().max(10).optional(),
+      lines: z
+        .array(
+          z.object({
+            variant_id: z.string(),
+            quantity: z.number().int().min(1).max(99),
+          }),
+        )
+        .max(100)
+        .optional(),
+    },
+    async ({ country_code, zip, province_code, lines }) => {
+      try {
+        const country = country_code.toUpperCase();
+        const info = await shippingPaymentInfo();
+        const basis = lines?.length ? "cart" : "one_item";
+        const result = {
+          country_code: country,
+          country_name: countryName(country),
+          ships_here: true,
+          needs: null,
+          options: [],
+          basis,
+        };
+        if (!info.ships_to_countries.includes(country)) {
+          result.ships_here = false;
+        } else if (!zip && !province_code) {
+          result.needs = "zip";
+        } else {
+          const items = lines?.length
+            ? lines
+            : info.sample_variant_id
+              ? [{ variant_id: info.sample_variant_id, quantity: 1 }]
+              : [];
+          if (items.length) {
+            const rates = await shippingRatesFor(
+              {
+                countryCode: country,
+                ...(province_code
+                  ? { provinceCode: province_code.toUpperCase() }
+                  : {}),
+                ...(zip ? { zip } : {}),
+              },
+              items,
+            );
+            result.options = rates.options;
+          }
+          // No rate for this address (e.g. carrier-calculated): the cost
+          // is shown at checkout, never "free".
+          result.rates_available = result.options.length > 0;
+        }
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error fetching shipping rates: ${error.message}`,
             },
           ],
           isError: true,
