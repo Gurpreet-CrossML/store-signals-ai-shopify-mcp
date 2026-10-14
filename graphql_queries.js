@@ -698,6 +698,59 @@ const offerCartTestMutation = `mutation offerCartTest($input: CartInput!) {
   }
 }`;
 
+// Shipping and payment facts a store publishes (Storefront API), plus its
+// cheapest products, to price shipping for a small order.
+const shippingPaymentInfoQuery = `query shippingPaymentInfo {
+  shop {
+    shipsToCountries
+    paymentSettings {
+      acceptedCardBrands
+      supportedDigitalWallets
+      currencyCode
+      countryCode
+    }
+    shippingPolicy { body url }
+    termsOfService { body url }
+  }
+  products(first: 10, sortKey: PRICE) {
+    nodes {
+      variants(first: 5) {
+        nodes { id availableForSale price { amount } }
+      }
+    }
+  }
+}`;
+
+// The shop's own address (Admin API, no extra scope): a home address to
+// price shipping with.
+const shopAddressQuery = `query shopAddress {
+  shop {
+    billingAddress { countryCodeV2 provinceCode zip }
+  }
+}`;
+
+// Real shipping rates for an address, from a throwaway cart (never the
+// customer's cart).
+const shippingRatesMutation = `mutation shippingRates($input: CartInput!) {
+  cartCreate(input: $input) {
+    cart {
+      cost { subtotalAmount { amount currencyCode } }
+      deliveryGroups(first: 5) {
+        nodes {
+          deliveryOptions {
+            title
+            description
+            deliveryMethodType
+            estimatedCost { amount currencyCode }
+          }
+        }
+      }
+    }
+    userErrors { field message code }
+    warnings { code message }
+  }
+}`;
+
 module.exports = {
   productSearchByQuery,
   collectionProductsQuery,
@@ -713,4 +766,7 @@ module.exports = {
   discountQuery,
   refundQuery,
   getReturnableFulfillmentsQuery,
+  shippingPaymentInfoQuery,
+  shopAddressQuery,
+  shippingRatesMutation,
 };
