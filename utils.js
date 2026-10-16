@@ -13,6 +13,31 @@ const { getCache, setCache } = require("./cache");
 // Load environment variables from .env file
 dotenv.config();
 
+// Every HTTP call shares one keep-alive agent that verifies TLS, and has a
+// default timeout (a call may set its own).
+axios.defaults.httpsAgent = new https.Agent({ keepAlive: true });
+axios.defaults.timeout = 20000;
+
+// Errors keep only what callers and logs need. An axios error also carries
+// the request config and raw headers, i.e. the Shopify and OpenAI tokens, so
+// logging it whole would leak them.
+axios.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const safe = new Error(error?.message || "HTTP request failed");
+    safe.code = error?.code;
+    if (error?.response) {
+      safe.response = {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        headers: error.response.headers,
+        data: error.response.data,
+      };
+    }
+    return Promise.reject(safe);
+  },
+);
+
 const MCP_NAME = process.env.MCP_NAME;
 const MCP_VERSION = process.env.MCP_VERSION;
 const BACKEND_API_URL = process.env.BACKEND_API_URL;
@@ -45,6 +70,10 @@ const SortOption = Object.freeze({
 });
 
 // Mapping of user-friendly sort options to Shopify's sort keys and reverse flags
+// One Shopify API version (Admin GraphQL, Admin REST and Storefront) for
+// every call. SHOPIFY_API_VERSION in the environment overrides it.
+const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2026-10";
+
 const SHOPIFY_SORT_MAPPING = {
   [SortOption.RELEVANCE]: {
     sortKey: "RELEVANCE",
@@ -84,8 +113,8 @@ const callShopifyApi = async (
 ) => {
   try {
     let url = isAdmin
-      ? `${base_url}/admin/api/2025-10/graphql.json`
-      : `${base_url}/api/2025-01/graphql.json`;
+      ? `${base_url}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`
+      : `${base_url}/api/${SHOPIFY_API_VERSION}/graphql.json`;
     if (endpoint) {
       url = `${base_url}${endpoint}`;
     }
@@ -104,10 +133,6 @@ const callShopifyApi = async (
       headers,
       timeout: 15000, // 15 seconds timeout
       data: data ? JSON.stringify(data) : undefined,
-      // Bypass SSL certificate verification for development
-      httpsAgent: new https.Agent({
-        rejectUnauthorized: false,
-      }),
     };
 
     const response = await axios(config);
@@ -115,6 +140,8 @@ const callShopifyApi = async (
   } catch (error) {
     console.error(
       "Shopify API Error:",
+      error?.response?.status,
+      error?.code,
       error?.response?.data || error.message || error?.errors,
     );
     throw error;
@@ -857,19 +884,26 @@ const getCancelStatus = (o) => {
 };
 
 // Utility function to determine return eligibility based on order status and timestamps. It checks if the order is cancelled, if it has been delivered, and if it falls within the return window (e.g., 7 days from delivery) to determine if a return is allowed and provides an appropriate reason if not.
-const getReturnStatus = (o) => {
+// Delivery is not readable from o.fulfillment_status (that field only reports packing/shipping, never "delivered").
+// The caller resolves it from the fulfillments' shipment_status and passes it in, along with the delivery date the window is measured from.
+const getReturnStatus = (o, isDelivered, deliveredAt) => {
   if (o.cancelled_at) {
     return { allowed: false, reason: "Order is cancelled" };
   }
 
-  if (!["fulfilled", "delivered"].includes(o.fulfillment_status)) {
+  if (!isDelivered) {
     return { allowed: false, reason: "Order not delivered yet" };
   }
 
-  const createdDate = new Date(o.created_at);
+  // The return window runs from delivery, not from when the order was placed.
+  const deliveredDate = deliveredAt ? new Date(deliveredAt) : null;
+  if (!deliveredDate || Number.isNaN(deliveredDate.getTime())) {
+    return { allowed: true };
+  }
+
   const now = new Date();
 
-  const diffDays = (now - createdDate) / (1000 * 60 * 60 * 24);
+  const diffDays = (now - deliveredDate) / (1000 * 60 * 60 * 24);
 
   if (diffDays > 7) {
     return { allowed: false, reason: "Return window expired (7 days)" };
@@ -930,7 +964,7 @@ const getOrderFulfillmentData = async (order_id) => {
   try {
     const fulfillmentData = await callShopifyApi(
       "GET",
-      "/admin/api/2025-01/orders/" + order_id + "/fulfillment_orders.json",
+      `/admin/api/${SHOPIFY_API_VERSION}/orders/${order_id}/fulfillment_orders.json`,
     );
 
     if (fulfillmentData && fulfillmentData?.fulfillment_orders?.length) {
@@ -946,23 +980,31 @@ const getOrderFulfillmentData = async (order_id) => {
 
 // Utility function to format order details received from Shopify API, including calculating cancel and return eligibility based on order status and timestamps. This can be used to provide customers with clear information about their orders and their options for cancellation or returns.
 const formatOrder = async (o) => {
-  const cancelStatus = getCancelStatus(o);
-  const returnStatus = getReturnStatus(o);
-
   // Extract shipment status from active fulfillments only
   const fulfillments = o.fulfillments || [];
   const activeFulfillments = fulfillments.filter(
     (f) => (f.status || "").toLowerCase() !== "cancelled",
   );
-  const isDelivered = activeFulfillments.some(
+  const deliveredFulfillments = activeFulfillments.filter(
     (f) => (f.shipment_status || "").toLowerCase() === "delivered",
   );
+  const isDelivered = deliveredFulfillments.length > 0;
+
+  // When delivery happened, for the return window. A fulfillment's updated_at moves
+  // to the delivery time when the carrier reports it, so take the earliest of those.
+  const deliveredAt = deliveredFulfillments
+    .map((f) => f.updated_at || f.created_at)
+    .filter(Boolean)
+    .sort()[0];
 
   const shipmentStatus = isDelivered
     ? "delivered"
     : (o.fulfillment_status || "").toLowerCase() === "fulfilled"
       ? "shipped"
       : "not_shipped";
+
+  const cancelStatus = getCancelStatus(o);
+  const returnStatus = getReturnStatus(o, isDelivered, deliveredAt);
 
   // Build a lookup: line_item_id (numeric) -> { fulfillment_line_item_id, fulfillment_id, fulfillment_created_at }
   const fulfillmentLineItemMap = {};
@@ -1023,7 +1065,8 @@ const formatOrder = async (o) => {
     order_url: o?.order_status_url,
 
     subtotal: `${getCurrencySymbol(o.presentment_currency)}${o.subtotal_price || 0}`,
-    discount: `${getCurrencySymbol(o.presentment_currency)}${o.total_discounts}`,
+    discount: `${getCurrencySymbol(o.presentment_currency)}${o.total_discounts || 0}`,
+    shipping: `${getCurrencySymbol(o.presentment_currency)}${o.total_shipping_price_set?.shop_money?.amount || 0}`,
     total: `${getCurrencySymbol(o.presentment_currency)}${o.total_price || 0}`,
     tax: `${getCurrencySymbol(o.presentment_currency)}${o.total_tax || 0}`,
 
@@ -1069,7 +1112,7 @@ class ShopifyOrderEditor {
     const baseUrl = base_url || "";
     this.shopDomain = baseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
     this.accessToken = admin_token;
-    this.apiVersion = process.env.SHOPIFY_API_VERSION || "2024-04";
+    this.apiVersion = SHOPIFY_API_VERSION;
     this.graphqlEndpoint = `https://${this.shopDomain}/admin/api/${this.apiVersion}/graphql.json`;
   }
 
@@ -1231,7 +1274,7 @@ class ShopifyExchangeManager {
     const baseUrl = base_url || "";
     this.shopDomain = baseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
     this.accessToken = admin_token;
-    this.apiVersion = process.env.SHOPIFY_API_VERSION || "2025-04"; // Use latest
+    this.apiVersion = SHOPIFY_API_VERSION;
     this.graphqlEndpoint = `https://${this.shopDomain}/admin/api/${this.apiVersion}/graphql.json`;
   }
 
@@ -2029,8 +2072,264 @@ const verifyOrderIdentity = (
 };
 
 // Export environment variables and utility functions
+// ── Offer terms (get_offer_terms / check_offer_codes) ──
+
+// Plain numeric id from a Shopify GID.
+const gidNumber = (gid) =>
+  String(gid || "")
+    .split("/")
+    .pop();
+
+// What a discount gives: percent, fixed amount, or Buy X Get Y.
+const offerValue = (value) => {
+  if (!value) return null;
+  if (value.__typename === "DiscountPercentage") {
+    return { type: "percentage", value: Number(value.percentage) * 100 };
+  }
+  if (value.__typename === "DiscountAmount") {
+    return {
+      type: "amount",
+      value: Number(value.amount?.amount),
+      currency: value.amount?.currencyCode || null,
+      each_item: Boolean(value.appliesOnEachItem),
+    };
+  }
+  if (value.__typename === "DiscountOnQuantity") {
+    return {
+      type: "get_quantity",
+      quantity: value.quantity?.quantity ?? null,
+      effect: offerValue(value.effect),
+    };
+  }
+  return null;
+};
+
+// Which items a discount covers: everything, some products, or collections.
+const offerItems = (items) => {
+  if (!items || items.__typename === "AllDiscountItems") return { type: "all" };
+  if (items.__typename === "DiscountProducts") {
+    return {
+      type: "products",
+      product_ids: (items.products?.nodes || []).map((n) => gidNumber(n.id)),
+      product_titles: (items.products?.nodes || []).map((n) => n.title),
+      variant_ids: (items.productVariants?.nodes || []).map((n) =>
+        gidNumber(n.id),
+      ),
+    };
+  }
+  if (items.__typename === "DiscountCollections") {
+    return {
+      type: "collections",
+      collection_ids: (items.collections?.nodes || []).map((n) =>
+        gidNumber(n.id),
+      ),
+      collection_titles: (items.collections?.nodes || []).map((n) => n.title),
+    };
+  }
+  return { type: "unknown" };
+};
+
+// Minimum spend or quantity the cart needs.
+const offerMinimum = (minimum) => {
+  if (minimum?.__typename === "DiscountMinimumSubtotal") {
+    return {
+      type: "subtotal",
+      value: Number(minimum.greaterThanOrEqualToSubtotal?.amount),
+      currency: minimum.greaterThanOrEqualToSubtotal?.currencyCode || null,
+    };
+  }
+  if (minimum?.__typename === "DiscountMinimumQuantity") {
+    return {
+      type: "quantity",
+      value: Number(minimum.greaterThanOrEqualToQuantity),
+    };
+  }
+  return null;
+};
+
+// One discount node as a flat record the backend can decide on.
+const formatOfferTerms = (id, discount) => {
+  const type = discount?.__typename || "";
+  const kind = type.includes("Bxgy")
+    ? "bxgy"
+    : type.includes("FreeShipping")
+      ? "free_shipping"
+      : type.includes("App")
+        ? "app"
+        : "basic";
+  const contextType = discount?.context?.__typename || "";
+  const context =
+    {
+      DiscountBuyerSelectionAll: "all",
+      DiscountCustomers: "customers",
+      DiscountCustomerSegments: "segments",
+      DiscountMarkets: "markets",
+    }[contextType] || "unknown";
+  const gets = discount?.customerGets;
+  const buys = discount?.customerBuys;
+  return {
+    id: gidNumber(id),
+    title: discount?.title || "",
+    method: type.startsWith("DiscountCode") ? "code" : "automatic",
+    kind,
+    status: discount?.status || "",
+    starts_at: discount?.startsAt || null,
+    ends_at: discount?.endsAt || null,
+    summary: discount?.summary || "",
+    tags: discount?.tags || [],
+    context,
+    codes: (discount?.codes?.nodes || []).map((n) => n.code),
+    codes_count: discount?.codesCount?.count ?? null,
+    usage_limit: discount?.usageLimit ?? null,
+    used: discount?.asyncUsageCount ?? null,
+    once_per_customer: Boolean(discount?.appliesOncePerCustomer),
+    combines_with: {
+      product: Boolean(discount?.combinesWith?.productDiscounts),
+      order: Boolean(discount?.combinesWith?.orderDiscounts),
+      shipping: Boolean(discount?.combinesWith?.shippingDiscounts),
+    },
+    minimum: offerMinimum(discount?.minimumRequirement),
+    value: offerValue(gets?.value),
+    applies_to: offerItems(gets?.items),
+    one_time_purchase: gets?.appliesOnOneTimePurchase ?? true,
+    subscription: gets?.appliesOnSubscription ?? false,
+    buys: buys
+      ? {
+          quantity:
+            buys.value?.__typename === "DiscountQuantity"
+              ? Number(buys.value.quantity)
+              : null,
+          amount:
+            buys.value?.__typename === "DiscountPurchaseAmount"
+              ? Number(buys.value.amount)
+              : null,
+          items: offerItems(buys.items),
+        }
+      : null,
+    uses_per_order: discount?.usesPerOrderLimit ?? null,
+    max_shipping_price: discount?.maximumShippingPrice
+      ? Number(discount.maximumShippingPrice.amount)
+      : null,
+  };
+};
+
+// Sum of discount allocations, with the code or title each came from.
+const offerAllocations = (allocations) =>
+  (allocations || []).map((a) => ({
+    amount: Number(a?.discountedAmount?.amount || 0),
+    code: a?.code || null,
+    title: a?.title || null,
+  }));
+
+// The result of one throwaway test cart.
+const formatOfferCart = (payload) => {
+  const cart = payload?.cart;
+  if (!cart) return null;
+  const lineAllocations = (cart.lines?.nodes || []).flatMap((line) =>
+    offerAllocations(line.discountAllocations),
+  );
+  return {
+    currency: cart.cost?.totalAmount?.currencyCode || null,
+    subtotal: Number(cart.cost?.subtotalAmount?.amount || 0),
+    total: Number(cart.cost?.totalAmount?.amount || 0),
+    codes: cart.discountCodes || [],
+    allocations: [
+      ...offerAllocations(cart.discountAllocations),
+      ...lineAllocations,
+    ],
+    warnings: (payload.warnings || []).map((w) => ({
+      code: w.code,
+      message: w.message,
+    })),
+  };
+};
+
+// Policy HTML as plain paragraphs: block tags become line breaks.
+const policyParagraphs = (html) =>
+  String(html || "")
+    .replace(/<\/(p|li|h[1-6]|div|tr)>|<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&rsquo;/g, "'")
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+// Paragraphs of a policy that talk about paying ("Payment must be received
+// in full before dispatch").
+const PAYMENT_WORDS =
+  /\b(pay|paid|payment|payments|cash on delivery|cod|card|cards|upi|emi|paypal|wallet|bank transfer|net ?banking|installments?)\b/i;
+const paymentParagraphs = (html, max = 6) =>
+  policyParagraphs(html)
+    .filter((line) => PAYMENT_WORDS.test(line))
+    .slice(0, max)
+    .map((line) => line.slice(0, 500));
+
+// Shipping options of a throwaway cart, one entry per distinct option.
+// An option without a cost (e.g. a carrier rate still being calculated) is
+// left out: a missing cost must never read as free.
+// English name of an ISO country code ("AE" -> "United Arab Emirates"), so
+// a model never has to map codes itself; the code when Node has no name.
+const REGION_NAMES = new Intl.DisplayNames(["en"], { type: "region" });
+const countryName = (code) => {
+  try {
+    const name = REGION_NAMES.of(code);
+    return name && name !== "Unknown Region" ? name : code;
+  } catch {
+    return code;
+  }
+};
+
+// Every country code Node knows a name for, minus groupings and pseudo
+// codes (EU, UN, eurozone, outlying Oceania, X* test codes).
+const NOT_COUNTRIES = new Set(["EU", "EZ", "UN", "QO", "AN", "ZZ"]);
+const ALL_COUNTRY_CODES = (() => {
+  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const codes = [];
+  for (const a of letters) {
+    for (const b of letters) {
+      const code = a + b;
+      if (a === "X" || NOT_COUNTRIES.has(code)) continue;
+      if (countryName(code) !== code) codes.push(code);
+    }
+  }
+  return codes;
+})();
+
+// Names of the countries a store does NOT ship to, so policy text about
+// them can be left out of its answers.
+const notShippingCountryNames = (shipsTo) => {
+  const ships = new Set(shipsTo || []);
+  return ALL_COUNTRY_CODES.filter((c) => !ships.has(c)).map(countryName);
+};
+
+const formatShippingRates = (payload) => {
+  const seen = new Set();
+  const options = [];
+  for (const group of payload?.cart?.deliveryGroups?.nodes || []) {
+    for (const option of group.deliveryOptions || []) {
+      const amount = option.estimatedCost?.amount;
+      if (amount === undefined || amount === null || amount === "") continue;
+      const key = `${option.title}|${option.estimatedCost?.amount}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      options.push({
+        title: option.title,
+        description: option.description || null,
+        method: option.deliveryMethodType,
+        cost: Number(amount),
+        currency: option.estimatedCost?.currencyCode || null,
+      });
+    }
+  }
+  return options;
+};
+
 module.exports = {
   // envs
+  SHOPIFY_API_VERSION,
   MCP_NAME,
   MCP_VERSION,
   BACKEND_API_URL,
@@ -2049,6 +2348,13 @@ module.exports = {
   normalizeDims,
   getRelevanceScore,
   formatDiscounts,
+  formatOfferTerms,
+  formatOfferCart,
+  policyParagraphs,
+  paymentParagraphs,
+  formatShippingRates,
+  countryName,
+  notShippingCountryNames,
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
