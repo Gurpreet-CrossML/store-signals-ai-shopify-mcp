@@ -9,11 +9,19 @@ const {
   productSearchByQuery,
   collectionProductsQuery,
   productByIdQuery,
+  liveStockQuery,
+  offerTermsQuery,
+  offerByCodeQuery,
+  offerCartTestMutation,
+  shippingPaymentInfoQuery,
+  shopAddressQuery,
+  shippingRatesMutation,
   productSortQuery,
   discountQuery,
   refundQuery,
 } = require("./graphql_queries");
 const {
+  SHOPIFY_API_VERSION,
   MCP_NAME,
   MCP_VERSION,
   callShopifyApi,
@@ -28,6 +36,13 @@ const {
   normalizeDims,
   getRelevanceScore,
   formatDiscounts,
+  formatOfferTerms,
+  formatOfferCart,
+  policyParagraphs,
+  paymentParagraphs,
+  formatShippingRates,
+  countryName,
+  notShippingCountryNames,
   formatOrder,
   ShopifyOrderEditor,
   formatOrderTransactions,
@@ -48,6 +63,24 @@ const { getCache, setCache } = require("./cache");
 // the matched category has few/no products or the catalog is huge.
 const CATEGORY_TIER_SCAN_MAX =
   Number(process.env.CATEGORY_TIER_SCAN_MAX) || 2000;
+
+// Longest get_shipping_payment_info waits for the home shipping rates.
+const HOME_RATES_WAIT_MS = Number(process.env.HOME_RATES_WAIT_MS) || 2000;
+
+// One fetch per key at a time: concurrent callers share the same promise
+// (e.g. a store's first shipping questions arriving together).
+const inflightFetches = new Map();
+const sharedFetch = (key, fetch) => {
+  if (!inflightFetches.has(key)) {
+    inflightFetches.set(
+      key,
+      Promise.resolve()
+        .then(fetch)
+        .finally(() => inflightFetches.delete(key)),
+    );
+  }
+  return inflightFetches.get(key);
+};
 
 const createMcpServer = (configs = {}) => {
   const {
@@ -681,6 +714,147 @@ const createMcpServer = (configs = {}) => {
     },
   );
 
+  // ######### 2b. Live Stock (never cached) #########
+  server.tool(
+    "get_live_stock",
+    `Fetch live stock and variants for products and/or variants by ID.
+
+    Never cached and logs no product views: use it right before adding to or
+    changing the cart, so a sold-out variant is never added.
+
+    Returns { products: [{ product_id, title, available_for_sale, variants:
+    [{ variant_id, title, options, price, available_for_sale,
+    quantity_available, backorder }] }], not_found: [ids] }.
+    A product id returns all its variants; a variant id returns that variant
+    under its product. quantity_available is a cap only when backorder is
+    false (backorder = the store keeps selling when out of stock).
+
+    Parameters:
+    @param {string[]} product_ids  Numeric or GID product IDs
+    @param {string[]} variant_ids  Numeric or GID variant IDs
+    `,
+    {
+      product_ids: z
+        .array(z.string())
+        .max(50)
+        .default([])
+        .describe("Product IDs, numeric ('123') or GID."),
+      variant_ids: z
+        .array(z.string())
+        .max(50)
+        .default([])
+        .describe("Variant IDs, numeric ('456') or GID."),
+    },
+    async ({ product_ids, variant_ids }) => {
+      try {
+        const toGid = (kind, id) =>
+          String(id).startsWith("gid://")
+            ? String(id)
+            : `gid://shopify/${kind}/${id}`;
+        const gids = [
+          ...new Set([
+            ...product_ids.map((id) => toGid("Product", id)),
+            ...variant_ids.map((id) => toGid("ProductVariant", id)),
+          ]),
+        ];
+        if (gids.length === 0) {
+          return {
+            content: [
+              { type: "text", text: "No product or variant IDs given." },
+            ],
+            isError: true,
+          };
+        }
+
+        // Retry only network failures (no HTTP response): a dropped
+        // connection must not block an add-to-cart. Shopify's own errors
+        // are not retried.
+        let res;
+        for (let attempt = 1; ; attempt++) {
+          try {
+            res = await callShopifyApi(
+              baseUrl,
+              storefrontAccessToken,
+              adminAccessToken,
+              "POST",
+              "",
+              { query: liveStockQuery, variables: { ids: gids } },
+            );
+            break;
+          } catch (err) {
+            if (err?.response || attempt >= 3) throw err;
+            await new Promise((r) => setTimeout(r, 200 * attempt));
+          }
+        }
+        if (!res?.data?.nodes) {
+          throw new Error(JSON.stringify(res?.errors || "no data"));
+        }
+
+        const numericId = (gid) => String(gid).split("/").pop();
+        const variant = (v) => ({
+          variant_id: numericId(v.id),
+          title: v.title,
+          options: (v.selectedOptions || []).map((o) => ({
+            name: o.name,
+            value: o.value,
+          })),
+          price: v.price?.amount ?? null,
+          currency: v.price?.currencyCode ?? null,
+          available_for_sale: Boolean(v.availableForSale),
+          quantity_available: v.quantityAvailable ?? null,
+          backorder: Boolean(v.currentlyNotInStock),
+        });
+
+        const byProduct = new Map();
+        const notFound = [];
+        res.data.nodes.forEach((node, i) => {
+          if (!node) {
+            notFound.push(numericId(gids[i]));
+            return;
+          }
+          const product =
+            node.__typename === "Product" ? node : node.product || {};
+          const variants =
+            node.__typename === "Product" ? node.variants?.nodes || [] : [node];
+          const entry = byProduct.get(product.id) || {
+            product_id: numericId(product.id),
+            title: product.title,
+            available_for_sale: Boolean(product.availableForSale),
+            variants: [],
+          };
+          for (const v of variants) {
+            if (!entry.variants.some((e) => e.variant_id === numericId(v.id))) {
+              entry.variants.push(variant(v));
+            }
+          }
+          byProduct.set(product.id, entry);
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                products: [...byProduct.values()],
+                not_found: notFound,
+              }),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error fetching live stock: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
   // ######### 3. Fetch Sorted Products #########
   server.tool(
     "get_products_sorted",
@@ -1100,6 +1274,587 @@ const createMcpServer = (configs = {}) => {
     },
   );
 
+  // One Admin GraphQL query for the offer tools. When Shopify answers
+  // THROTTLED (its cost budget is spent), wait as long as Shopify says the
+  // budget needs to refill, then retry; dropped connections are retried
+  // too (at most 3 tries).
+  const offerAdminQuery = async (query, variables) => {
+    for (let attempt = 1; ; attempt++) {
+      let res;
+      try {
+        res = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "POST",
+          "",
+          { query, variables },
+          true,
+        );
+      } catch (err) {
+        // A dropped connection (no HTTP response) is retried; any other
+        // error is final.
+        if (err?.response || attempt >= 3) throw err;
+        await new Promise((r) => setTimeout(r, 200 * attempt));
+        continue;
+      }
+      const throttled = (res?.errors || []).some(
+        (e) => e?.extensions?.code === "THROTTLED",
+      );
+      if (!throttled) {
+        if (res?.errors) throw new Error(JSON.stringify(res.errors));
+        return res;
+      }
+      if (attempt >= 3) throw new Error("Shopify throttled the offer query");
+      const status = res?.extensions?.cost?.throttleStatus || {};
+      const needed =
+        (res?.extensions?.cost?.requestedQueryCost || 0) -
+        (status.currentlyAvailable || 0);
+      const waitMs = Math.min(
+        Math.max((needed / (status.restoreRate || 100)) * 1000, 300),
+        3000,
+      );
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  };
+
+  // Test discount codes on throwaway Storefront carts copying `lines`: one
+  // cart without codes, one per code. The customer's real cart is never
+  // touched. Shopify decides whether each code applies, the new total and
+  // why not. Retries only dropped connections; one code's failed cart
+  // doesn't fail the others.
+  const testOfferCodes = async (lines, codes, countryCode) => {
+    const cartLines = lines.map((l) => ({
+      merchandiseId: String(l.variant_id).startsWith("gid://")
+        ? l.variant_id
+        : `gid://shopify/ProductVariant/${l.variant_id}`,
+      quantity: l.quantity,
+    }));
+
+    const testCart = async (discountCodes) => {
+      const input = { lines: cartLines, discountCodes };
+      if (countryCode) input.buyerIdentity = { countryCode };
+      for (let attempt = 1; ; attempt++) {
+        let res;
+        try {
+          res = await callShopifyApi(
+            baseUrl,
+            storefrontAccessToken,
+            adminAccessToken,
+            "POST",
+            "",
+            { query: offerCartTestMutation, variables: { input } },
+          );
+        } catch (err) {
+          if (err?.response || attempt >= 3) throw err;
+          await new Promise((r) => setTimeout(r, 200 * attempt));
+          continue;
+        }
+        // Shopify's own errors are final: a retry gets the same answer.
+        if (res?.errors) throw new Error(JSON.stringify(res.errors));
+        const payload = res?.data?.cartCreate;
+        if (payload?.userErrors?.length) {
+          throw new Error(JSON.stringify(payload.userErrors));
+        }
+        return formatOfferCart(payload);
+      }
+    };
+
+    // The base cart is needed to compare totals; a code whose own cart
+    // fails is listed under `failed`, and the other codes still count.
+    const unique = [...new Set(codes.map((c) => c.trim()).filter(Boolean))];
+    const [settledBase, ...settled] = await Promise.allSettled([
+      testCart([]),
+      ...unique.map((c) => testCart([c])),
+    ]);
+    if (settledBase.status === "rejected") throw settledBase.reason;
+    const base = settledBase.value;
+    const failed = unique.filter((code, i) => {
+      if (settled[i].status === "fulfilled") return false;
+      console.error(
+        `Offer cart test failed for ${code}:`,
+        settled[i].reason?.message,
+      );
+      return true;
+    });
+
+    return {
+      base: {
+        currency: base.currency,
+        subtotal: base.subtotal,
+        total: base.total,
+        allocations: base.allocations,
+      },
+      codes: unique.flatMap((code, i) => {
+        if (settled[i].status === "rejected") return [];
+        const cart = settled[i].value;
+        const applicable = Boolean(
+          cart?.codes?.find((c) => c.code.toLowerCase() === code.toLowerCase())
+            ?.applicable,
+        );
+        return {
+          code,
+          applicable,
+          subtotal: cart?.subtotal ?? null,
+          total: cart?.total ?? null,
+          saving: applicable
+            ? Math.round((base.total - cart.total) * 100) / 100
+            : 0,
+          allocations: cart?.allocations || [],
+          warnings: cart?.warnings || [],
+        };
+      }),
+      failed,
+    };
+  };
+
+  const cartLinesSchema = z
+    .array(
+      z.object({
+        variant_id: z.string(),
+        quantity: z.number().int().min(1),
+      }),
+    )
+    .min(1)
+    .max(100);
+
+  // ######### 6b. Offer Terms (never cached) #########
+  server.tool(
+    "get_offer_terms",
+    `Fetch the full terms of the store's discounts, live (never cached).
+
+    Without a code: every ACTIVE discount (all types, code and automatic).
+    With a code: that one code whatever its status (active, expired or
+    scheduled), case-insensitive; an empty list when no such code exists.
+    With lines (and no code): also tests, in the same call, the active
+    single codes open to all customers (max 10) on a throwaway copy of
+    those cart lines, exactly like check_offer_codes; returned as "cart".
+
+    Returns { discounts: [{ id, title, method (code|automatic), kind
+    (basic|bxgy|free_shipping|app), status, starts_at, ends_at, summary,
+    tags, context (all|customers|segments|markets|unknown), codes,
+    codes_count, usage_limit, used, once_per_customer, combines_with,
+    minimum, value, applies_to, one_time_purchase, subscription, buys,
+    uses_per_order, max_shipping_price }], cart: {base, codes} | null }.
+    Contains private codes: never show this raw to a customer.
+
+    Parameters:
+    @param {string} code  Optional discount code to look up
+    @param {object[]} lines  Optional cart lines [{ variant_id, quantity }]
+    @param {string} country_code  Optional buyer country (ISO 2)
+    `,
+    {
+      code: z
+        .string()
+        .optional()
+        .describe(
+          "A discount code to look up (any status). Omit for all active.",
+        ),
+      lines: cartLinesSchema.optional(),
+      country_code: z.string().length(2).optional(),
+    },
+    async ({ code, lines, country_code }) => {
+      try {
+        const discounts = [];
+
+        if (code) {
+          // One code, any status.
+          const res = await offerAdminQuery(offerByCodeQuery, { code });
+          const node = res?.data?.codeDiscountNodeByCode;
+          if (node?.codeDiscount) {
+            discounts.push(formatOfferTerms(node.id, node.codeDiscount));
+          }
+        } else {
+          // Every active discount, page by page.
+          let after = null;
+          for (let page = 0; page < 5; page++) {
+            const res = await offerAdminQuery(offerTermsQuery, { after });
+            const connection = res?.data?.discountNodes;
+            for (const node of connection?.nodes || []) {
+              if (node?.discount) {
+                discounts.push(formatOfferTerms(node.id, node.discount));
+              }
+            }
+            if (!connection?.pageInfo?.hasNextPage) break;
+            after = connection.pageInfo.endCursor;
+          }
+        }
+
+        // With a cart: test the single codes open to all customers on it,
+        // in this same call. A failed test leaves cart null; the terms
+        // are still returned.
+        let cart = null;
+        if (lines && !code) {
+          const testable = discounts
+            .filter(
+              (d) =>
+                d.method === "code" &&
+                d.status === "ACTIVE" &&
+                d.context === "all" &&
+                d.kind !== "app" &&
+                d.codes_count === 1 &&
+                d.codes.length,
+            )
+            .map((d) => d.codes[0])
+            .slice(0, 10);
+          try {
+            cart = await testOfferCodes(lines, testable, country_code);
+          } catch (err) {
+            console.error("Offer cart test failed:", err?.message || err);
+          }
+        }
+
+        return {
+          content: [
+            { type: "text", text: JSON.stringify({ discounts, cart }) },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error fetching offer terms: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ######### 6c. Check Offer Codes on a Test Cart #########
+  server.tool(
+    "check_offer_codes",
+    `Test discount codes against a copy of the customer's cart.
+
+    Builds throwaway Storefront carts with the given lines (the customer's
+    real cart is never touched, nothing is applied): one without codes, and
+    one per code. Shopify itself decides whether each code applies, the
+    new total, and why it doesn't (warnings such as
+    DISCOUNT_PURCHASE_NOT_IN_RANGE, DISCOUNT_NO_ENTITLED_LINE_ITEMS,
+    DISCOUNT_USAGE_LIMIT_REACHED, DISCOUNT_CURRENTLY_INACTIVE).
+
+    Returns { base: {currency, subtotal, total, allocations}, codes:
+    [{ code, applicable, subtotal, total, saving, allocations, warnings }],
+    failed: [codes that could not be tested] }.
+    Totals are estimates: shipping and taxes are settled at checkout.
+
+    Parameters:
+    @param {object[]} lines  [{ variant_id, quantity }]
+    @param {string[]} codes  Codes to test (max 10)
+    @param {string} country_code  Optional buyer country (ISO 2)
+    `,
+    {
+      lines: cartLinesSchema,
+      codes: z.array(z.string()).max(10).default([]),
+      country_code: z.string().length(2).optional(),
+    },
+    async ({ lines, codes, country_code }) => {
+      try {
+        const result = await testOfferCodes(lines, codes, country_code);
+        return {
+          content: [{ type: "text", text: JSON.stringify(result) }],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error checking offer codes: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ######### 6d. Shipping & Payment Info (cached) #########
+  // One Storefront/Admin call, retried only on dropped connections; Shopify's
+  // own errors are final.
+  const shopifyCall = async (query, variables, isAdmin = false) => {
+    for (let attempt = 1; ; attempt++) {
+      let res;
+      try {
+        res = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "POST",
+          "",
+          { query, variables },
+          isAdmin,
+        );
+      } catch (err) {
+        if (err?.response || attempt >= 3) throw err;
+        await new Promise((r) => setTimeout(r, 200 * attempt));
+        continue;
+      }
+      if (res?.errors) throw new Error(JSON.stringify(res.errors));
+      return res.data;
+    }
+  };
+
+  // Shipping options for an address, from a throwaway cart with `lines`
+  // (never the customer's cart). Shopify needs a zip or province code.
+  const shippingRatesFor = async (address, lines) => {
+    const data = await shopifyCall(shippingRatesMutation, {
+      input: {
+        lines: lines.map((l) => ({
+          merchandiseId: String(l.variant_id).startsWith("gid://")
+            ? l.variant_id
+            : `gid://shopify/ProductVariant/${l.variant_id}`,
+          quantity: l.quantity,
+        })),
+        delivery: {
+          addresses: [
+            {
+              address: { deliveryAddress: address },
+              selected: true,
+              oneTimeUse: true,
+            },
+          ],
+        },
+      },
+    });
+    return {
+      options: formatShippingRates(data?.cartCreate),
+      warnings: (data?.cartCreate?.warnings || []).map((w) => w.code),
+    };
+  };
+
+  // Rates for a small order (the cheapest item) to the store's own address,
+  // cached apart from the facts. Skipped when the address has no zip/province
+  // or the store doesn't ship to its own country; a failed call is not cached.
+  const homeRates = (info) => {
+    const cacheKey = `shipping_home_rates:${storeCode}`;
+    return sharedFetch(cacheKey, async () => {
+      const cached = await getCache(cacheKey);
+      if (cached) return cached.rates;
+      let rates = null;
+      try {
+        const home = (await shopifyCall(shopAddressQuery, {}, true))?.shop
+          ?.billingAddress;
+        const shipsHome = info.ships_to_countries.includes(home?.countryCodeV2);
+        if (
+          info.sample_variant_id &&
+          shipsHome &&
+          (home.zip || home.provinceCode)
+        ) {
+          const found = await shippingRatesFor(
+            {
+              countryCode: home.countryCodeV2,
+              ...(home.provinceCode ? { provinceCode: home.provinceCode } : {}),
+              ...(home.zip ? { zip: home.zip } : {}),
+            },
+            [{ variant_id: info.sample_variant_id, quantity: 1 }],
+          );
+          rates = { country_code: home.countryCodeV2, options: found.options };
+        }
+      } catch (err) {
+        console.warn("Home shipping rates failed:", err?.message);
+        return null;
+      }
+      try {
+        await setCache(cacheKey, { rates });
+      } catch (cacheError) {
+        console.warn(
+          "shipping_home_rates cache set failed:",
+          cacheError?.message,
+        );
+      }
+      return rates;
+    });
+  };
+
+  // The store's shipping & payment facts, cached per store (they change
+  // rarely): Storefront policy text, ship-to countries, payment settings,
+  // and the cheapest item, to price shipping with. One Shopify fetch per
+  // store at a time: concurrent requests share it.
+  const shippingPaymentInfo = async () => {
+    const cacheKey = `shipping_payment_info:${storeCode}`;
+    const cached = await getCache(cacheKey);
+    if (cached) return cached;
+    return sharedFetch(cacheKey, async () => {
+      const data = await shopifyCall(shippingPaymentInfoQuery, {});
+      const shop = data?.shop || {};
+      const sample = (data?.products?.nodes || [])
+        .flatMap((p) => p.variants?.nodes || [])
+        .find((v) => v.availableForSale && Number(v.price?.amount) > 0);
+      const info = {
+        ships_to_countries: shop.shipsToCountries || [],
+        ships_to_country_names: (shop.shipsToCountries || []).map(countryName),
+        not_shipping_country_names: notShippingCountryNames(
+          shop.shipsToCountries,
+        ),
+        store_country: shop.paymentSettings?.countryCode || null,
+        currency: shop.paymentSettings?.currencyCode || null,
+        payment: {
+          card_brands: shop.paymentSettings?.acceptedCardBrands || [],
+          digital_wallets: shop.paymentSettings?.supportedDigitalWallets || [],
+          // Shopify has no API for manual methods (cash on delivery, bank
+          // transfer) or third-party gateways: never inferred here.
+          other_methods_listed: false,
+          terms: paymentParagraphs(shop.termsOfService?.body),
+        },
+        shipping_policy: {
+          text: policyParagraphs(shop.shippingPolicy?.body)
+            .join("\n")
+            .slice(0, 20000),
+          url: shop.shippingPolicy?.url || null,
+        },
+        sample_variant_id: sample?.id || null,
+      };
+      try {
+        await setCache(cacheKey, info);
+      } catch (cacheError) {
+        console.warn(
+          "shipping_payment_info cache set failed:",
+          cacheError?.message,
+        );
+      }
+      return info;
+    });
+  };
+
+  server.tool(
+    "get_shipping_payment_info",
+    `The store's shipping and payment facts, for "how much is shipping?",
+    "how long does delivery take?", "do you ship to X?" and "what payment
+    methods do you accept?".
+
+    Returns { ships_to_countries, store_country, currency,
+    payment: { card_brands, digital_wallets, other_methods_listed, terms },
+    shipping_policy: { text, url },
+    home_rates: { country_code, options: [{ title, cost, currency }] } | null }.
+    home_rates price a small order (the cheapest item) to the store's own
+    country; larger orders may cost less (free-shipping offers and rates apply
+    at checkout). other_methods_listed is
+    false: the platform does not say whether cash on delivery, bank transfer
+    or other gateways are on. Cached for 30 minutes.
+    `,
+    {},
+    async () => {
+      try {
+        const facts = await shippingPaymentInfo();
+        // Home rates never hold the facts up for long: a slow first fetch
+        // keeps running and is cached for the next request.
+        const home = await Promise.race([
+          homeRates(facts),
+          new Promise((resolve) => setTimeout(resolve, HOME_RATES_WAIT_MS)),
+        ]);
+        // The sample variant is internal: used only to price shipping.
+        const info = { ...facts, home_rates: home ?? null };
+        delete info.sample_variant_id;
+        return { content: [{ type: "text", text: JSON.stringify(info) }] };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error fetching shipping and payment info: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ######### 6e. Shipping Rates for an Address #########
+  server.tool(
+    "get_shipping_rates",
+    `Real shipping options and costs to an address, from a throwaway cart
+    (the customer's cart is never touched).
+
+    Pass the cart lines to price the customer's cart; without lines, a small
+    order (the cheapest item) is priced. Shopify needs a zip/postal code or a province
+    code with the country.
+
+    Returns { country_code, ships_here, needs, options: [{ title, description,
+    method, cost, currency }], rates_available, basis }. rates_available is
+    false when the platform gave no rate for the address (the cost is then
+    shown at checkout). ships_here is false when the store
+    does not ship to that country. needs is "zip" when a zip or province is
+    required first. Free-shipping offers apply at checkout and are not
+    included in these costs.
+
+    Parameters:
+    @param {string} country_code  ISO 2 country code, e.g. "US", "IN"
+    @param {string} zip  Optional zip / postal / pin code
+    @param {string} province_code  Optional state / province code, e.g. "NY"
+    @param {object[]} lines  Optional [{ variant_id, quantity }]
+    `,
+    {
+      country_code: z.string().length(2),
+      zip: z.string().max(20).optional(),
+      province_code: z.string().max(10).optional(),
+      lines: z
+        .array(
+          z.object({
+            variant_id: z.string(),
+            quantity: z.number().int().min(1).max(99),
+          }),
+        )
+        .max(100)
+        .optional(),
+    },
+    async ({ country_code, zip, province_code, lines }) => {
+      try {
+        const country = country_code.toUpperCase();
+        const info = await shippingPaymentInfo();
+        const basis = lines?.length ? "cart" : "one_item";
+        const result = {
+          country_code: country,
+          country_name: countryName(country),
+          ships_here: true,
+          needs: null,
+          options: [],
+          basis,
+        };
+        if (!info.ships_to_countries.includes(country)) {
+          result.ships_here = false;
+        } else if (!zip && !province_code) {
+          result.needs = "zip";
+        } else {
+          const items = lines?.length
+            ? lines
+            : info.sample_variant_id
+              ? [{ variant_id: info.sample_variant_id, quantity: 1 }]
+              : [];
+          if (items.length) {
+            const rates = await shippingRatesFor(
+              {
+                countryCode: country,
+                ...(province_code
+                  ? { provinceCode: province_code.toUpperCase() }
+                  : {}),
+                ...(zip ? { zip } : {}),
+              },
+              items,
+            );
+            result.options = rates.options;
+          }
+          // No rate for this address (e.g. carrier-calculated): the cost
+          // is shown at checkout, never "free".
+          result.rates_available = result.options.length > 0;
+        }
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error fetching shipping rates: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
   // ######### 9. Get Order Detail #########
   server.tool(
     "get_order_detail",
@@ -1159,7 +1914,7 @@ const createMcpServer = (configs = {}) => {
             storefrontAccessToken,
             adminAccessToken,
             "GET",
-            `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
+            `/admin/api/${SHOPIFY_API_VERSION}/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
           );
 
           orders = response?.orders || [];
@@ -1271,7 +2026,7 @@ const createMcpServer = (configs = {}) => {
           storefrontAccessToken,
           adminAccessToken,
           "GET",
-          `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
+          `/admin/api/${SHOPIFY_API_VERSION}/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
         );
 
         const orders = response?.orders || [];
@@ -1329,7 +2084,7 @@ const createMcpServer = (configs = {}) => {
           storefrontAccessToken,
           adminAccessToken,
           "POST",
-          `/admin/api/2024-04/orders/${order.id}/cancel.json`,
+          `/admin/api/${SHOPIFY_API_VERSION}/orders/${order.id}/cancel.json`,
           { reason: reason, email: true },
         );
 
@@ -1559,7 +2314,7 @@ const createMcpServer = (configs = {}) => {
             storefrontAccessToken,
             adminAccessToken,
             "GET",
-            `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
+            `/admin/api/${SHOPIFY_API_VERSION}/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
           );
 
           currentOrder = orderResponse?.orders?.[0];
@@ -1581,7 +2336,7 @@ const createMcpServer = (configs = {}) => {
             storefrontAccessToken,
             adminAccessToken,
             "GET",
-            `/admin/api/2024-04/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
+            `/admin/api/${SHOPIFY_API_VERSION}/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
           );
           if (
             !response ||
@@ -1631,7 +2386,7 @@ const createMcpServer = (configs = {}) => {
           storefrontAccessToken,
           adminAccessToken,
           "GET",
-          `/admin/api/2024-04/orders/${currentOrder.id}/transactions.json`,
+          `/admin/api/${SHOPIFY_API_VERSION}/orders/${currentOrder.id}/transactions.json`,
         );
 
         const formattedTransactions = formatOrderTransactions(
@@ -1709,7 +2464,7 @@ const createMcpServer = (configs = {}) => {
             storefrontAccessToken,
             adminAccessToken,
             "GET",
-            `/admin/api/2024-04/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
+            `/admin/api/${SHOPIFY_API_VERSION}/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
           );
 
           restOrder = ordersResponse?.orders?.[0];
@@ -1731,7 +2486,7 @@ const createMcpServer = (configs = {}) => {
             storefrontAccessToken,
             adminAccessToken,
             "GET",
-            `/admin/api/2024-04/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
+            `/admin/api/${SHOPIFY_API_VERSION}/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
           );
           if (
             !response ||
@@ -1784,7 +2539,7 @@ const createMcpServer = (configs = {}) => {
           "POST",
           "",
           { query: refundQuery, variables: { id: shopifyOrderGid } },
-          true, // isAdmin = true → uses /admin/api/2025-10/graphql.json
+          true, // isAdmin = true → Admin GraphQL API
         );
 
         const gqlOrder = graphqlResponse?.data?.order;
@@ -2381,7 +3136,7 @@ const createMcpServer = (configs = {}) => {
           storefrontAccessToken,
           adminAccessToken,
           "GET",
-          `/admin/api/2024-04/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
+          `/admin/api/${SHOPIFY_API_VERSION}/orders.json?email=${encodeURIComponent(customerEmail)}&status=any`,
         );
 
         if (
