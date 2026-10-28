@@ -19,6 +19,7 @@ const {
   productSortQuery,
   discountQuery,
   refundQuery,
+  orderCancelMutation,
 } = require("./graphql_queries");
 const {
   SHOPIFY_API_VERSION,
@@ -2039,15 +2040,20 @@ const createMcpServer = (configs = {}) => {
           `/admin/api/${SHOPIFY_API_VERSION}/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
         );
 
-        const orders = response?.orders || [];
-        if (!orders.length) {
+        // The name search can return other orders too: take only an exact match.
+        const order = (response?.orders || []).find(
+          (o) =>
+            o?.order_number == cleanOrderId ||
+            o?.name == `#${cleanOrderId}` ||
+            o?.name == cleanOrderId,
+        );
+        if (!order) {
           return {
             content: [{ type: "text", text: `Order #${order_id} not found.` }],
             isError: true,
           };
         }
 
-        const order = orders[0];
         const formatted = await formatOrder(order);
 
         if (order.cancelled_at) {
@@ -2089,26 +2095,53 @@ const createMcpServer = (configs = {}) => {
           };
         }
 
+        // Cancel through the Admin GraphQL API (the REST cancel endpoint
+        // answers 404 on this API version). Refunds to the original payment
+        // method, restocks and emails the customer. Shopify finishes the
+        // cancel as a background job, so the order shows cancelled shortly.
         const cancelResponse = await callShopifyApi(
           baseUrl,
           storefrontAccessToken,
           adminAccessToken,
           "POST",
-          `/admin/api/${SHOPIFY_API_VERSION}/orders/${order.id}/cancel.json`,
-          { reason: reason, email: true },
+          "",
+          {
+            query: orderCancelMutation,
+            variables: {
+              orderId:
+                order.admin_graphql_api_id || `gid://shopify/Order/${order.id}`,
+              reason: reason.toUpperCase(),
+              refundMethod: { originalPaymentMethodsRefund: true },
+              restock: true,
+              notifyCustomer: true,
+            },
+          },
+          true,
         );
 
-        if (!cancelResponse?.order) {
+        // Missing access or a refused cancel: say what Shopify said.
+        const result = cancelResponse?.data?.orderCancel;
+        const problems = [
+          ...(cancelResponse?.errors || []),
+          ...(result?.orderCancelUserErrors || []),
+        ].map((e) => e.message);
+        if (!result?.job || problems.length) {
+          console.error(
+            `cancel_order: refused | order_id=${cleanOrderId} | ${problems.join("; ")}`,
+          );
           return {
-            content: [{ type: "text", text: "Failed to cancel the order." }],
+            content: [
+              {
+                type: "text",
+                text: `Failed to cancel the order. ${problems.join("; ")}`.trim(),
+              },
+            ],
             isError: true,
           };
         }
 
-        const cancelled = cancelResponse.order;
-
         console.log(
-          `cancel_order: success | order_id=${cancelled.order_number} | email=${email} | session=${sessionId} | reason=${reason}`,
+          `cancel_order: success | order_id=${cleanOrderId} | job=${result.job.id} | email=${email} | session=${sessionId} | reason=${reason}`,
         );
 
         return {
@@ -2117,11 +2150,9 @@ const createMcpServer = (configs = {}) => {
               type: "text",
               text: JSON.stringify({
                 success: true,
-                order_id: cancelled.order_number,
-                cancelled_at: cancelled.cancelled_at,
-                cancel_reason: cancelled.cancel_reason,
-                financial_status: cancelled.financial_status,
-                message: `Order #${order_id} has been successfully cancelled.`,
+                order_id: order.order_number,
+                job_id: result.job.id,
+                message: `Order #${order_id} has been cancelled.`,
               }),
             },
           ],
