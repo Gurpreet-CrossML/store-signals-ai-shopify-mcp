@@ -2001,7 +2001,9 @@ const createMcpServer = (configs = {}) => {
   Parameters:
   @param {string} order_id - Order number (e.g. "1006")
   @param {string} email - Customer email
-  @param {string} reason - Cancellation reason
+  @param {string} reason - REQUIRED. One of Shopify's cancel reasons:
+    "customer" | "inventory" | "fraud" | "declined" | "other".
+    Use "customer" whenever the customer asked to cancel, whatever their own reason.
   `,
     {
       order_id: z
@@ -2016,7 +2018,15 @@ const createMcpServer = (configs = {}) => {
           "Order email (e.g. 'test@example.com'). Optional for logged-in users.",
         )
         .optional(),
-      reason: z.string().describe("Cancellation reason"),
+      // Shopify accepts only these values; anything else fails the cancel.
+      reason: z
+        .enum(["customer", "inventory", "fraud", "declined", "other"])
+        .describe(
+          "REQUIRED. Why the order is cancelled: 'customer' (the customer asked to " +
+            "cancel; use it for every customer request, whatever their own reason), " +
+            "'inventory' (items unavailable), 'fraud' (fraudulent order), " +
+            "'declined' (payment declined) or 'other'.",
+        ),
     },
     async ({ order_id, email, reason }) => {
       try {
