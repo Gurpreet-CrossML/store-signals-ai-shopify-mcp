@@ -751,6 +751,19 @@ const shippingRatesMutation = `mutation shippingRates($input: CartInput!) {
   }
 }`;
 
+// Cancel an order (Admin API; needs write_orders). Shopify finishes the
+// cancel as a background job, so the order shows cancelled shortly after.
+// - Variables: { orderId: ID!, reason: OrderCancelReason!,
+//   refundMethod: OrderCancelRefundMethodInput!, restock: Boolean!,
+//   notifyCustomer: Boolean }
+// - Returns: the job, and orderCancelUserErrors when Shopify refuses.
+const orderCancelMutation = `mutation OrderCancel($orderId: ID!, $reason: OrderCancelReason!, $refundMethod: OrderCancelRefundMethodInput!, $restock: Boolean!, $notifyCustomer: Boolean) {
+  orderCancel(orderId: $orderId, reason: $reason, refundMethod: $refundMethod, restock: $restock, notifyCustomer: $notifyCustomer) {
+    job { id done }
+    orderCancelUserErrors { field message code }
+  }
+}`;
+
 module.exports = {
   productSearchByQuery,
   collectionProductsQuery,
@@ -769,4 +782,5 @@ module.exports = {
   shippingPaymentInfoQuery,
   shopAddressQuery,
   shippingRatesMutation,
+  orderCancelMutation,
 };
