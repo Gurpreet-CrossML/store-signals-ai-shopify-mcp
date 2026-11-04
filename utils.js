@@ -978,6 +978,19 @@ const getOrderFulfillmentData = async (order_id) => {
   }
 };
 
+// The parts of an order address a change is checked on; null when there is none.
+const pickAddress = (a) =>
+  a
+    ? {
+        address1: a.address1 || null,
+        address2: a.address2 || null,
+        city: a.city || null,
+        province_code: a.province_code || null,
+        zip: a.zip || null,
+        country_code: a.country_code || null,
+      }
+    : null;
+
 // Utility function to format order details received from Shopify API, including calculating cancel and return eligibility based on order status and timestamps. This can be used to provide customers with clear information about their orders and their options for cancellation or returns.
 const formatOrder = async (o) => {
   // Extract shipment status from active fulfillments only
@@ -1063,6 +1076,17 @@ const formatOrder = async (o) => {
     note: o.note,
     discount_codes: o?.discount_codes,
     order_url: o?.order_status_url,
+    // Where the order goes and who it's billed to, for address changes.
+    shipping_address: pickAddress(o.shipping_address),
+    billing_address: pickAddress(o.billing_address),
+    // Carrier details of each shipment, for an order already on its way.
+    tracking: activeFulfillments
+      .filter((f) => f.tracking_number || f.tracking_url)
+      .map((f) => ({
+        company: f.tracking_company || null,
+        number: f.tracking_number || null,
+        url: f.tracking_url || null,
+      })),
 
     subtotal: `${getCurrencySymbol(o.presentment_currency)}${o.subtotal_price || 0}`,
     discount: `${getCurrencySymbol(o.presentment_currency)}${o.total_discounts || 0}`,
