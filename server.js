@@ -20,6 +20,7 @@ const {
   discountQuery,
   refundQuery,
   orderCancelMutation,
+  orderUpdateAddressMutation,
 } = require("./graphql_queries");
 const {
   SHOPIFY_API_VERSION,
@@ -1599,7 +1600,10 @@ const createMcpServer = (configs = {}) => {
 
   // Shipping options for an address, from a throwaway cart with `lines`
   // (never the customer's cart). Shopify needs a zip or province code.
-  const shippingRatesFor = async (address, lines) => {
+  // With `strict`, Shopify also checks the zip fits the country and state
+  // and says why in `errors`; it then wants the names the shop requires,
+  // so a throwaway name is sent (the cart is never used).
+  const shippingRatesFor = async (address, lines, strict = false) => {
     const data = await shopifyCall(shippingRatesMutation, {
       input: {
         lines: lines.map((l) => ({
@@ -1611,9 +1615,14 @@ const createMcpServer = (configs = {}) => {
         delivery: {
           addresses: [
             {
-              address: { deliveryAddress: address },
+              address: {
+                deliveryAddress: strict
+                  ? { firstName: "Customer", lastName: "Customer", ...address }
+                  : address,
+              },
               selected: true,
               oneTimeUse: true,
+              ...(strict ? { validationStrategy: "STRICT" } : {}),
             },
           ],
         },
@@ -1622,6 +1631,10 @@ const createMcpServer = (configs = {}) => {
     return {
       options: formatShippingRates(data?.cartCreate),
       warnings: (data?.cartCreate?.warnings || []).map((w) => w.code),
+      errors: (data?.cartCreate?.userErrors || []).map((e) => ({
+        code: e.code,
+        message: e.message,
+      })),
     };
   };
 
@@ -1779,13 +1792,19 @@ const createMcpServer = (configs = {}) => {
     shown at checkout). ships_here is false when the store
     does not ship to that country. needs is "zip" when a zip or province is
     required first. Free-shipping offers apply at checkout and are not
-    included in these costs.
+    included in these costs. With check_address, Shopify also checks the
+    zip fits the country and state: address_errors lists what's wrong
+    ([{ code, message }], e.g. INVALID_ZIP_CODE_FOR_PROVINCE), empty when
+    the address is valid.
 
     Parameters:
     @param {string} country_code  ISO 2 country code, e.g. "US", "IN"
     @param {string} zip  Optional zip / postal / pin code
     @param {string} province_code  Optional state / province code, e.g. "NY"
     @param {object[]} lines  Optional [{ variant_id, quantity }]
+    @param {string} address1  Optional street line, for check_address
+    @param {string} city  Optional city, for check_address
+    @param {boolean} check_address  Optional: also validate the address
     `,
     {
       country_code: z.string().length(2),
@@ -1800,8 +1819,19 @@ const createMcpServer = (configs = {}) => {
         )
         .max(100)
         .optional(),
+      address1: z.string().max(200).optional(),
+      city: z.string().max(100).optional(),
+      check_address: z.boolean().optional(),
     },
-    async ({ country_code, zip, province_code, lines }) => {
+    async ({
+      country_code,
+      zip,
+      province_code,
+      lines,
+      address1,
+      city,
+      check_address,
+    }) => {
       try {
         const country = country_code.toUpperCase();
         const info = await shippingPaymentInfo();
@@ -1825,16 +1855,29 @@ const createMcpServer = (configs = {}) => {
               ? [{ variant_id: info.sample_variant_id, quantity: 1 }]
               : [];
           if (items.length) {
-            const rates = await shippingRatesFor(
-              {
-                countryCode: country,
-                ...(province_code
-                  ? { provinceCode: province_code.toUpperCase() }
-                  : {}),
-                ...(zip ? { zip } : {}),
-              },
-              items,
-            );
+            const address = {
+              countryCode: country,
+              ...(province_code
+                ? { provinceCode: province_code.toUpperCase() }
+                : {}),
+              ...(zip ? { zip } : {}),
+              ...(check_address && address1 ? { address1 } : {}),
+              ...(check_address && city ? { city } : {}),
+            };
+            let rates = await shippingRatesFor(address, items, check_address);
+            if (check_address) {
+              // A field the shop requires (e.g. phone) isn't an invalid
+              // address; it only blocks the strict rates, so price again.
+              const invalid = rates.errors.filter(
+                (e) =>
+                  /ZIP|PROVINCE|COUNTRY|ADDRESS/.test(e.code || "") &&
+                  e.code !== "ADDRESS_FIELD_IS_REQUIRED",
+              );
+              result.address_errors = invalid;
+              if (!invalid.length && rates.errors.length) {
+                rates = await shippingRatesFor(address, items);
+              }
+            }
             result.options = rates.options;
           }
           // No rate for this address (e.g. carrier-calculated): the cost
@@ -2165,6 +2208,162 @@ const createMcpServer = (configs = {}) => {
           ],
           isError: true,
         };
+      }
+    },
+  );
+
+  // ######### 10b. Update Shipping Address #########
+  server.tool(
+    "update_shipping_address",
+    `Change where an order is delivered, before it ships.
+
+  The order's email must match. The name, company and phone on the order's
+  current shipping address are kept; only the address itself changes.
+  Refused when the order is cancelled or any part of it has shipped.
+
+  Parameters:
+  @param {string} order_id - Order number (e.g. "1006")
+  @param {string} email - The email on the order
+  @param {object} address - { address1, address2, city, province_code, zip, country_code }
+  `,
+    {
+      order_id: z
+        .string()
+        .trim()
+        .min(1, "Order ID is required")
+        .describe("Order number (e.g. '1026')"),
+      email: z.string().trim().min(3).describe("The email on the order"),
+      address: z.object({
+        address1: z.string().trim().min(1).describe("Street address"),
+        address2: z
+          .string()
+          .trim()
+          .optional()
+          .describe("Apartment, suite, etc."),
+        city: z.string().trim().min(1),
+        province_code: z
+          .string()
+          .trim()
+          .max(10)
+          .optional()
+          .describe("State / province code, e.g. 'NY'"),
+        zip: z.string().trim().min(1).max(20),
+        country_code: z
+          .string()
+          .trim()
+          .length(2)
+          .describe("ISO 2 country code, e.g. 'US'"),
+      }),
+    },
+    async ({ order_id, email, address }) => {
+      const refuse = (text) => ({
+        content: [{ type: "text", text }],
+        isError: true,
+      });
+      try {
+        const cleanOrderId = String(order_id).replace(/^#/, "").trim();
+        const response = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "GET",
+          `/admin/api/${SHOPIFY_API_VERSION}/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
+        );
+
+        // The name search can return other orders too: take only an exact match.
+        const order = (response?.orders || []).find(
+          (o) =>
+            o?.order_number == cleanOrderId ||
+            o?.name == `#${cleanOrderId}` ||
+            o?.name == cleanOrderId,
+        );
+        if (!order) return refuse(`Order #${cleanOrderId} not found.`);
+        if ((order.email || "").toLowerCase() !== email.toLowerCase()) {
+          return refuse("The email doesn't match this order.");
+        }
+        if (order.cancelled_at) return refuse("Order is cancelled.");
+        if (order.fulfillment_status) {
+          return refuse("Order has already shipped, fully or in part.");
+        }
+
+        // Keep who it goes to; change only where.
+        const current = order.shipping_address || {};
+        const shippingAddress = Object.fromEntries(
+          Object.entries({
+            firstName: current.first_name,
+            lastName: current.last_name,
+            company: current.company,
+            phone: current.phone,
+            address1: address.address1,
+            address2: address.address2 || "",
+            city: address.city,
+            provinceCode: address.province_code?.toUpperCase(),
+            zip: address.zip,
+            countryCode: address.country_code.toUpperCase(),
+          }).filter(([, value]) => value !== undefined && value !== null),
+        );
+
+        const updateResponse = await callShopifyApi(
+          baseUrl,
+          storefrontAccessToken,
+          adminAccessToken,
+          "POST",
+          "",
+          {
+            query: orderUpdateAddressMutation,
+            variables: {
+              input: {
+                id:
+                  order.admin_graphql_api_id ||
+                  `gid://shopify/Order/${order.id}`,
+                shippingAddress,
+              },
+            },
+          },
+          true,
+        );
+
+        // Missing access or a refused address: say what Shopify said.
+        const result = updateResponse?.data?.orderUpdate;
+        const problems = [
+          ...(updateResponse?.errors || []),
+          ...(result?.userErrors || []),
+        ].map((e) => e.message);
+        const saved = result?.order?.shippingAddress;
+        if (!saved || problems.length) {
+          console.error(
+            `update_shipping_address: refused | order_id=${cleanOrderId} | ${problems.join("; ")}`,
+          );
+          return refuse(
+            `Failed to update the address. ${problems.join("; ")}`.trim(),
+          );
+        }
+
+        console.log(
+          `update_shipping_address: success | order_id=${cleanOrderId} | session=${sessionId}`,
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                order_id: order.order_number,
+                shipping_address: {
+                  address1: saved.address1,
+                  address2: saved.address2,
+                  city: saved.city,
+                  province_code: saved.provinceCode,
+                  zip: saved.zip,
+                  country_code: saved.countryCodeV2,
+                },
+              }),
+            },
+          ],
+        };
+      } catch (error) {
+        console.error("update_shipping_address error:", error.message);
+        return refuse(`Error updating the address: ${error.message}`);
       }
     },
   );

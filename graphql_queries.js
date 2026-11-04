@@ -764,6 +764,19 @@ const orderCancelMutation = `mutation OrderCancel($orderId: ID!, $reason: OrderC
   }
 }`;
 
+// Order address update (Admin API, needs write_orders)
+// - Variables: { input: { id: ID!, shippingAddress: MailingAddressInput } }
+// - Returns: the address as saved, and userErrors when Shopify refuses.
+const orderUpdateAddressMutation = `mutation OrderUpdateAddress($input: OrderInput!) {
+  orderUpdate(input: $input) {
+    order {
+      name
+      shippingAddress { address1 address2 city provinceCode zip countryCodeV2 }
+    }
+    userErrors { field message }
+  }
+}`;
+
 module.exports = {
   productSearchByQuery,
   collectionProductsQuery,
@@ -783,4 +796,5 @@ module.exports = {
   shopAddressQuery,
   shippingRatesMutation,
   orderCancelMutation,
+  orderUpdateAddressMutation,
 };
