@@ -777,6 +777,57 @@ const orderUpdateAddressMutation = `mutation OrderUpdateAddress($input: OrderInp
   }
 }`;
 
+// Return details of one order (Admin API, needs read_orders, read_products, read_returns)
+// - Variables: { orderId: ID! }
+// - Returns: the order's return status, each line item's product type and
+//   tags, and how many of each fulfilled item can still be returned.
+const returnDetailsQuery = `query ReturnDetails($orderId: ID!) {
+  order(id: $orderId) {
+    returnStatus
+    lineItems(first: 50) { nodes { id product { productType tags } } }
+  }
+  returnableFulfillments(orderId: $orderId, first: 10) {
+    nodes {
+      returnableFulfillmentLineItems(first: 50) {
+        nodes { quantity fulfillmentLineItem { id lineItem { id } } }
+      }
+    }
+  }
+}`;
+
+// A customer's recent orders with their returns, for the return fraud check
+// (Admin API, needs read_orders, read_returns)
+// - Variables: { query: String! } e.g. 'email:a@b.com updated_at:>=2026-10-13'
+// - Returns: each order's shipping address and its returns with their dates.
+const customerReturnsQuery = `query CustomerReturns($query: String!) {
+  orders(first: 50, query: $query) {
+    nodes {
+      shippingAddress { address1 zip countryCodeV2 }
+      returns(first: 10) { nodes { createdAt status } }
+    }
+  }
+}`;
+
+// The store's return reasons (Admin API, needs read_returns)
+// - Returns: each reason's id, handle and name; deleted ones are still valid
+//   but replaced by better ones.
+const returnReasonDefinitionsQuery = `query ReturnReasons {
+  returnReasonDefinitions(first: 50) { nodes { id handle name deleted } }
+}`;
+
+// Return request (Admin API, needs write_returns)
+// - Creates a return with status REQUESTED: the merchant approves or declines
+//   it in Shopify. No label is made.
+// - Variables: { input: { orderId: ID!, returnLineItems: [{
+//   fulfillmentLineItemId, quantity, returnReasonDefinitionId | returnReason,
+//   customerNote }] } }
+const returnRequestMutation = `mutation ReturnRequest($input: ReturnRequestInput!) {
+  returnRequest(input: $input) {
+    return { id name status }
+    userErrors { field message }
+  }
+}`;
+
 module.exports = {
   productSearchByQuery,
   collectionProductsQuery,
@@ -797,4 +848,8 @@ module.exports = {
   shippingRatesMutation,
   orderCancelMutation,
   orderUpdateAddressMutation,
+  returnDetailsQuery,
+  customerReturnsQuery,
+  returnReasonDefinitionsQuery,
+  returnRequestMutation,
 };

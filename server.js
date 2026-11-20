@@ -21,6 +21,10 @@ const {
   refundQuery,
   orderCancelMutation,
   orderUpdateAddressMutation,
+  returnDetailsQuery,
+  customerReturnsQuery,
+  returnReasonDefinitionsQuery,
+  returnRequestMutation,
 } = require("./graphql_queries");
 const {
   SHOPIFY_API_VERSION,
@@ -53,6 +57,10 @@ const {
   ShopifyExchangeManager,
   getExchangePolicyEligibility,
   verifyOrderIdentity,
+  deliveredAtOf,
+  returnReasonFields,
+  recentReturnCounts,
+  returnLines,
   quoteSearchValue,
   groundTerm,
 } = require("./utils");
@@ -2364,6 +2372,290 @@ const createMcpServer = (configs = {}) => {
       } catch (error) {
         console.error("update_shipping_address error:", error.message);
         return refuse(`Error updating the address: ${error.message}`);
+      }
+    },
+  );
+
+  // The customer's order by its number, once the email on it matches.
+  // Returns { order } or { error } in plain words.
+  const findCustomerOrder = async (order_id, email) => {
+    const cleanOrderId = String(order_id).replace(/^#/, "").trim();
+    const response = await callShopifyApi(
+      baseUrl,
+      storefrontAccessToken,
+      adminAccessToken,
+      "GET",
+      `/admin/api/${SHOPIFY_API_VERSION}/orders.json?name=${encodeURIComponent(cleanOrderId)}&status=any`,
+    );
+    // The name search can return other orders too: take only an exact match.
+    const order = (response?.orders || []).find(
+      (o) =>
+        o?.order_number == cleanOrderId ||
+        o?.name == `#${cleanOrderId}` ||
+        o?.name == cleanOrderId,
+    );
+    if (!order) return { error: `Order #${cleanOrderId} not found.` };
+    if (!verifyOrderIdentity(order, { email }).verified) {
+      return { error: "The email doesn't match this order." };
+    }
+    return { order };
+  };
+
+  // Run an Admin GraphQL operation; returns { data } or { error } with what
+  // Shopify said.
+  const adminGraphql = async (query, variables = {}) => {
+    const response = await callShopifyApi(
+      baseUrl,
+      storefrontAccessToken,
+      adminAccessToken,
+      "POST",
+      "",
+      { query, variables },
+      true,
+    );
+    const errors = (response?.errors || []).map((e) => e.message);
+    if (!response?.data || errors.length) {
+      return { error: errors.join("; ") || "No answer from Shopify" };
+    }
+    return { data: response.data };
+  };
+
+  // ######### 10a. Return Details #########
+  server.tool(
+    "get_return_details",
+    `What a return of an order needs to know, read-only.
+
+  Gives when the order was delivered, whether a return is already open, each
+  item's product type, tags and how many can still be returned, and how many
+  returns this customer made lately (for the store's return checks).
+  The order's email must match.
+
+  Parameters:
+  @param {string} order_id - Order number (e.g. "1006")
+  @param {string} email - The email on the order
+  `,
+    {
+      order_id: z
+        .string()
+        .trim()
+        .min(1, "Order ID is required")
+        .describe("Order number (e.g. '1026')"),
+      email: z.string().trim().min(3).describe("The email on the order"),
+    },
+    async ({ order_id, email }) => {
+      const refuse = (text) => ({
+        content: [{ type: "text", text }],
+        isError: true,
+      });
+      try {
+        const found = await findCustomerOrder(order_id, email);
+        if (found.error) return refuse(found.error);
+        const order = found.order;
+        const orderGid =
+          order.admin_graphql_api_id || `gid://shopify/Order/${order.id}`;
+
+        // The order's return state, product types and returnable quantities.
+        const details = await adminGraphql(returnDetailsQuery, {
+          orderId: orderGid,
+        });
+        if (details.error) {
+          return refuse(`Couldn't read the order's returns. ${details.error}`);
+        }
+        const products = Object.fromEntries(
+          (details.data.order?.lineItems?.nodes || []).map((n) => [
+            n.id,
+            n.product || {},
+          ]),
+        );
+        const returnable = {};
+        for (const f of details.data.returnableFulfillments?.nodes || []) {
+          for (const n of f.returnableFulfillmentLineItems?.nodes || []) {
+            const lineItemId = n.fulfillmentLineItem?.lineItem?.id;
+            returnable[lineItemId] =
+              (returnable[lineItemId] || 0) + (n.quantity || 0);
+          }
+        }
+
+        // The customer's returns lately, from orders that changed in the
+        // last 30 days (a new return updates its order).
+        const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+          .toISOString()
+          .slice(0, 10);
+        const recent = await adminGraphql(customerReturnsQuery, {
+          query: `email:${quoteSearchValue(order.email)} updated_at:>=${since}`,
+        });
+        const customer = recent.error
+          ? { returns_last_30_days: null, return_addresses_last_7_days: null }
+          : recentReturnCounts(recent.data.orders?.nodes);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                order_number: String(order.order_number),
+                delivered_at: deliveredAtOf(order),
+                return_status: String(
+                  details.data.order?.returnStatus || "",
+                ).toLowerCase(),
+                items: (order.line_items || []).map((item) => {
+                  const gid = `gid://shopify/LineItem/${item.id}`;
+                  return {
+                    line_item_id: String(item.id),
+                    name: item.name,
+                    quantity: item.quantity,
+                    price: item.price,
+                    product_type: products[gid]?.productType || null,
+                    tags: products[gid]?.tags || [],
+                    returnable_quantity: returnable[gid] || 0,
+                  };
+                }),
+                customer,
+              }),
+            },
+          ],
+        };
+      } catch (error) {
+        console.error("get_return_details error:", error.message);
+        return refuse(`Error reading the return details: ${error.message}`);
+      }
+    },
+  );
+
+  // ######### 10b. Request Return #########
+  server.tool(
+    "request_return",
+    `Ask the store to take items back: creates a return REQUEST that the
+  merchant approves or declines in Shopify. It never approves a return and
+  never makes a shipping label.
+
+  The order's email must match, and each item must still be returnable.
+
+  Parameters:
+  @param {string} order_id - Order number (e.g. "1006")
+  @param {string} email - The email on the order
+  @param {array} items - [{ line_item_id, quantity }] from get_return_details
+  @param {string} reason - too_small | too_large | changed_mind | not_as_described | wrong_item | defective | style_or_color | other
+  @param {string} note - What the customer said, for the merchant
+  `,
+    {
+      order_id: z
+        .string()
+        .trim()
+        .min(1, "Order ID is required")
+        .describe("Order number (e.g. '1026')"),
+      email: z.string().trim().min(3).describe("The email on the order"),
+      items: z
+        .array(
+          z.object({
+            line_item_id: z.string().trim().min(1),
+            quantity: z.number().int().min(1),
+          }),
+        )
+        .min(1)
+        .describe("The items to return, from get_return_details"),
+      reason: z
+        .enum([
+          "too_small",
+          "too_large",
+          "changed_mind",
+          "not_as_described",
+          "wrong_item",
+          "defective",
+          "style_or_color",
+          "other",
+        ])
+        .describe("Why the customer returns them"),
+      note: z
+        .string()
+        .trim()
+        .max(500)
+        .optional()
+        .describe("What the customer said, for the merchant"),
+    },
+    async ({ order_id, email, items, reason, note }) => {
+      const refuse = (text) => ({
+        content: [{ type: "text", text }],
+        isError: true,
+      });
+      try {
+        const found = await findCustomerOrder(order_id, email);
+        if (found.error) return refuse(found.error);
+        const order = found.order;
+        if (order.cancelled_at) return refuse("Order is cancelled.");
+        const orderGid =
+          order.admin_graphql_api_id || `gid://shopify/Order/${order.id}`;
+
+        // Which shipped units go back, checked against what's still returnable.
+        const details = await adminGraphql(returnDetailsQuery, {
+          orderId: orderGid,
+        });
+        if (details.error) {
+          return refuse(`Couldn't read the order's returns. ${details.error}`);
+        }
+        const picked = returnLines(
+          details.data.returnableFulfillments?.nodes,
+          items,
+        );
+        if (picked.error) return refuse(picked.error);
+
+        // The store's own return reason for this one, cached per store.
+        const cacheKey = `return_reasons:${storeCode}`;
+        let definitions = await getCache(cacheKey);
+        if (!definitions) {
+          const reasons = await adminGraphql(returnReasonDefinitionsQuery);
+          definitions = reasons.data?.returnReasonDefinitions?.nodes || [];
+          if (definitions.length) await setCache(cacheKey, definitions);
+        }
+        const reasonFields = returnReasonFields(definitions, reason);
+
+        const requested = await adminGraphql(returnRequestMutation, {
+          input: {
+            orderId: orderGid,
+            returnLineItems: picked.lines.map((line) => ({
+              ...line,
+              ...reasonFields,
+              ...(note ? { customerNote: note } : {}),
+            })),
+          },
+        });
+        // Missing access or a refused request: say what Shopify said.
+        const result = requested.data?.returnRequest;
+        const problems = [
+          ...(requested.error ? [requested.error] : []),
+          ...(result?.userErrors || []).map((e) => e.message),
+        ];
+        if (!result?.return || problems.length) {
+          console.error(
+            `request_return: refused | order_id=${order.order_number} | ${problems.join("; ")}`,
+          );
+          return refuse(
+            `Failed to request the return. ${problems.join("; ")}`.trim(),
+          );
+        }
+
+        console.log(
+          `request_return: success | order_id=${order.order_number} | return=${result.return.name} | session=${sessionId}`,
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                order_id: String(order.order_number),
+                return: {
+                  id: result.return.id,
+                  name: result.return.name,
+                  status: String(result.return.status || "").toLowerCase(),
+                },
+              }),
+            },
+          ],
+        };
+      } catch (error) {
+        console.error("request_return error:", error.message);
+        return refuse(`Error requesting the return: ${error.message}`);
       }
     },
   );

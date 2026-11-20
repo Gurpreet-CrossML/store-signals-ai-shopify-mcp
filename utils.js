@@ -912,6 +912,120 @@ const getReturnStatus = (o, isDelivered, deliveredAt) => {
   return { allowed: true };
 };
 
+// When an order was delivered, for the return window: the earliest delivery of
+// its active fulfillments. A fulfillment's updated_at moves to the delivery time
+// when the carrier reports it. Null while nothing is delivered.
+const deliveredAtOf = (o) =>
+  (o.fulfillments || [])
+    .filter((f) => (f.status || "").toLowerCase() !== "cancelled")
+    .filter((f) => (f.shipment_status || "").toLowerCase() === "delivered")
+    .map((f) => f.updated_at || f.created_at)
+    .filter(Boolean)
+    .sort()[0] || null;
+
+// Return reasons a caller may give (platform-neutral), with the words that find
+// the store's matching Shopify return reason, and the older reason enum used
+// when the store has no matching one.
+const RETURN_REASONS = {
+  too_small: { words: /small/i, legacy: "SIZE_TOO_SMALL" },
+  too_large: { words: /big|large/i, legacy: "SIZE_TOO_LARGE" },
+  changed_mind: { words: /unwanted|changed/i, legacy: "UNWANTED" },
+  not_as_described: {
+    words: /not.?as.?described/i,
+    legacy: "NOT_AS_DESCRIBED",
+  },
+  wrong_item: { words: /wrong/i, legacy: "WRONG_ITEM" },
+  defective: { words: /damag|defect/i, legacy: "DEFECTIVE" },
+  style_or_color: { words: /style|colou?r/i, legacy: "STYLE" },
+  other: { words: /^other/i, legacy: "OTHER" },
+};
+
+// The store's return reason for a caller's reason: the id of the first
+// non-deleted definition whose handle or name has its words, else the older
+// enum. Never both.
+const returnReasonFields = (definitions, reason) => {
+  const known = RETURN_REASONS[reason] || RETURN_REASONS.other;
+  const match = (definitions || []).find(
+    (d) =>
+      !d.deleted && (known.words.test(d.handle) || known.words.test(d.name)),
+  );
+  return match
+    ? { returnReasonDefinitionId: match.id }
+    : { returnReason: known.legacy };
+};
+
+// Days, as milliseconds, for the return fraud check windows.
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// A customer's recent return activity from their orders (customerReturnsQuery):
+// returns made in the last 30 days, and how many different shipping addresses
+// the orders returned in the last 7 days went to. Cancelled returns don't count.
+const recentReturnCounts = (orders, now = Date.now()) => {
+  let returns30 = 0;
+  const addresses7 = new Set();
+  for (const order of orders || []) {
+    const returns = (order.returns?.nodes || []).filter(
+      (r) => r.status !== "CANCELED" && r.createdAt,
+    );
+    returns30 += returns.filter(
+      (r) => now - Date.parse(r.createdAt) <= 30 * DAY_MS,
+    ).length;
+    const a = order.shippingAddress;
+    if (a && returns.some((r) => now - Date.parse(r.createdAt) <= 7 * DAY_MS)) {
+      addresses7.add(
+        [a.address1, a.zip, a.countryCodeV2]
+          .map((part) =>
+            String(part || "")
+              .replace(/\s+/g, "")
+              .toLowerCase(),
+          )
+          .join("|"),
+      );
+    }
+  }
+  return {
+    returns_last_30_days: returns30,
+    return_addresses_last_7_days: addresses7.size,
+  };
+};
+
+// Turn the items a caller wants back ([{ line_item_id, quantity }]) into the
+// fulfillment line items Shopify returns, from returnableFulfillments nodes.
+// Returns { lines } or { error } when an item can't be returned in that number.
+const returnLines = (fulfillments, items) => {
+  const open = [];
+  for (const f of fulfillments || []) {
+    for (const n of f.returnableFulfillmentLineItems?.nodes || []) {
+      open.push({
+        lineItemId: String(n.fulfillmentLineItem?.lineItem?.id || ""),
+        fulfillmentLineItemId: n.fulfillmentLineItem?.id,
+        left: n.quantity || 0,
+      });
+    }
+  }
+  const lines = [];
+  for (const item of items) {
+    const gid = `gid://shopify/LineItem/${item.line_item_id}`;
+    let wanted = item.quantity;
+    for (const slot of open.filter((s) => s.lineItemId === gid && s.left > 0)) {
+      const take = Math.min(wanted, slot.left);
+      lines.push({
+        fulfillmentLineItemId: slot.fulfillmentLineItemId,
+        quantity: take,
+      });
+      slot.left -= take;
+      wanted -= take;
+      if (!wanted) break;
+    }
+    if (wanted) {
+      return {
+        error: `Item ${item.line_item_id} can't be returned in that quantity (already returned, or not delivered).`,
+      };
+    }
+  }
+  return { lines };
+};
+
 // Utility function to calculate the total refunded amount for an order by summing up the amounts of all successful refund transactions. This can be used to display the total refunded amount to customers or for internal accounting purposes.
 function getRefundedAmount(order) {
   return (order.refunds || []).reduce((total, refund) => {
@@ -1003,12 +1117,7 @@ const formatOrder = async (o) => {
   );
   const isDelivered = deliveredFulfillments.length > 0;
 
-  // When delivery happened, for the return window. A fulfillment's updated_at moves
-  // to the delivery time when the carrier reports it, so take the earliest of those.
-  const deliveredAt = deliveredFulfillments
-    .map((f) => f.updated_at || f.created_at)
-    .filter(Boolean)
-    .sort()[0];
+  const deliveredAt = deliveredAtOf(o);
 
   const shipmentStatus = isDelivered
     ? "delivered"
@@ -2387,6 +2496,10 @@ module.exports = {
   ShopifyExchangeManager,
   getExchangePolicyEligibility,
   verifyOrderIdentity,
+  deliveredAtOf,
+  returnReasonFields,
+  recentReturnCounts,
+  returnLines,
   isConsumableProductType,
   quoteSearchValue,
   groundTerm,
