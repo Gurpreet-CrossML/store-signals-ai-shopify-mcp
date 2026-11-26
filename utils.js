@@ -954,6 +954,19 @@ const returnReasonFields = (definitions, reason) => {
     : { returnReason: known.legacy };
 };
 
+// Shopify's longest customerNote on one return line.
+const RETURN_LINE_NOTE_MAX = 300;
+
+// One return line's note: the item's own words first (e.g. an "other"
+// reason), then the note for the whole request, cut to Shopify's limit.
+// Empty when there is neither.
+const returnLineNote = (own, shared) =>
+  [own, shared]
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .join(" | ")
+    .slice(0, RETURN_LINE_NOTE_MAX);
+
 // Days, as milliseconds, for the return fraud check windows.
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -989,8 +1002,9 @@ const recentReturnCounts = (orders, now = Date.now()) => {
   };
 };
 
-// Turn the items a caller wants back ([{ line_item_id, quantity }]) into the
-// fulfillment line items Shopify returns, from returnableFulfillments nodes.
+// Turn the items a caller wants back ([{ line_item_id, quantity, reason?,
+// note? }]) into the fulfillment line items Shopify returns, from
+// returnableFulfillments nodes. Each line keeps its item's own reason and note.
 // Returns { lines } or { error } when an item can't be returned in that number.
 const returnLines = (fulfillments, items) => {
   const open = [];
@@ -1012,6 +1026,8 @@ const returnLines = (fulfillments, items) => {
       lines.push({
         fulfillmentLineItemId: slot.fulfillmentLineItemId,
         quantity: take,
+        reason: item.reason,
+        note: item.note,
       });
       slot.left -= take;
       wanted -= take;
@@ -2498,6 +2514,7 @@ module.exports = {
   verifyOrderIdentity,
   deliveredAtOf,
   returnReasonFields,
+  returnLineNote,
   recentReturnCounts,
   returnLines,
   isConsumableProductType,
