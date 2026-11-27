@@ -59,6 +59,7 @@ const {
   verifyOrderIdentity,
   deliveredAtOf,
   returnReasonFields,
+  returnLineNote,
   recentReturnCounts,
   returnLines,
   quoteSearchValue,
@@ -2534,8 +2535,8 @@ const createMcpServer = (configs = {}) => {
   Parameters:
   @param {string} order_id - Order number (e.g. "1006")
   @param {string} email - The email on the order
-  @param {array} items - [{ line_item_id, quantity }] from get_return_details
-  @param {string} reason - too_small | too_large | changed_mind | not_as_described | wrong_item | defective | style_or_color | other
+  @param {array} items - [{ line_item_id, quantity, reason?, note? }] from get_return_details; an item's own reason and note win over the ones below
+  @param {string} reason - too_small | too_large | changed_mind | not_as_described | wrong_item | defective | style_or_color | other; for items without their own
   @param {string} note - What the customer said, for the merchant
   `,
     {
@@ -2550,6 +2551,25 @@ const createMcpServer = (configs = {}) => {
           z.object({
             line_item_id: z.string().trim().min(1),
             quantity: z.number().int().min(1),
+            reason: z
+              .enum([
+                "too_small",
+                "too_large",
+                "changed_mind",
+                "not_as_described",
+                "wrong_item",
+                "defective",
+                "style_or_color",
+                "other",
+              ])
+              .optional()
+              .describe("Why the customer returns this item"),
+            note: z
+              .string()
+              .trim()
+              .max(300)
+              .optional()
+              .describe("The customer's own words for this item"),
           }),
         )
         .min(1)
@@ -2607,17 +2627,20 @@ const createMcpServer = (configs = {}) => {
           definitions = reasons.data?.returnReasonDefinitions?.nodes || [];
           if (definitions.length) await setCache(cacheKey, definitions);
         }
-        const reasonFields = returnReasonFields(definitions, reason);
+        // Each line with its item's own reason and note, else the request's.
+        const returnLineItems = picked.lines.map(
+          ({ reason: own, note: said, ...line }) => {
+            const customerNote = returnLineNote(said, note);
+            return {
+              ...line,
+              ...returnReasonFields(definitions, own || reason),
+              ...(customerNote ? { customerNote } : {}),
+            };
+          },
+        );
 
         const requested = await adminGraphql(returnRequestMutation, {
-          input: {
-            orderId: orderGid,
-            returnLineItems: picked.lines.map((line) => ({
-              ...line,
-              ...reasonFields,
-              ...(note ? { customerNote: note } : {}),
-            })),
-          },
+          input: { orderId: orderGid, returnLineItems },
         });
         // Missing access or a refused request: say what Shopify said.
         const result = requested.data?.returnRequest;
